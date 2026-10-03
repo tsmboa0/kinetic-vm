@@ -62,7 +62,6 @@ include = [
   "/Cargo.lock",
   "/LICENSE*",
   "/README.md",
-  "/web/dist/**/*",
   "/locales/**/*",
 ]
 
