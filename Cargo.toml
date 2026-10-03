@@ -447,7 +447,6 @@ panic = "abort"
 # binary build, so the assemble()-only seal holds in production.
 zeroclaw-runtime = { workspace = true, features = ["test-util"] }
 tempfile = "3.26"
-criterion = { version = "0.8", features = ["async_tokio"] }
 wiremock = "0.6"
 scopeguard = "1.2"
 rcgen = "0.13"
@@ -496,7 +495,3 @@ path = "tests/plugin_channel_runtime_e2e.rs"
 [[test]]
 name = "channel_egress_e2e"
 path = "tests/channel_egress_e2e.rs"
-
-[[bench]]
-name = "agent_benchmarks"
-harness = false

@@ -12,9 +12,6 @@ mod config_save_isolation;
 #[path = "architecture/cli_fluent_coverage.rs"]
 mod cli_fluent_coverage;
 
-#[path = "architecture/ci_runner_labels.rs"]
-mod ci_runner_labels;
-
 #[path = "architecture/auth_boundary.rs"]
 mod auth_boundary;
 
