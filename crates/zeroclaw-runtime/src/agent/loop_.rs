@@ -1612,7 +1612,6 @@ pub async fn run(
             agent_alias,
             runtime.clone(),
             mem.clone(),
-            &config.browser,
             &config.http_request,
             &config.web_fetch,
             &config.data_dir,
@@ -1881,12 +1880,6 @@ pub async fn run(
         "image_info",
         "Read image file metadata (format, dimensions, size) and optionally base64-encode it. Use when: inspecting images, preparing visual data for analysis.",
     ));
-        if config.browser.enabled {
-            tool_descs.push((
-                "browser_open",
-                "Open approved HTTPS URLs in system browser (allowlist-only, no scraping)",
-            ));
-        }
         tool_descs.push((
         "schedule",
         "Manage scheduled tasks (create/list/get/cancel/pause/resume). Supports recurring cron and one-shot delays.",
@@ -3540,7 +3533,6 @@ async fn process_message_inner(
             agent_alias,
             runtime.clone(),
             mem.clone(),
-            &config.browser,
             &config.http_request,
             &config.web_fetch,
             &config.data_dir,
@@ -3698,9 +3690,6 @@ async fn process_message_inner(
                 "read_skill",
                 "Load the full source for an available skill by name.",
             ));
-        }
-        if config.browser.enabled {
-            tool_descs.push(("browser_open", "Open approved URLs in browser."));
         }
         tool_descs.push((
             "channel_room",
@@ -19343,7 +19332,6 @@ Let me check the result."#;
             &risk,
             "test",
             mem,
-            &config.browser,
             &config.http_request,
             &config.web_fetch,
             &security.workspace_dir,

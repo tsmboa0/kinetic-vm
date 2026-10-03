@@ -2979,7 +2979,6 @@ pub(crate) async fn assemble_owned_execution_with_admission(
         alias,
         runtime.clone(),
         memory,
-        &config.browser,
         &config.http_request,
         &config.web_fetch,
         &config.data_dir,

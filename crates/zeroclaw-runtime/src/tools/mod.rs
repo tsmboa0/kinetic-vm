@@ -41,9 +41,6 @@ pub use zeroclaw_tools::a2a_client::{
 pub use zeroclaw_tools::ask_user::AskUserTool;
 pub use zeroclaw_tools::ask_user::ChannelMapHandle;
 pub use zeroclaw_tools::backup_tool::BackupTool;
-pub use zeroclaw_tools::browser::{BrowserTool, ComputerUseConfig};
-pub use zeroclaw_tools::browser_delegate::BrowserDelegateTool;
-pub use zeroclaw_tools::browser_open::BrowserOpenTool;
 pub use zeroclaw_tools::calculator::CalculatorTool;
 pub use zeroclaw_tools::canvas::{ALLOWED_CONTENT_TYPES, MAX_CONTENT_SIZE};
 pub use zeroclaw_tools::canvas::{CanvasStore, CanvasTool};
@@ -86,7 +83,6 @@ pub use zeroclaw_tools::pipeline::PipelineTool;
 pub use zeroclaw_tools::poll::PollTool;
 pub use zeroclaw_tools::proxy_config::ProxyConfigTool;
 pub use zeroclaw_tools::reaction::ReactionTool;
-pub use zeroclaw_tools::screenshot::ScreenshotTool;
 pub use zeroclaw_tools::send_via::{
     AgentPeerGroupResolver, SendViaTool, TURN_ROUTING, TurnRoutingHandle,
 };
@@ -94,7 +90,6 @@ pub use zeroclaw_tools::sessions::{
     AcpSessionReadView, SessionDeleteTool, SessionResetTool, SessionsCurrentTool,
     SessionsHistoryTool, SessionsListTool, SessionsSendTool,
 };
-pub use zeroclaw_tools::text_browser::TextBrowserTool;
 pub use zeroclaw_tools::tool_search::ToolSearchTool;
 pub use zeroclaw_tools::web_fetch::WebFetchTool;
 pub use zeroclaw_tools::web_search_tool::WebSearchTool;
@@ -614,7 +609,6 @@ pub fn all_tools(
     risk_profile: &zeroclaw_config::schema::RiskProfileConfig,
     agent_alias: &str,
     memory: Arc<dyn Memory>,
-    browser_config: &zeroclaw_config::schema::BrowserConfig,
     http_config: &zeroclaw_config::schema::HttpRequestConfig,
     web_fetch_config: &zeroclaw_config::schema::WebFetchConfig,
     workspace_dir: &std::path::Path,
@@ -633,7 +627,6 @@ pub fn all_tools(
         agent_alias,
         runtime,
         memory,
-        browser_config,
         http_config,
         web_fetch_config,
         workspace_dir,
@@ -953,7 +946,7 @@ fn warm_lazy_regexes() {
 /// Ordering and panic semantics are unchanged: the caller blocks until the
 /// registry is built (as the inline build did), and a builder panic is
 /// resumed on the caller's thread. A scoped thread keeps the borrowed
-/// parameters (`browser_config`/`http_config`/`web_fetch_config`/`agents`/
+/// parameters (`http_config`/`web_fetch_config`/`agents`/
 /// `root_config`) semantically independent at the API boundary while avoiding
 /// deep clones on the caller's limited stack.
 #[allow(
@@ -968,7 +961,6 @@ pub fn all_tools_with_runtime(
     agent_alias: &str,
     runtime: Arc<dyn RuntimeAdapter>,
     memory: Arc<dyn Memory>,
-    browser_config: &zeroclaw_config::schema::BrowserConfig,
     http_config: &zeroclaw_config::schema::HttpRequestConfig,
     web_fetch_config: &zeroclaw_config::schema::WebFetchConfig,
     workspace_dir: &std::path::Path,
@@ -989,7 +981,6 @@ pub fn all_tools_with_runtime(
         agent_alias,
         runtime,
         memory,
-        browser_config,
         http_config,
         web_fetch_config,
         workspace_dir,
@@ -1019,7 +1010,6 @@ pub(crate) fn all_tools_with_runtime_context(
     agent_alias: &str,
     runtime: Arc<dyn RuntimeAdapter>,
     memory: Arc<dyn Memory>,
-    browser_config: &zeroclaw_config::schema::BrowserConfig,
     http_config: &zeroclaw_config::schema::HttpRequestConfig,
     web_fetch_config: &zeroclaw_config::schema::WebFetchConfig,
     workspace_dir: &std::path::Path,
@@ -1054,7 +1044,6 @@ pub(crate) fn all_tools_with_runtime_context(
             agent_alias,
             runtime,
             memory,
-            browser_config,
             http_config,
             web_fetch_config,
             workspace_dir,
@@ -1104,7 +1093,6 @@ pub fn all_tools_with_runtime_and_acp_sessions(
     agent_alias: &str,
     runtime: Arc<dyn RuntimeAdapter>,
     memory: Arc<dyn Memory>,
-    browser_config: &zeroclaw_config::schema::BrowserConfig,
     http_config: &zeroclaw_config::schema::HttpRequestConfig,
     web_fetch_config: &zeroclaw_config::schema::WebFetchConfig,
     workspace_dir: &std::path::Path,
@@ -1129,7 +1117,6 @@ pub fn all_tools_with_runtime_and_acp_sessions(
         agent_alias,
         runtime,
         memory,
-        browser_config,
         http_config,
         web_fetch_config,
         workspace_dir,
@@ -1161,7 +1148,6 @@ pub fn all_tools_with_runtime_and_execution_capability(
     agent_alias: &str,
     runtime: Arc<dyn RuntimeAdapter>,
     memory: Arc<dyn Memory>,
-    browser_config: &zeroclaw_config::schema::BrowserConfig,
     http_config: &zeroclaw_config::schema::HttpRequestConfig,
     web_fetch_config: &zeroclaw_config::schema::WebFetchConfig,
     workspace_dir: &std::path::Path,
@@ -1183,7 +1169,6 @@ pub fn all_tools_with_runtime_and_execution_capability(
         agent_alias,
         runtime,
         memory,
-        browser_config,
         http_config,
         web_fetch_config,
         workspace_dir,
@@ -1214,7 +1199,6 @@ fn all_tools_with_runtime_on_thread(
     agent_alias: &str,
     runtime: Arc<dyn RuntimeAdapter>,
     memory: Arc<dyn Memory>,
-    browser_config: &zeroclaw_config::schema::BrowserConfig,
     http_config: &zeroclaw_config::schema::HttpRequestConfig,
     web_fetch_config: &zeroclaw_config::schema::WebFetchConfig,
     workspace_dir: &std::path::Path,
@@ -1230,7 +1214,6 @@ fn all_tools_with_runtime_on_thread(
     execution_capability: Option<AgentExecutionCapability>,
     acp_sessions: Option<AcpSessionReadView>,
 ) -> AllToolsResult {
-    let has_shell_access = runtime.has_shell_access();
     let persistent_writes = runtime.has_filesystem_access();
     let RuntimeShellAssembly { shell_tool } = runtime_shell_assembly(security.clone(), runtime.clone(), risk_profile, root_config);
     // Keep a shared runtime adapter available after constructing ShellTool.
@@ -1424,84 +1407,6 @@ fn all_tools_with_runtime_on_thread(
         )));
     }
 
-    if browser_config.enabled {
-        // Add legacy browser_open tool for simple URL opening
-        match BrowserOpenTool::new_with_private_hosts(
-            security.clone(),
-            browser_config.allowed_domains.clone(),
-            browser_config.allowed_private_hosts.clone(),
-        ) {
-            Ok(tool) => {
-                tool_arcs.push(Arc::new(tool));
-            }
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                    "browser_open: failed to construct tool, skipping registration"
-                );
-            }
-        }
-    }
-
-    // Full browser automation (pluggable backend) is a separate opt-in from
-    // `browser_open`: it drives a real Chrome/Chromium session that may
-    // already be logged in, so `[browser] enabled` alone must not grant it.
-    if browser_config.automation_enabled {
-        match BrowserTool::new_with_backend(
-            security.clone(),
-            browser_config.allowed_domains.clone(),
-            browser_config.session_name.clone(),
-            browser_config.backend.clone(),
-            browser_config.headed,
-            browser_config.native_headless,
-            browser_config.native_webdriver_url.clone(),
-            browser_config.native_chrome_path.clone(),
-            ComputerUseConfig {
-                endpoint: browser_config.computer_use.endpoint.clone(),
-                api_key: browser_config.computer_use.api_key.clone(),
-                timeout_ms: browser_config.computer_use.timeout_ms,
-                allow_remote_endpoint: browser_config.computer_use.allow_remote_endpoint,
-                window_allowlist: browser_config.computer_use.window_allowlist.clone(),
-                max_coordinate_x: browser_config.computer_use.max_coordinate_x,
-                max_coordinate_y: browser_config.computer_use.max_coordinate_y,
-            },
-            browser_config.allowed_private_hosts.clone(),
-        ) {
-            Ok(tool) => {
-                tool_arcs.push(Arc::new(RateLimitedTool::new(tool, security.clone())));
-            }
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                    "browser: failed to construct tool, skipping registration"
-                );
-            }
-        }
-    }
-
-    // Browser delegation tool (conditionally registered; requires shell access)
-    if root_config.browser_delegate.enabled {
-        if has_shell_access {
-            tool_arcs.push(Arc::new(BrowserDelegateTool::new(
-                security.clone(),
-                root_config.browser_delegate.clone(),
-            )));
-        } else {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                "browser_delegate: skipped registration because the current runtime does not allow shell access"
-            );
-        }
-    }
-
     if http_config.enabled {
         match HttpRequestTool::new_with_config(
             security.clone(),
@@ -1629,30 +1534,6 @@ fn all_tools_with_runtime_on_thread(
         }
     }
 
-    // Text browser tool (headless text-based browser rendering)
-    if root_config.text_browser.enabled {
-        match TextBrowserTool::new_with_private_hosts(
-            security.clone(),
-            root_config.text_browser.preferred_browser.clone(),
-            root_config.text_browser.timeout_secs,
-            root_config.text_browser.allowed_private_hosts.clone(),
-            root_config.security.nat64_prefixes.clone(),
-        ) {
-            Ok(tool) => {
-                tool_arcs.push(Arc::new(tool));
-            }
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                    ERROR,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                    "text_browser: failed to construct tool, skipping registration"
-                );
-            }
-        }
-    }
-
     // Web search tool (enabled by default for GLM and other models)
     if root_config.web_search.enabled {
         // Rate-limited like every other outbound-network tool (see web_fetch
@@ -1710,7 +1591,6 @@ fn all_tools_with_runtime_on_thread(
     }
 
     // Vision tools are always available
-    tool_arcs.push(Arc::new(ScreenshotTool::new(security.clone())));
     tool_arcs.push(Arc::new(RateLimitedTool::new(
         PathGuardedTool::new(ImageInfoTool::new(security.clone()), security.clone()),
         security.clone(),
@@ -2223,7 +2103,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
     use zeroclaw_config::schema::{
-        ApprovalGroupConfig, ApprovalPolicyConfig, BrowserConfig, Config, FileDownloadConfig,
+        ApprovalGroupConfig, ApprovalPolicyConfig, Config, FileDownloadConfig,
         MemoryConfig, SopApprovalConfig,
     };
 
@@ -2987,10 +2867,6 @@ permissions = ["http_client"]
             )
             .unwrap(),
         );
-        let browser = BrowserConfig {
-            enabled: false,
-            ..BrowserConfig::default()
-        };
 
         let tools = all_tools(
             Arc::new(config.clone()),
@@ -3000,7 +2876,6 @@ permissions = ["http_client"]
             memory,
             None,
             None,
-            &browser,
             &zeroclaw_config::schema::HttpRequestConfig::default(),
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -3049,10 +2924,6 @@ permissions = ["http_client"]
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
 
-        let browser = BrowserConfig {
-            enabled: false,
-            ..BrowserConfig::default()
-        };
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
 
         let mut cfg = test_config(&tmp);
@@ -3068,7 +2939,6 @@ permissions = ["http_client"]
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             mem,
-            &browser,
             &http,
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -3117,12 +2987,6 @@ permissions = ["http_client"]
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
 
-        let browser = BrowserConfig {
-            enabled: false,
-            allowed_domains: vec![],
-            session_name: None,
-            ..BrowserConfig::default()
-        };
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let cfg = test_config(&tmp);
 
@@ -3132,7 +2996,6 @@ permissions = ["http_client"]
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             mem,
-            &browser,
             &http,
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -3177,12 +3040,6 @@ permissions = ["http_client"]
         };
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-        let browser = BrowserConfig {
-            enabled: false,
-            allowed_domains: vec![],
-            session_name: None,
-            ..BrowserConfig::default()
-        };
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let cfg = test_config(&tmp);
 
@@ -3193,7 +3050,6 @@ permissions = ["http_client"]
             "test-agent",
             Arc::new(NativeRuntime::new()),
             mem,
-            &browser,
             &http,
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -3232,12 +3088,6 @@ permissions = ["http_client"]
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
 
-        let browser = BrowserConfig {
-            enabled: false,
-            allowed_domains: vec![],
-            session_name: None,
-            ..BrowserConfig::default()
-        };
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let cfg = test_config(&tmp);
 
@@ -3253,7 +3103,6 @@ permissions = ["http_client"]
             "test-agent",
             Arc::new(NativeRuntime::new()),
             mem,
-            &browser,
             &http,
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -3301,12 +3150,6 @@ permissions = ["http_client"]
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
 
-        let browser = BrowserConfig {
-            enabled: false,
-            allowed_domains: vec![],
-            session_name: None,
-            ..BrowserConfig::default()
-        };
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let mut cfg = test_config(&tmp);
         cfg.sop.procedural_memory_enabled = true;
@@ -3322,7 +3165,6 @@ permissions = ["http_client"]
             "test-agent",
             Arc::new(NativeRuntime::new()),
             mem,
-            &browser,
             &http,
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -3358,7 +3200,6 @@ permissions = ["http_client"]
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
 
         let cfg = test_config(&tmp);
-        let browser = BrowserConfig::default();
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let web = zeroclaw_config::schema::WebFetchConfig::default();
         let risk = zeroclaw_config::schema::RiskProfileConfig::default();
@@ -3378,7 +3219,6 @@ permissions = ["http_client"]
             "session-a",
             Arc::new(NativeRuntime::new()),
             mem.clone(),
-            &browser,
             &http,
             &web,
             tmp.path(),
@@ -3400,7 +3240,6 @@ permissions = ["http_client"]
             "session-b",
             Arc::new(NativeRuntime::new()),
             mem.clone(),
-            &browser,
             &http,
             &web,
             tmp.path(),
@@ -3513,7 +3352,6 @@ permissions = ["http_client"]
         };
         let shared_engine = Arc::new(Mutex::new(engine));
         let cfg = test_config(&tmp);
-        let browser = BrowserConfig::default();
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let web = zeroclaw_config::schema::WebFetchConfig::default();
         let risk = zeroclaw_config::schema::RiskProfileConfig::default();
@@ -3526,7 +3364,6 @@ permissions = ["http_client"]
                 agent_alias,
                 Arc::new(NativeRuntime::new()),
                 memory,
-                &browser,
                 &http,
                 &web,
                 tmp.path(),
@@ -3590,7 +3427,6 @@ permissions = ["http_client"]
         };
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-        let browser = BrowserConfig::default();
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let web = zeroclaw_config::schema::WebFetchConfig::default();
         let risk = zeroclaw_config::schema::RiskProfileConfig::default();
@@ -3612,7 +3448,6 @@ permissions = ["http_client"]
             "test-agent",
             Arc::new(NativeRuntime::new()),
             mem,
-            &browser,
             &http,
             &web,
             workspace_dir.as_path(), // DIFFERENT from data_dir
@@ -3680,7 +3515,6 @@ permissions = ["http_client"]
         };
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-        let browser = BrowserConfig::default();
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let web = zeroclaw_config::schema::WebFetchConfig::default();
         let risk = zeroclaw_config::schema::RiskProfileConfig::default();
@@ -3702,7 +3536,6 @@ permissions = ["http_client"]
             "test-agent",
             Arc::new(NativeRuntime::new()),
             mem,
-            &browser,
             &http,
             &web,
             workspace_dir.as_path(),
@@ -3980,12 +3813,6 @@ permissions = ["http_client"]
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
 
-        let browser = BrowserConfig {
-            enabled: false,
-            allowed_domains: vec!["example.com".into()],
-            session_name: None,
-            ..BrowserConfig::default()
-        };
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let cfg = test_config(&tmp);
 
@@ -3995,7 +3822,6 @@ permissions = ["http_client"]
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             mem,
-            &browser,
             &http,
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -4026,10 +3852,6 @@ permissions = ["http_client"]
         };
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-        let browser = BrowserConfig {
-            enabled: false,
-            ..BrowserConfig::default()
-        };
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
 
         // A `~` that is not a home shortcut, as in a Windows 8.3 short name.
@@ -4048,7 +3870,6 @@ permissions = ["http_client"]
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             mem,
-            &browser,
             &http,
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -4079,12 +3900,6 @@ permissions = ["http_client"]
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
 
-        let browser = BrowserConfig {
-            enabled: true,
-            allowed_domains: vec!["example.com".into()],
-            session_name: None,
-            ..BrowserConfig::default()
-        };
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let cfg = test_config(&tmp);
 
@@ -4094,7 +3909,6 @@ permissions = ["http_client"]
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             mem,
-            &browser,
             &http,
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -4132,13 +3946,6 @@ permissions = ["http_client"]
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
 
-        let browser = BrowserConfig {
-            enabled: true,
-            automation_enabled: true,
-            allowed_domains: vec!["example.com".into()],
-            session_name: None,
-            ..BrowserConfig::default()
-        };
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let cfg = test_config(&tmp);
 
@@ -4148,7 +3955,6 @@ permissions = ["http_client"]
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             mem,
-            &browser,
             &http,
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -4180,13 +3986,6 @@ permissions = ["http_client"]
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
 
-        let browser = BrowserConfig {
-            enabled: false,
-            automation_enabled: true,
-            allowed_domains: vec!["example.com".into()],
-            session_name: None,
-            ..BrowserConfig::default()
-        };
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let cfg = test_config(&tmp);
 
@@ -4196,7 +3995,6 @@ permissions = ["http_client"]
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             mem,
-            &browser,
             &http,
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -4254,7 +4052,6 @@ permissions = ["http_client"]
                 "test-agent",
                 Arc::new(NativeRuntime::new()),
                 mem.clone(),
-                &BrowserConfig::default(),
                 &zeroclaw_config::schema::HttpRequestConfig::default(),
                 &zeroclaw_config::schema::WebFetchConfig::default(),
                 tmp.path(),
@@ -4395,7 +4192,6 @@ permissions = ["http_client"]
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
 
-        let browser = BrowserConfig::default();
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let cfg = test_config(&tmp);
 
@@ -4414,7 +4210,6 @@ permissions = ["http_client"]
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             mem,
-            &browser,
             &http,
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -4442,7 +4237,6 @@ permissions = ["http_client"]
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
 
-        let browser = BrowserConfig::default();
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let cfg = test_config(&tmp);
 
@@ -4452,7 +4246,6 @@ permissions = ["http_client"]
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             mem,
-            &browser,
             &http,
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -4480,7 +4273,6 @@ permissions = ["http_client"]
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
 
-        let browser = BrowserConfig::default();
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let mut cfg = test_config(&tmp);
         cfg.skills.prompt_injection_mode =
@@ -4492,7 +4284,6 @@ permissions = ["http_client"]
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             mem,
-            &browser,
             &http,
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -4520,7 +4311,6 @@ permissions = ["http_client"]
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
 
-        let browser = BrowserConfig::default();
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let mut cfg = test_config(&tmp);
         cfg.skills.prompt_injection_mode = zeroclaw_config::schema::SkillsPromptInjectionMode::Full;
@@ -4531,7 +4321,6 @@ permissions = ["http_client"]
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             mem,
-            &browser,
             &http,
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -4564,7 +4353,6 @@ permissions = ["http_client"]
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             mem,
-            &BrowserConfig::default(),
             &zeroclaw_config::schema::HttpRequestConfig::default(),
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -4619,7 +4407,6 @@ permissions = ["http_client"]
                 &zeroclaw_config::schema::RiskProfileConfig::default(),
                 "test-agent",
                 Arc::clone(&mem),
-                &BrowserConfig::default(),
                 &zeroclaw_config::schema::HttpRequestConfig::default(),
                 &zeroclaw_config::schema::WebFetchConfig::default(),
                 tmp.path(),
@@ -4665,7 +4452,6 @@ permissions = ["http_client"]
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
 
-        let browser = BrowserConfig::default();
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let mut cfg = test_config(&tmp);
         // Global stays Full; a runtime profile flips this agent to Compact and
@@ -4694,7 +4480,6 @@ permissions = ["http_client"]
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             mem,
-            &browser,
             &http,
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -4725,7 +4510,6 @@ permissions = ["http_client"]
         let mem: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
 
-        let browser = BrowserConfig::default();
         let http = zeroclaw_config::schema::HttpRequestConfig::default();
         let mut cfg = test_config(&tmp);
         // Global is Compact; a runtime profile pins this agent to Full and the
@@ -4756,7 +4540,6 @@ permissions = ["http_client"]
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             mem,
-            &browser,
             &http,
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -4800,7 +4583,6 @@ permissions = ["http_client"]
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             mem,
-            &BrowserConfig::default(),
             &zeroclaw_config::schema::HttpRequestConfig::default(),
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),
@@ -4851,7 +4633,7 @@ permissions = ["http_client"]
     #[tokio::test]
     async fn llm_task_uses_alias_aware_provider_for_alias_config() {
         use zeroclaw_config::schema::{
-            AliasedAgentConfig, BrowserConfig, Config, HttpRequestConfig, MemoryConfig,
+            AliasedAgentConfig, Config, HttpRequestConfig, MemoryConfig,
             ModelProviderConfig, OpenAIModelProviderConfig, RiskProfileConfig, WebFetchConfig,
         };
 
@@ -4896,7 +4678,6 @@ permissions = ["http_client"]
             "test-agent",
             Arc::new(NativeRuntime::new()),
             mem,
-            &BrowserConfig::default(),
             &HttpRequestConfig::default(),
             &WebFetchConfig::default(),
             tmp.path(),
@@ -4977,7 +4758,6 @@ permissions = ["http_client"]
             "test-agent",
             Arc::new(NativeRuntime::new()),
             mem,
-            &BrowserConfig::default(),
             &zeroclaw_config::schema::HttpRequestConfig::default(),
             &zeroclaw_config::schema::WebFetchConfig::default(),
             tmp.path(),

@@ -1287,7 +1287,6 @@ impl DelegateTool {
             agent_name,
             runtime.clone(),
             memory,
-            &config.browser,
             &config.http_request,
             &config.web_fetch,
             &target_policy.workspace_dir,

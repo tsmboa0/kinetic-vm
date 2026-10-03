@@ -9,8 +9,8 @@ pub mod schema;
 pub mod traits;
 
 pub use schema::{
-    AliasedAgentConfig, AssemblyAiSttConfig, AuditConfig, BackupConfig, BrowserComputerUseConfig,
-    BrowserConfig, BuiltinHooksConfig, ChannelsConfig, ClassificationRule, Config,
+    AliasedAgentConfig, AssemblyAiSttConfig, AuditConfig, BackupConfig,
+    BuiltinHooksConfig, ChannelsConfig, ClassificationRule, Config,
     ConversationalAiConfig, CostConfig, CronJobDecl, CronScheduleDecl, DataRetentionConfig, DeepgramSttConfig, DelegateToolConfig, DiscordConfig, DockerRuntimeConfig,
     EmbeddingRouteConfig, EstopConfig, GatewayConfig, GoogleSttConfig,
     HardwareConfig, HardwareTransport,
@@ -27,7 +27,7 @@ pub use schema::{
     SchedulerConfig, SearchMode, SecretsConfig, SecurityConfig, ShellToolConfig,
     SkillCreationConfig, SkillImprovementConfig, SkillsConfig, SkillsPromptInjectionMode,
     SlackConfig, SopConfig, SqliteStorageConfig, StorageConfig, StreamMode, TelegramConfig,
-    TextBrowserConfig, ToolFilterGroup, ToolFilterGroupMode, TranscriptionConfig, TtsConfig,
+    ToolFilterGroup, ToolFilterGroupMode, TranscriptionConfig, TtsConfig,
     TtsProviderConfig, TunnelConfig, VerifiableIntentConfig, WebFetchConfig, WebSearchConfig,
     WebhookConfig, WhatsAppChatPolicy, WhatsAppWebMode, apply_channel_proxy_to_builder,
     apply_runtime_proxy_to_builder, build_channel_proxy_client,

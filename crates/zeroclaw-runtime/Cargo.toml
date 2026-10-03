@@ -112,8 +112,6 @@ observability-otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentel
 sandbox-landlock = ["dep:landlock"]
 schema-export = ["dep:schemars", "zeroclaw-config/schema-export", "zeroclaw-sop-graph/schema-export"]
 
-
-browser-native = []
 plugins-wasm = ["dep:zeroclaw-plugins", "zeroclaw-plugins/plugins-wasmtime"]
 # Adds the Cranelift JIT to the plugin host so a `.wasm` component can be
 # compiled on the host instead of requiring a precompiled `.cwasm`. Production

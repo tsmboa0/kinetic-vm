@@ -8,9 +8,6 @@ use zeroclaw_api::tool_attribution;
 
 use crate::ask_user::AskUserTool;
 use crate::backup_tool::BackupTool;
-use crate::browser::BrowserTool;
-use crate::browser_delegate::BrowserDelegateTool;
-use crate::browser_open::BrowserOpenTool;
 use crate::calculator::CalculatorTool;
 use crate::canvas::CanvasTool;
 use crate::channel_room::ChannelRoomTool;
@@ -41,22 +38,17 @@ use crate::pipeline::PipelineTool;
 use crate::poll::PollTool;
 use crate::proxy_config::ProxyConfigTool;
 use crate::reaction::ReactionTool;
-use crate::screenshot::ScreenshotTool;
 use crate::send_via::SendViaTool;
 use crate::sessions::{
     SessionDeleteTool, SessionResetTool, SessionsCurrentTool, SessionsHistoryTool,
     SessionsListTool, SessionsSendTool,
 };
-use crate::text_browser::TextBrowserTool;
 use crate::tool_search::ToolSearchTool;
 use crate::web_fetch::WebFetchTool;
 use crate::web_search_tool::WebSearchTool;
 
 tool_attribution!(AskUserTool, ToolKind::Wait);
 tool_attribution!(BackupTool, ToolKind::Plugin);
-tool_attribution!(BrowserTool, ToolKind::Plugin);
-tool_attribution!(BrowserDelegateTool, ToolKind::Plugin);
-tool_attribution!(BrowserOpenTool, ToolKind::Plugin);
 tool_attribution!(CalculatorTool, ToolKind::Plugin);
 tool_attribution!(CanvasTool, ToolKind::Plugin);
 tool_attribution!(ChannelRoomTool, ToolKind::Plugin);
@@ -87,7 +79,6 @@ tool_attribution!(PipelineTool, ToolKind::Plugin);
 tool_attribution!(PollTool, ToolKind::Wait);
 tool_attribution!(ProxyConfigTool, ToolKind::Plugin);
 tool_attribution!(ReactionTool, ToolKind::Plugin);
-tool_attribution!(ScreenshotTool, ToolKind::Plugin);
 tool_attribution!(SendViaTool, ToolKind::Plugin);
 tool_attribution!(SessionDeleteTool, ToolKind::Plugin);
 tool_attribution!(SessionResetTool, ToolKind::Plugin);
@@ -95,7 +86,6 @@ tool_attribution!(SessionsCurrentTool, ToolKind::Plugin);
 tool_attribution!(SessionsHistoryTool, ToolKind::Plugin);
 tool_attribution!(SessionsListTool, ToolKind::Plugin);
 tool_attribution!(SessionsSendTool, ToolKind::Plugin);
-tool_attribution!(TextBrowserTool, ToolKind::Plugin);
 tool_attribution!(ToolSearchTool, ToolKind::Search);
 tool_attribution!(WebFetchTool, ToolKind::FetchUrl);
 tool_attribution!(WebSearchTool, ToolKind::Search);

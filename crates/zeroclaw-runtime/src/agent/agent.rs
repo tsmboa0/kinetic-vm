@@ -2782,7 +2782,6 @@ impl Agent {
             agent_alias,
             runtime.clone(),
             memory.clone(),
-            &config.browser,
             &config.http_request,
             &config.web_fetch,
             &security.workspace_dir,

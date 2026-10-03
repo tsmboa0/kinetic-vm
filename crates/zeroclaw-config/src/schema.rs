@@ -367,37 +367,7 @@ pub struct Config {
     #[group = "Storage"]
     pub secrets: SecretsConfig,
 
-    /// Browser automation configuration (`[browser]`).
-    #[serde(default)]
-    #[nested]
-    #[group = "Tools"]
-    pub browser: BrowserConfig,
 
-    /// Browser delegation configuration (`[browser_delegate]`).
-    ///
-    /// Delegates browser-based tasks to a browser-capable CLI subprocess (e.g.
-    /// Claude Code with `claude-in-chrome` MCP tools). Useful for interacting
-    /// with corporate web apps (Teams, Outlook, Jira, Confluence) that lack
-    /// direct API access. A persistent Chrome profile can be configured so SSO
-    /// sessions survive across invocations.
-    ///
-    /// Fields:
-    /// - `enabled` (`bool`, default `false`) — enable the browser delegation tool.
-    /// - `cli_binary` (`String`, default `"claude"`) — CLI binary to spawn for browser tasks.
-    /// - `chrome_profile_dir` (`String`, default `""`) — Chrome user-data directory for
-    ///   persistent SSO sessions. When empty, a fresh profile is used each invocation.
-    /// - `allowed_domains` (`Vec<String>`, default `[]`) — allowlist of domains the browser
-    ///   may navigate to. Empty means all non-blocked domains are permitted.
-    /// - `blocked_domains` (`Vec<String>`, default `[]`) — denylist of domains. Blocked
-    ///   domains take precedence over allowed domains.
-    /// - `task_timeout_secs` (`u64`, default `120`) — per-task timeout in seconds.
-    ///
-    /// Compatibility: additive and disabled by default; existing configs remain valid when omitted.
-    /// Rollback/migration: remove `[browser_delegate]` or keep `enabled = false` to disable.
-    #[serde(default)]
-    #[nested]
-    #[group = "Tools"]
-    pub browser_delegate: crate::scattered_types::BrowserDelegateConfig,
 
     /// HTTP request tool configuration (`[http_request]`).
     #[serde(default)]
@@ -429,11 +399,6 @@ pub struct Config {
     #[group = "Tools"]
     pub link_enricher: LinkEnricherConfig,
 
-    /// Text browser tool configuration (`[text_browser]`).
-    #[serde(default)]
-    #[nested]
-    #[group = "Tools"]
-    pub text_browser: TextBrowserConfig,
 
     /// Web search tool configuration (`[web_search]`).
     #[serde(default)]
@@ -6038,173 +6003,6 @@ impl Default for SecretsConfig {
     }
 }
 
-// ── Browser (friendly-service browsing only) ───────────────────
-
-/// Computer-use sidecar configuration (`[browser.computer_use]` section).
-///
-/// Delegates OS-level mouse, keyboard, and screenshot actions to a local sidecar.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "browser.computer_use"]
-pub struct BrowserComputerUseConfig {
-    /// Sidecar endpoint for computer-use actions (OS-level mouse/keyboard/screenshot)
-    #[serde(default = "default_browser_computer_use_endpoint")]
-    pub endpoint: String,
-    /// Optional bearer token for computer-use sidecar
-    #[serde(default)]
-    #[secret]
-    #[credential_class = "encrypted_secret"]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub api_key: Option<String>,
-    /// Per-action request timeout in milliseconds
-    #[serde(default = "default_browser_computer_use_timeout_ms")]
-    pub timeout_ms: u64,
-    /// Allow remote/public endpoint for computer-use sidecar (default: false)
-    #[serde(default)]
-    pub allow_remote_endpoint: bool,
-    /// Optional window title/process allowlist forwarded to sidecar policy
-    #[serde(default)]
-    pub window_allowlist: Vec<String>,
-    /// Optional X-axis boundary for coordinate-based actions
-    #[serde(default)]
-    pub max_coordinate_x: Option<i64>,
-    /// Optional Y-axis boundary for coordinate-based actions
-    #[serde(default)]
-    pub max_coordinate_y: Option<i64>,
-}
-
-fn default_browser_computer_use_endpoint() -> String {
-    "http://127.0.0.1:8787/v1/actions".into()
-}
-
-fn default_browser_computer_use_timeout_ms() -> u64 {
-    15_000
-}
-
-impl Default for BrowserComputerUseConfig {
-    fn default() -> Self {
-        Self {
-            endpoint: default_browser_computer_use_endpoint(),
-            api_key: None,
-            timeout_ms: default_browser_computer_use_timeout_ms(),
-            allow_remote_endpoint: false,
-            window_allowlist: Vec::new(),
-            max_coordinate_x: None,
-            max_coordinate_y: None,
-        }
-    }
-}
-
-/// Browser automation configuration (`[browser]` section).
-///
-/// Gates two distinct tools on two independent flags: `enabled` (default
-/// `true`) registers `browser_open`, and `automation_enabled` (default
-/// `false`) registers the full `browser` automation tool. The remaining
-/// fields configure the automation backends and are shared by both.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "browser"]
-#[integration(
-    category = "ToolsAutomation",
-    display_name = "Browser",
-    description = "Open URLs and control Chrome/Chromium",
-    status_method = "integration_active"
-)]
-pub struct BrowserConfig {
-    /// Enable `browser_open` tool (opens URLs in the system browser without scraping)
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// Enable the full `browser` automation tool (Chrome/Chromium control:
-    /// navigate, click, type, read page content). Opt-in and independent of
-    /// `enabled`, which gates only `browser_open`.
-    /// Automation acts inside browser sessions that may already be logged in,
-    /// so on an always-on agent a prompt-injected message could drive them;
-    /// leave this off unless the agent needs it. It is also absent from
-    /// [`default_auto_approve`], so `browser` calls hit the approval gate
-    /// unless a risk profile lists it explicitly.
-    #[serde(default)]
-    pub automation_enabled: bool,
-    /// Allowed domains for `browser_open` (exact or subdomain match)
-    #[serde(default = "default_browser_allowed_domains")]
-    pub allowed_domains: Vec<String>,
-    /// Browser session name (for agent-browser automation)
-    #[serde(default)]
-    pub session_name: Option<String>,
-    /// Browser automation backend: "agent_browser" | "rust_native" | "computer_use" | "auto"
-    #[serde(default = "default_browser_backend")]
-    pub backend: String,
-    /// Show browser window for agent_browser backend. When unset, inherits AGENT_BROWSER_HEADED.
-    #[serde(default)]
-    pub headed: Option<bool>,
-    /// Headless mode for rust-native backend
-    #[serde(default = "default_true")]
-    pub native_headless: bool,
-    /// WebDriver endpoint URL for rust-native backend (e.g. `http://127.0.0.1:9515`)
-    #[serde(default = "default_browser_webdriver_url")]
-    pub native_webdriver_url: String,
-    /// Optional Chrome/Chromium executable path for rust-native backend
-    #[serde(default)]
-    pub native_chrome_path: Option<String>,
-    /// Computer-use sidecar configuration
-    #[serde(default)]
-    #[nested]
-    pub computer_use: BrowserComputerUseConfig,
-    /// Private/internal hosts allowed to bypass SSRF protection.
-    /// Exact and subdomain matches are supported; `["*"]` permits **all** private/local
-    /// hosts (RFC 1918, loopback, link-local, `.local`). Default: empty (deny).
-    /// Listed hosts also bypass `allowed_domains`. Both the `browser` tool and
-    /// `browser_open` accept `http://` for listed hosts — internal services
-    /// frequently lack a public TLS cert.
-    /// Warning: `["*"]` also reaches link-local addresses, including the cloud metadata
-    /// endpoint (`169.254.169.254`) — list specific hosts unless you accept that exposure.
-    #[serde(default)]
-    pub allowed_private_hosts: Vec<String>,
-}
-
-fn default_browser_allowed_domains() -> Vec<String> {
-    vec!["*".into()]
-}
-
-fn default_browser_backend() -> String {
-    "agent_browser".into()
-}
-
-fn default_browser_webdriver_url() -> String {
-    "http://127.0.0.1:9515".into()
-}
-
-impl BrowserConfig {
-    /// Status source for the `#[integration(status_method = ...)]`
-    /// descriptor: the "Browser" integration is Active when the runtime
-    /// registers *either* of the tools this section gates — `browser_open`
-    /// (`enabled`) or the full `browser` automation tool
-    /// (`automation_enabled`). Reading only one flag would misreport half
-    /// the combinations: a default config would claim Chrome/Chromium
-    /// control that is not registered, and an automation-only config would
-    /// report Available while automation is live.
-    pub fn integration_active(&self) -> bool {
-        self.enabled || self.automation_enabled
-    }
-}
-
-impl Default for BrowserConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            automation_enabled: false,
-            allowed_domains: vec!["*".into()],
-            session_name: None,
-            backend: default_browser_backend(),
-            headed: None,
-            native_headless: default_true(),
-            native_webdriver_url: default_browser_webdriver_url(),
-            native_chrome_path: None,
-            computer_use: BrowserComputerUseConfig::default(),
-            allowed_private_hosts: vec![],
-        }
-    }
-}
-
 // ── HTTP request tool ───────────────────────────────────────────
 
 /// HTTP request tool configuration (`[http_request]` section).
@@ -6454,55 +6252,6 @@ impl Default for LinkEnricherConfig {
             enabled: false,
             max_links: default_link_enricher_max_links(),
             timeout_secs: default_link_enricher_timeout_secs(),
-        }
-    }
-}
-
-// ── Text browser ─────────────────────────────────────────────────
-
-/// Text browser tool configuration (`[text_browser]` section).
-///
-/// Uses text-based browsers (lynx, links, w3m) to render web pages as plain
-/// text. Designed for headless/SSH environments without graphical browsers.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "text_browser"]
-pub struct TextBrowserConfig {
-    /// Enable `text_browser` tool
-    #[serde(default)]
-    pub enabled: bool,
-    /// Preferred text browser ("lynx", "links", or "w3m"). If unset, auto-detects.
-    #[serde(default)]
-    pub preferred_browser: Option<String>,
-    /// Request timeout in seconds (default: 30)
-    #[serde(default = "default_text_browser_timeout_secs")]
-    pub timeout_secs: u64,
-    /// Private/internal hosts allowed to relax the public-address SSRF check.
-    /// Exact and subdomain matches are supported; `["*"]` permits private/local
-    /// hosts (RFC 1918, loopback, `.local`). Default: empty (deny). All of
-    /// `169.254.0.0/16`, Azure `168.63.129.16`, Alibaba `100.100.100.200`, AWS
-    /// `fd00:ec2::/64`, GCP `fd20:ce::254`, and their recognized IPv4-embedded
-    /// forms remain blocked after resolution regardless of this opt-in.
-    /// The external browser re-resolves DNS and follows redirects without
-    /// revalidation, so these checks are not a DNS-rebinding or redirect boundary.
-    /// Local preflight resolution still applies under this opt-in, which may reject
-    /// names available only through a browser or proxy. Prefer `web_fetch` when
-    /// URLs or DNS are attacker-controlled.
-    #[serde(default)]
-    pub allowed_private_hosts: Vec<String>,
-}
-
-fn default_text_browser_timeout_secs() -> u64 {
-    30
-}
-
-impl Default for TextBrowserConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            preferred_browser: None,
-            timeout_secs: default_text_browser_timeout_secs(),
-            allowed_private_hosts: vec![],
         }
     }
 }
@@ -17185,14 +16934,11 @@ impl Default for Config {
             relay: RelayConfig::default(),
             enroll: EnrollConfig::default(),
             secrets: SecretsConfig::default(),
-            browser: BrowserConfig::default(),
-            browser_delegate: crate::scattered_types::BrowserDelegateConfig::default(),
             http_request: HttpRequestConfig::default(),
             multimodal: MultimodalConfig::default(),
             media_pipeline: MediaPipelineConfig::default(),
             web_fetch: WebFetchConfig::default(),
             link_enricher: LinkEnricherConfig::default(),
-            text_browser: TextBrowserConfig::default(),
             web_search: WebSearchConfig::default(),
             proxy: ProxyConfig::default(),
             cost: CostConfig::default(),
@@ -18454,15 +18200,11 @@ impl Config {
     /// row in this method. The integrations registry consumes the result
     /// without per-vendor branches.
     pub fn integration_descriptors(&self) -> Vec<crate::config::IntegrationDescriptor> {
-        // BrowserConfig and GoogleWorkspaceConfig carry
-        // `#[integration(...)]` annotations on V3, so the macro emits
-        // `integration_descriptor()` on each. Cron has been flattened
-        // to `HashMap<String, CronJobDecl>` with no enable toggle, so
-        // it gets a hand-crafted descriptor whose `active` reflects
-        // whether any job is configured. Display copy lives next to
+        // Cron has been flattened to `HashMap<String, CronJobDecl>` with
+        // no enable toggle, so it gets a hand-crafted descriptor whose
+        // `active` reflects whether any job is configured. Display copy lives next to
         // the field so the registry never branches on a category name.
         vec![
-            self.browser.integration_descriptor(),
             crate::config::IntegrationDescriptor {
                 display_name: "Cron",
                 description: "Scheduled tasks",
@@ -28564,14 +28306,11 @@ auto_save = true
             relay: RelayConfig::default(),
             enroll: EnrollConfig::default(),
             secrets: SecretsConfig::default(),
-            browser: BrowserConfig::default(),
-            browser_delegate: crate::scattered_types::BrowserDelegateConfig::default(),
             http_request: HttpRequestConfig::default(),
             multimodal: MultimodalConfig::default(),
             media_pipeline: MediaPipelineConfig::default(),
             web_fetch: WebFetchConfig::default(),
             link_enricher: LinkEnricherConfig::default(),
-            text_browser: TextBrowserConfig::default(),
             web_search: WebSearchConfig::default(),
             proxy: ProxyConfig::default(),
             pacing: PacingConfig::default(),
@@ -29742,14 +29481,11 @@ default_temperature = 0.7
             relay: RelayConfig::default(),
             enroll: EnrollConfig::default(),
             secrets: SecretsConfig::default(),
-            browser: BrowserConfig::default(),
-            browser_delegate: crate::scattered_types::BrowserDelegateConfig::default(),
             http_request: HttpRequestConfig::default(),
             multimodal: MultimodalConfig::default(),
             media_pipeline: MediaPipelineConfig::default(),
             web_fetch: WebFetchConfig::default(),
             link_enricher: LinkEnricherConfig::default(),
-            text_browser: TextBrowserConfig::default(),
             web_search: WebSearchConfig::default(),
             proxy: ProxyConfig::default(),
             pacing: PacingConfig::default(),
@@ -29848,7 +29584,6 @@ default_temperature = 0.7
             },
         );
         // ModelProvider fields are now resolved directly — no cache needed.
-        config.browser.computer_use.api_key = Some("browser-credential".into());
         config.web_search.brave_api_key = Some("brave-credential".into());
         config.web_search.tavily_api_key = Some("tavily-credential".into());
         config.web_search.anysearch_api_key = Some("anysearch-credential".into());
@@ -30006,13 +29741,6 @@ default_temperature = 0.7
         assert_eq!(
             store.decrypt(provider_header).unwrap(),
             "Bearer provider-header-credential"
-        );
-
-        let browser_encrypted = stored.browser.computer_use.api_key.as_deref().unwrap();
-        assert!(crate::secrets::SecretStore::is_encrypted(browser_encrypted));
-        assert_eq!(
-            store.decrypt(browser_encrypted).unwrap(),
-            "browser-credential"
         );
 
         let web_search_encrypted = stored.web_search.brave_api_key.as_deref().unwrap();
@@ -31448,196 +31176,6 @@ default_temperature = 0.7
         assert!(
             parsed.secrets.encrypt,
             "Missing [secrets] must default to encrypt=true"
-        );
-    }
-
-    #[test]
-    async fn browser_config_default_enabled() {
-        let b = BrowserConfig::default();
-        assert!(b.enabled);
-        assert!(
-            !b.automation_enabled,
-            "full browser automation must be opt-in"
-        );
-        assert_eq!(b.allowed_domains, vec!["*".to_string()]);
-        assert_eq!(b.backend, "agent_browser");
-        assert_eq!(b.headed, None);
-        assert!(b.native_headless);
-        assert_eq!(b.native_webdriver_url, "http://127.0.0.1:9515");
-        assert!(b.native_chrome_path.is_none());
-        assert_eq!(b.computer_use.endpoint, "http://127.0.0.1:8787/v1/actions");
-        assert_eq!(b.computer_use.timeout_ms, 15_000);
-        assert!(!b.computer_use.allow_remote_endpoint);
-        assert!(b.computer_use.window_allowlist.is_empty());
-        assert!(b.computer_use.max_coordinate_x.is_none());
-        assert!(b.computer_use.max_coordinate_y.is_none());
-    }
-
-    #[test]
-    async fn browser_config_serde_roundtrip() {
-        let b = BrowserConfig {
-            enabled: true,
-            automation_enabled: true,
-            allowed_domains: vec!["example.com".into(), "docs.example.com".into()],
-            session_name: None,
-            backend: "auto".into(),
-            headed: Some(true),
-            native_headless: false,
-            native_webdriver_url: "http://localhost:4444".into(),
-            native_chrome_path: Some("/usr/bin/chromium".into()),
-            computer_use: BrowserComputerUseConfig {
-                endpoint: "https://computer-use.example.com/v1/actions".into(),
-                api_key: Some("test-token".into()),
-                timeout_ms: 8_000,
-                allow_remote_endpoint: true,
-                window_allowlist: vec!["Chrome".into(), "Visual Studio Code".into()],
-                max_coordinate_x: Some(3840),
-                max_coordinate_y: Some(2160),
-            },
-            allowed_private_hosts: vec![],
-        };
-        let toml_str = toml::to_string(&b).unwrap();
-        let parsed: BrowserConfig = toml::from_str(&toml_str).unwrap();
-        assert!(parsed.enabled);
-        assert!(parsed.automation_enabled);
-        assert_eq!(parsed.allowed_domains.len(), 2);
-        assert_eq!(parsed.allowed_domains[0], "example.com");
-        assert_eq!(parsed.backend, "auto");
-        assert_eq!(parsed.headed, Some(true));
-        assert!(!parsed.native_headless);
-        assert_eq!(parsed.native_webdriver_url, "http://localhost:4444");
-        assert_eq!(
-            parsed.native_chrome_path.as_deref(),
-            Some("/usr/bin/chromium")
-        );
-        assert_eq!(
-            parsed.computer_use.endpoint,
-            "https://computer-use.example.com/v1/actions"
-        );
-        assert_eq!(parsed.computer_use.api_key.as_deref(), Some("test-token"));
-        assert_eq!(parsed.computer_use.timeout_ms, 8_000);
-        assert!(parsed.computer_use.allow_remote_endpoint);
-        assert_eq!(parsed.computer_use.window_allowlist.len(), 2);
-        assert_eq!(parsed.computer_use.max_coordinate_x, Some(3840));
-        assert_eq!(parsed.computer_use.max_coordinate_y, Some(2160));
-    }
-
-    #[test]
-    async fn browser_config_parses_headed_true() {
-        let parsed: BrowserConfig = toml::from_str(
-            r#"
-backend = "agent_browser"
-headed = true
-"#,
-        )
-        .unwrap();
-
-        assert_eq!(parsed.backend, "agent_browser");
-        assert_eq!(parsed.headed, Some(true));
-        assert!(parsed.native_headless);
-    }
-
-    #[test]
-    async fn browser_config_backward_compat_missing_section() {
-        let minimal = r#"
-workspace_dir = "/tmp/ws"
-config_path = "/tmp/config.toml"
-default_temperature = 0.7
-"#;
-        let parsed = parse_test_config(minimal);
-        assert!(parsed.browser.enabled);
-        assert!(!parsed.browser.automation_enabled);
-        assert_eq!(parsed.browser.allowed_domains, vec!["*".to_string()]);
-    }
-
-    /// Migration guard: a pre-split config that opted into `[browser]` gets
-    /// `browser_open` but NOT full automation. Operators must add
-    /// `automation_enabled = true` themselves.
-    #[test]
-    async fn browser_automation_stays_off_for_pre_split_configs() {
-        let raw = r#"
-workspace_dir = "/tmp/ws"
-config_path = "/tmp/config.toml"
-default_temperature = 0.7
-
-[browser]
-enabled = true
-allowed_domains = ["example.com"]
-"#;
-        let parsed = parse_test_config(raw);
-        assert!(parsed.browser.enabled);
-        assert!(
-            !parsed.browser.automation_enabled,
-            "`enabled = true` alone must not re-grant full browser automation"
-        );
-    }
-
-    /// The two flags are independent: automation can be turned on without
-    /// `browser_open`, and vice versa.
-    #[test]
-    async fn browser_automation_enabled_parses_independently() {
-        let raw = r#"
-workspace_dir = "/tmp/ws"
-config_path = "/tmp/config.toml"
-default_temperature = 0.7
-
-[browser]
-enabled = false
-automation_enabled = true
-"#;
-        let parsed = parse_test_config(raw);
-        assert!(!parsed.browser.enabled);
-        assert!(parsed.browser.automation_enabled);
-    }
-
-    /// The operator-visible integration status must follow both gates. One
-    /// flag alone misreports two of the four combinations: a default config
-    /// would advertise Chrome/Chromium control that is not registered, and
-    /// an automation-only config would read as inactive while automation is
-    /// live.
-    #[test]
-    async fn browser_integration_descriptor_tracks_both_flags() {
-        for (enabled, automation_enabled, expected_active) in [
-            (false, false, false),
-            (false, true, true),
-            (true, false, true),
-            (true, true, true),
-        ] {
-            let b = BrowserConfig {
-                enabled,
-                automation_enabled,
-                ..BrowserConfig::default()
-            };
-            assert_eq!(
-                b.integration_active(),
-                expected_active,
-                "integration_active wrong for enabled={enabled}, \
-                 automation_enabled={automation_enabled}"
-            );
-            assert_eq!(
-                b.integration_descriptor().active,
-                expected_active,
-                "descriptor.active wrong for enabled={enabled}, \
-                 automation_enabled={automation_enabled}"
-            );
-        }
-    }
-
-    /// The descriptor copy names both surfaces this section gates, so an
-    /// Active "Browser" row is not read as automation-only.
-    #[test]
-    async fn browser_integration_descriptor_description_covers_both_tools() {
-        let descriptor = BrowserConfig::default().integration_descriptor();
-        assert_eq!(descriptor.display_name, "Browser");
-        assert!(
-            descriptor.description.contains("Open URLs"),
-            "description must mention opening URLs: {:?}",
-            descriptor.description
-        );
-        assert!(
-            descriptor.description.contains("Chrome/Chromium"),
-            "description must mention browser control: {:?}",
-            descriptor.description
         );
     }
 

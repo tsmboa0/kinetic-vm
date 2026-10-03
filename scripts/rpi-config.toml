@@ -86,8 +86,6 @@ non_cli_excluded_tools = [
     "process",
     "file_write",
     "file_edit",
-    "browser",
-    "browser_open",
     "http_request",
     "schedule",
     "cron_add",
@@ -103,7 +101,6 @@ non_cli_excluded_tools = [
     "channel_ack_config",
     "composio",
     "delegate",
-    "screenshot",
     "image_info",
 ]
 non_cli_approval_approvers = []
@@ -137,8 +134,6 @@ cache_valid_secs = 300
 gated_actions = [
     "shell",
     "file_write",
-    "browser_open",
-    "browser",
     "memory_forget",
 ]
 gated_domains = []
@@ -441,24 +436,6 @@ entity_id = "default"
 
 [secrets]
 encrypt = true
-
-[browser]
-enabled = false
-allowed_domains = []
-browser_open = "default"
-backend = "agent_browser"
-auto_backend_priority = []
-agent_browser_command = "agent-browser"
-agent_browser_extra_args = []
-agent_browser_timeout_ms = 30000
-native_headless = true
-native_webdriver_url = "http://127.0.0.1:9515"
-
-[browser.computer_use]
-endpoint = "http://127.0.0.1:8787/v1/actions"
-timeout_ms = 15000
-allow_remote_endpoint = false
-window_allowlist = []
 
 [http_request]
 enabled = false

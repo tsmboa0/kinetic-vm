@@ -11,11 +11,8 @@
 
 tool-backup = Create, list, verify, and restore shared data directory backups
 
-tool-browser = Web/browser automation with pluggable backends (agent-browser, rust-native, computer_use). Supports DOM actions plus optional OS-level actions (mouse_move, mouse_click, mouse_drag, key_type, key_press, screen_capture) through a computer-use sidecar. Use 'snapshot' to map interactive elements to refs (@e1, @e2). Enforces browser.allowed_domains for open actions.
 
-tool-browser-delegate = Delegate browser-based tasks to a browser-capable CLI for interacting with web applications like Teams, Outlook, Jira, Confluence
 
-tool-browser-open = Open an approved HTTPS URL in the system browser. Security constraints: allowlist-only domains, no local/private hosts, no scraping.
 
 tool-channel-room = Create rooms and invite users through an active channel. Provide a channel key such as 'matrix.default', action 'create_room' or 'invite_user', and the action-specific room fields.
 tool-channel-room-param-action = Room-management action to perform.
@@ -166,21 +163,6 @@ tool-sessions-history-header = Session '{ $session_id }': showing { $shown }/{ $
 tool-sessions-send-error-acp-unsupported = { $tool } does not support { $channel } sessions because durable transcript writes do not deliver messages to the live { $product } session.
 tool-sessions-current-channel = Channel: { $channel }
 
-tool-screenshot = Capture a screenshot of the current screen. Returns the saved file path.
-tool-browser-screenshot-error-path-not-allowed = Screenshot path '{ $path }' is not in the workspace allowlist
-tool-browser-screenshot-error-parent-not-exist = Screenshot path '{ $path }' parent directory '{ $parent }' does not exist
-tool-browser-screenshot-error-path-outside-workspace = Screenshot path '{ $path }' resolves to '{ $canonical }' which is outside the workspace
-tool-browser-screenshot-error-missing-filename = Screenshot path '{ $path }' is missing a filename component
-tool-browser-screenshot-error-runtime-config-target = Cannot write screenshot to runtime config path '{ $target }'
-tool-browser-screenshot-error-symlink-target = Cannot write screenshot to symlink target '{ $target }'
-tool-browser-screenshot-error-path-not-utf8 = Screenshot path '{ $path }' resolves to a non-UTF-8 pathname; refusing to write through a lossy conversion
-tool-browser-screenshot-error-computeruse-non-string-path = Screenshot 'path' parameter must be a string, got { $path }
-tool-browser-screenshot-error-non-string-path = Screenshot 'path' must be a string or absent
-tool-browser-screenshot-error-args-not-object = Screenshot arguments must be a JSON object
-tool-browser-screenshot-error-sidecar-no-png-data = computer-use sidecar did not return PNG data
-tool-browser-screenshot-error-sidecar-empty-png = computer-use sidecar returned an empty screenshot payload
-tool-browser-screenshot-error-sidecar-not-png = computer-use sidecar returned a non-PNG screenshot payload
-tool-browser-screenshot-error-sidecar-non-json-success = computer-use sidecar returned a non-JSON success response for a path-bearing screenshot; the requested file was not written
 
 
 tool-shell = Execute a shell command in the workspace directory

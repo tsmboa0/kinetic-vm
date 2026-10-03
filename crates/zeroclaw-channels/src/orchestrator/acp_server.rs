@@ -3394,7 +3394,7 @@ fn map_tool_kind(name: &str) -> &'static str {
         "ask_user" | "calculator" | "delegate" | "escalate_to_human" | "execute_pipeline"
         | "llm_task" | "schedule" | "shell"
         | "sop_advance" | "sop_approve" | "sop_execute" | "vi_verify" => "execute",
-        "backup" | "browser_open" | "canvas" | "cloud_ops" | "file_edit" | "file_write"
+        "backup" | "canvas" | "cloud_ops" | "file_edit" | "file_write"
         | "memory_export" | "memory_store" | "report_template" => "edit",
         "cron_add" | "poll" | "reaction" => "edit",
         "memory_forget" | "memory_purge" => "delete",
@@ -3404,9 +3404,7 @@ fn map_tool_kind(name: &str) -> &'static str {
         // result content surfaced consistently across clients.
         "content_search" | "discord_search" | "glob_search" | "knowledge" | "search"
         | "tool_search" | "web_search_tool" => "other",
-        "browser"
-        | "browser_delegate"
-        | "cloud_patterns"
+        "cloud_patterns"
         | "data_management"
         | "deliver_file"
         | "file_read"
@@ -3427,7 +3425,6 @@ fn map_tool_kind(name: &str) -> &'static str {
         | "sessions_list"
         | "sop_list"
         | "sop_status"
-        | "text_browser"
         | "weather"
         | "workspace" => "other",
         "cron_list" | "cron_runs" | "memory_recall" => "other",

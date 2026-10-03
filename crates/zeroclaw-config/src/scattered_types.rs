@@ -404,44 +404,6 @@ impl Default for ChannelPrecheckConfig {
 
 // ── Tools config types ──────────────────────────────────────────
 
-fn default_browser_cli() -> String {
-    "claude".into()
-}
-fn default_browser_task_timeout() -> u64 {
-    120
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "browser_delegate"]
-pub struct BrowserDelegateConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_browser_cli")]
-    pub cli_binary: String,
-    #[serde(default)]
-    pub chrome_profile_dir: String,
-    #[serde(default)]
-    pub allowed_domains: Vec<String>,
-    #[serde(default)]
-    pub blocked_domains: Vec<String>,
-    #[serde(default = "default_browser_task_timeout")]
-    pub task_timeout_secs: u64,
-}
-
-impl Default for BrowserDelegateConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            cli_binary: default_browser_cli(),
-            chrome_profile_dir: String::new(),
-            allowed_domains: Vec::new(),
-            blocked_domains: Vec::new(),
-            task_timeout_secs: default_browser_task_timeout(),
-        }
-    }
-}
-
 // ── Trust config types ──────────────────────────────────────────
 
 fn default_initial_score() -> f64 {

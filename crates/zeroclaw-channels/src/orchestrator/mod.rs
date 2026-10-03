@@ -8110,9 +8110,7 @@ const MATRIX_REQUIRED_SAFE_TOOL_ARGUMENTS: &[(&[&str], &[&str])] = &[
             "cron_list",
             "spawn_subagent",
             "sessions_current",
-            "browser_open",
             "web_fetch",
-            "screenshot",
             "weather",
             "pushover",
             "calculator",
@@ -8139,8 +8137,6 @@ const MATRIX_OPTIONAL_SAFE_TOOL_ARGUMENTS: &[(&[&str], &[&str])] = &[
     ),
     (&["sop_workshop"], &["action", "name"]),
     (&["sop_list"], &[]),
-    (&["browser"], &["action"]),
-    (&["browser_delegate", "text_browser"], &["action"]),
     (&["tool_search"], &["query", "max_results"]),
     (
         &["file_upload", "file_upload_bundle", "file_download"],
@@ -14421,7 +14417,6 @@ pub async fn start_channels_with_authority_and_plugin_webhooks(
             agent_alias,
             Arc::clone(&runtime),
             Arc::clone(&mem),
-            &config.browser,
             &config.http_request,
             &config.web_fetch,
             &workspace,
@@ -14503,12 +14498,6 @@ pub async fn start_channels_with_authority_and_plugin_webhooks(
             tool_descs.push((
                 "read_skill",
                 "Load the full source for an available skill by name. Use when: compact mode only shows a summary and you need the complete skill instructions.",
-            ));
-        }
-        if config.browser.enabled {
-            tool_descs.push((
-                "browser_open",
-                "Open approved HTTPS URLs in system browser (allowlist-only, no scraping)",
             ));
         }
         tool_descs.push((
@@ -17449,7 +17438,6 @@ pub(crate) mod tests {
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             Arc::new(NoopMemory),
-            &config.browser,
             &config.http_request,
             &config.web_fetch,
             temp.path(),
