@@ -907,7 +907,6 @@ cli-selftest-some-failed = {$failed}/{$total} comprobaciones fallaron.
 cli-selftest-channel-config-uncompiled = {$compiled} tipos de canal compilados, {$configured} compilados/configurados; configurados pero no compilados: {$names}. Compila desde el código fuente con `./install.sh --source --preset full`, `--features channels-full` o la característica `channel-*` específica.
 cli-channels-header = Canales:
 cli-channels-cli-always = {"  "}✅ CLI (siempre disponible)
-cli-channels-notion = {"  "}{$status} Notion
 cli-channels-not-compiled-header = {"  "}Configurados pero no compilados en este binario:
 cli-channels-not-compiled-entry = {"  "}🚫 {$name} (configurado, no compilado)
 cli-channels-build-hint = {"  "}Compila desde el código fuente con `./install.sh --source --preset full`, `--features channels-full` o la característica `channel-*` específica.

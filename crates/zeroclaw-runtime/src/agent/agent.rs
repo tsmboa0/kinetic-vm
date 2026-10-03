@@ -2744,16 +2744,6 @@ impl Agent {
         )
         .await?;
 
-        let composio_key = if config.composio.enabled {
-            config.composio.api_key.as_deref()
-        } else {
-            None
-        };
-        let composio_entity_id = if config.composio.enabled {
-            Some(config.composio.entity_id.as_str())
-        } else {
-            None
-        };
 
         // SOP loading is gated on `runtime_enabled()`: `sops_dir` is unset (or
         // empty) by default, so SOP runtime behavior is off until an operator
@@ -2792,8 +2782,6 @@ impl Agent {
             agent_alias,
             runtime.clone(),
             memory.clone(),
-            composio_key,
-            composio_entity_id,
             &config.browser,
             &config.http_request,
             &config.web_fetch,

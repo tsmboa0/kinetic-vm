@@ -13491,16 +13491,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    if config.notion.enabled {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-            "Notion channel is enabled but this build was compiled without \
-             `channel-notion`; skipping Notion."
-        );
-    }
-
     if !config.channels.reddit.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -14422,14 +14412,6 @@ pub async fn start_channels_with_authority_and_plugin_webhooks(
             provider_api_key.as_deref(),
         )
         .await?;
-        let (composio_key, composio_entity_id) = if config.composio.enabled {
-            (
-                config.composio.api_key.as_deref(),
-                Some(config.composio.entity_id.as_str()),
-            )
-        } else {
-            (None, None)
-        };
 
         let workspace = config.agent_workspace_dir(agent_alias);
         // Per-agent skills: install-wide workspace + open_skills set,
@@ -14444,8 +14426,6 @@ pub async fn start_channels_with_authority_and_plugin_webhooks(
             agent_alias,
             Arc::clone(&runtime),
             Arc::clone(&mem),
-            composio_key,
-            composio_entity_id,
             &config.browser,
             &config.http_request,
             &config.web_fetch,
@@ -14534,12 +14514,6 @@ pub async fn start_channels_with_authority_and_plugin_webhooks(
             tool_descs.push((
                 "browser_open",
                 "Open approved HTTPS URLs in system browser (allowlist-only, no scraping)",
-            ));
-        }
-        if config.composio.enabled {
-            tool_descs.push((
-                "composio",
-                "Execute actions on 1000+ apps via Composio (Gmail, Notion, GitHub, Slack, etc.). Use action='list' to discover actions, 'list_accounts' to retrieve connected account IDs, 'execute' to run (optionally with connected_account_id), and 'connect' for OAuth.",
             ));
         }
         tool_descs.push((
@@ -17480,8 +17454,6 @@ pub(crate) mod tests {
             &zeroclaw_config::schema::RiskProfileConfig::default(),
             "test-agent",
             Arc::new(NoopMemory),
-            None,
-            None,
             &config.browser,
             &config.http_request,
             &config.web_fetch,

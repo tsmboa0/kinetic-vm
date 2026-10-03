@@ -2971,14 +2971,6 @@ pub(crate) async fn assemble_owned_execution_with_admission(
     let runtime: Arc<dyn crate::platform::RuntimeAdapter> =
         Arc::from(crate::platform::create_runtime(&config.runtime)?);
 
-    let (composio_key, composio_entity_id) = if config.composio.enabled {
-        (
-            config.composio.api_key.as_deref(),
-            Some(config.composio.entity_id.as_str()),
-        )
-    } else {
-        (None, None)
-    };
 
     let built = crate::tools::all_tools_with_runtime_and_execution_capability(
         Arc::new(config.clone()),
@@ -2987,8 +2979,6 @@ pub(crate) async fn assemble_owned_execution_with_admission(
         alias,
         runtime.clone(),
         memory,
-        composio_key,
-        composio_entity_id,
         &config.browser,
         &config.http_request,
         &config.web_fetch,

@@ -906,7 +906,6 @@ cli-selftest-some-failed = {$failed}/{$total} 项检查失败。
 cli-selftest-channel-config-uncompiled = {$compiled} 个通道类型已编译，{$configured} 个已编译且已配置；已配置但未编译：{$names}。请从源码构建：`./install.sh --source --preset full`、`--features channels-full`，或指定对应的 `channel-*` 功能。
 cli-channels-header = 渠道：
 cli-channels-cli-always = {"  "}✅ CLI（始终可用）
-cli-channels-notion = {"  "}{$status} Notion
 cli-channels-not-compiled-header = {"  "}已配置但未编译进此二进制文件：
 cli-channels-not-compiled-entry = {"  "}🚫 {$name}（已配置，未编译）
 cli-channels-build-hint = {"  "}请从源码构建：`./install.sh --source --preset full`、`--features channels-full`，或指定对应的 `channel-*` 功能。

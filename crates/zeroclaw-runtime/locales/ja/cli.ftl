@@ -905,7 +905,6 @@ cli-selftest-some-failed = {$failed}/{$total} 件のチェックが失敗しま�
 cli-selftest-channel-config-uncompiled = コンパイル済みチャンネル種別 {$compiled} 件、コンパイル済みかつ設定済み {$configured} 件。設定済みですが未コンパイル: {$names}。ソースから `./install.sh --source --preset full`、`--features channels-full`、または特定の `channel-*` 機能でビルドしてください。
 cli-channels-header = チャンネル:
 cli-channels-cli-always = {"  "}✅ CLI (常に利用可能)
-cli-channels-notion = {"  "}{$status} Notion
 cli-channels-not-compiled-header = {"  "}設定済みですが、このバイナリにはコンパイルされていません:
 cli-channels-not-compiled-entry = {"  "}🚫 {$name} (設定済み、未コンパイル)
 cli-channels-build-hint = {"  "}ソースから `./install.sh --source --preset full`、`--features channels-full`、または特定の `channel-*` 機能でビルドしてください。

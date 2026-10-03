@@ -1025,7 +1025,6 @@ cli-selftest-channel-config-uncompiled = {$compiled} compiled channel types, {$c
 # ── channels (zeroclaw channel list) ──
 cli-channels-header = Channels:
 cli-channels-cli-always = {"  "}✅ CLI (always available)
-cli-channels-notion = {"  "}{$status} Notion
 cli-channels-not-compiled-header = {"  "}Configured but not compiled in this binary:
 cli-channels-not-compiled-entry = {"  "}🚫 {$name} (configured, not compiled)
 cli-channels-build-hint = {"  "}Build from source with `./install.sh --source --preset full`, `--features channels-full`, or the specific `channel-*` feature.

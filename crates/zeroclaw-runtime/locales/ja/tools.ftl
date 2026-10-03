@@ -24,9 +24,6 @@ tool-channel-room-error-invalid-visibility = 無効なルームの可視性: { $
 tool-channel-room-error-missing-param = '{ $param }' パラメータがありません。
 tool-channel-room-error-string-param = '{ $param }' は文字列である必要があります。
 tool-channel-room-error-bool-param = '{ $param }' はブール値である必要があります。
-tool-cloud-ops = クラウド変換アドバイザリーツール。IaCプランを分析し、マイグレーションパスを評価し、コストをレビューし、Well-Architected Frameworkの柱に対してアーキテクチャをチェックします。読み取り専用：クラウドリソースを作成または変更しません。
-tool-cloud-patterns = クラウドパターンライブラリ。ワークロード説明を指定すると、適用可能なクラウドネイティブアーキテクチャパターン（コンテナ化、サーバーレス、データベース現代化など）を提案します。
-tool-composio = Composio経由で1000以上のアプリ（Gmail、Notion、GitHub、Slack等）でアクションを実行します。action='list'で利用可能なアクション（パラメータ名を含む）を確認します。action='execute'でaction_name/tool_slugとparamsを指定して実行します。正確なparamsが不確実な場合は、'text'に自然言語の説明を記述してください（Composioが正しいパラメータをNLPで解決します）。action='list_accounts'またはaction='connected_accounts'でOAuth接続アカウントを一覧表示します。action='connect'でapp/auth_config_idを指定するとOAuth URLが取得できます。connected_account_idは省略すると自動解決されます。
 tool-content-search = ワークスペース内のregexパターンでファイルコンテンツを検索します。ripgrep（rg）をサポートし、grepまたは内部検索をフォールバックとして使用。出力モード：'content'（マッチ行とコンテキスト）、'files_with_matches'（ファイルパスのみ）、'count'（ファイルごとのマッチ数）。例：pattern='fn main'、include='*.rs'、output_mode='content'。
 tool-cron-add = cron/at/everyスケジュール付きのスケジュール済みcronジョブ（シェルまたはエージェント）を作成します。job_type='agent'でPromptを使用してAIエージェントをスケジュール実行します。出力をチャネル（Discord、Telegram、Slack、Mattermost、Matrix）に配信するには、delivery={"{"}"mode":"announce","channel":"discord","to":"<channel_id_or_chat_id>"{"}"}を設定します。これは、チャネル経由でユーザーにスケジュール/遅延メッセージを送信するための推奨ツールです。
 tool-cron-list = すべてのスケジュール済みcronジョブを一覧表示
@@ -63,22 +60,16 @@ tool-file-download-success = { $written } バイトを { $dest_path } にダウ�
 tool-file-read = 行番号付きのファイルコンテンツを読み込み。offsetとlimitによる部分読み込みをサポート。バイナリファイルと画像ファイルは拒否されます（画像の場合は image_info ツールを使用）。encoding="base64" を設定すると、生のバイトをbase64エンコードして返します（.pdf/.xlsx/.docx などのバイナリファイル用）。そのモードでは offset/limit は無視されます。
 tool-file-write = ワークスペース内のファイルにコンテンツを書き込み
 tool-glob-search = ワークスペース内でglobパターンにマッチするファイルを検索。ワークスペースルートに対する相対パスの、ソート済みマッチングファイルパスのリストを返します。例：'**/*.rs'（すべてのRustファイル）、'src/**/mod.rs'（src内のすべてのmod.rs）。
-tool-google-workspace = gws CLIを経由してGoogle Workspaceサービス（Drive、Gmail、Calendar、Sheets、Docs等）と相互作用します。gwsがインストール済みで認証されている必要があります。
 tool-hardware-board-info = 接続されたハードウェアの完全なボード情報（チップ、アーキテクチャ、メモリマップ）を返す。用途：ユーザーが「board info」、「what board do I have」、「connected hardware」、「chip info」、「what hardware」、または「memory map」を尋ねる場合。
 tool-hardware-memory-map = 接続されたハードウェアのメモリマップ（フラッシュとRAMアドレス範囲）を返す。用途：ユーザーが「upper and lower memory addresses」、「memory map」、「address space」、または「readable addresses」を尋ねる場合。データシートからフラッシュ/RAMの範囲を返します。
 tool-hardware-memory-read = USBを経由してNucleoから実際のメモリ/レジスタ値を読み込む。用途：ユーザーが「read register values」、「read memory at address」、「dump memory」、「lower memory 0-126」、または「give address and value」を尋ねる場合。16進ダンプを返します。NucleoがUSBに接続されている必要があり、probeフィーチャが必要です。パラメータ：address（16進、例：RAMスタート用の0x20000000）、length（バイト、デフォルト128）。
 tool-http-request = 外部APIにHTTPリクエストを送信します。GET、POST、PUT、DELETE、PATCH、HEAD、OPTIONSメソッドをサポート。セキュリティ制約：許可リストのみのドメイン、ローカル/プライベートホストなし、設定可能なタイムアウトとレスポンスサイズ制限。
 tool-image-info = イメージファイルメタデータ（フォーマット、寸法、サイズ）を読み込み、オプションで基数64エンコード済みデータを返す。
-tool-jira = Jiraと相互作用：設定可能な詳細レベルでチケットを取得、JQLで問題を検索、メンション書式付きコメントを追加。
 tool-knowledge = アーキテクチャ決定、ソリューションパターン、経験、専門家、関係リンクの知識グラフを管理します。
-tool-linkedin = LinkedInを管理：投稿作成、投稿一覧、コメント、リアクション、投稿削除、エンゲージメント表示、プロフィール情報取得、設定されたコンテンツ戦略の読み込み。.envファイルにLINKEDIN_*認証情報が必要。
 tool-memory-forget = キーでメモリを削除します。古い情報や機密データを削除する場合に使用。メモリが見つかったかどうか、削除されたかどうかを返します。
 tool-memory-recall = 長期記憶で関連する情報、好み、またはコンテキストを検索します。関連性でランク付けされたスコア結果を返します。クエリを省略するか * のみを指定すると、最近の記憶を返します。
 tool-memory-store = 事実、好み、またはノートを長期記憶に保存します。永続的な事実にはカテゴリ「core」を、セッションノートには「daily」、チャットコンテキストには「conversation」、またはカスタムカテゴリ名を使用します。
-tool-microsoft365 = Microsoft 365統合：Microsoft Graph APIを経由してOutlookメール、Teamsメッセージ、カレンダーイベント、OneDriveファイル、SharePoint検索を管理
 tool-model-routing-config = デフォルトモデル設定、シナリオベースのプロバイダー/モデルルート、分類ルール、委譲サブエージェントプロフィールを管理
-tool-notion = Notionと相互作用：データベースをクエリ、ページを読み込み/作成/更新、ワークスペースを検索。
-tool-project-intel = プロジェクト配信インテリジェンス：ステータスレポートを生成、リスクを検出、クライアント更新をドラフト、スプリントを要約、作業量を推定。読み取り専用分析ツール。
 tool-proxy-config = ZeroClawプロキシ設定を管理（スコープ：environment | zeroclaw | services）。ランタイムおよびプロセス環境アプリケーション含む
 tool-schedule = スケジュール済みシェルのみのタスクを管理します。アクション：create/add/once/list/get/cancel/remove/pause/resume。警告：このツールは、出力がログに記録されるのみで、チャネルに配信されないシェルジョブを作成します。Discord/Telegram/Slack/Matrixにスケジュール済みメッセージを送信するには、job_type='agent'とdelivery配信設定（例：{"{"}"mode":"announce","channel":"discord","to":"<channel_id>"{"}"}）付きのcron_addツールを使用してください。
 tool-screenshot = 現在の画面のスクリーンショットをキャプチャします。保存先のファイルパスを返します。
@@ -96,7 +87,6 @@ tool-browser-screenshot-error-sidecar-no-png-data = computer-use サイドカー
 tool-browser-screenshot-error-sidecar-empty-png = computer-use サイドカーから空のスクリーンショットペイロードが返されました
 tool-browser-screenshot-error-sidecar-not-png = computer-use サイドカーから PNG 以外のスクリーンショットペイロードが返されました
 tool-browser-screenshot-error-sidecar-non-json-success = computer-use サイドカーから、パスを指定したスクリーンショットに対する JSON 以外の成功レスポンスが返されました。要求されたファイルは書き込まれませんでした
-tool-security-ops = 管理型サイバーセキュリティサービス向けセキュリティ操作ツール。アクション：triage_alert（アラートの分類/優先順位付け）、run_playbook（インシデント対応ステップの実行）、parse_vulnerability（スキャン結果の解析）、generate_report（セキュリティ態勢レポートの作成）、list_playbooks（利用可能なプレイブックをリスト）、alert_stats（アラートメトリクスを要約）。
 tool-shell = ワークスペースディレクトリ内でシェルコマンドを実行
 tool-sop-advance = 現在のSOPステップの結果を報告し、次のステップに進む。run_id、ステップが成功したか失敗したか、簡潔な出力要約を指定します。
 tool-sop-approve = オペレータ承認を待つ保留中のSOPステップを承認します。実行するステップ命令を返します。sop_statusを使用して、どの実行が待機中かを確認します。

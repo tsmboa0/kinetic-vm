@@ -5214,13 +5214,13 @@ mod tests {
         };
         cfg.save().await.expect("initial save");
 
-        cfg.composio.api_key = Some("injected-via-env".into());
+        cfg.web_search.brave_api_key = Some("injected-via-env".into());
         cfg.env_overridden_paths =
-            std::collections::HashSet::from(["composio.api_key".to_string()]);
+            std::collections::HashSet::from(["web_search.brave_api_key".to_string()]);
 
         let drift = compute_drift(&cfg).await;
         assert!(
-            !drift.iter().any(|d| d.path == "composio.api_key"),
+            !drift.iter().any(|d| d.path == "web_search.brave_api_key"),
             "env-overridden secret must never appear in drift, got {drift:?}"
         );
     }
