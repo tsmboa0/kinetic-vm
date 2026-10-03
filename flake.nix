@@ -1,0 +1,118 @@
+{
+  inputs = {
+    flake-utils.url = "github:numtide/flake-utils";
+    fenix = {
+      url = "github:nix-community/fenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    nixpkgs.url = "nixpkgs/nixos-unstable";
+  };
+
+  outputs = { flake-utils, fenix, nixpkgs, ... }:
+    let
+      nixosModule = { pkgs, ... }: {
+        # These evaluation-only hosts have no physical root disk or bootloader.
+        boot.loader.grub.enable = false;
+        fileSystems."/" = { device = "none"; fsType = "tmpfs"; };
+        system.stateVersion = "26.05";
+        nixpkgs.overlays = [ fenix.overlays.default ];
+        environment.systemPackages = [
+          (pkgs.fenix.stable.withComponents [
+            "cargo"
+            "clippy"
+            "rust-src"
+            "rustc"
+            "rustfmt"
+          ])
+          pkgs.rust-analyzer
+        ];
+      };
+    in
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [ fenix.overlays.default ];
+        };
+        rustToolchain = pkgs.fenix.stable.withComponents [
+          "cargo"
+          "clippy"
+          "rust-src"
+          "rustc"
+          "rustfmt"
+        ];
+        nixosModuleEvalTests = import ./nix/eval-tests.nix {
+          inherit nixpkgs system;
+        };
+        # >>> generated:flake-packages by `cargo generate installers` - do not edit <<<
+        # Default feature sets: zeroclaw uses canonical lean Dist,
+        # zerocode uses its own package features (currently empty).
+        # Override per-package, e.g. `packages.zeroclaw.override { features = [ ... ]; }`.
+        zeroclawDefaultFeatures = [ "acp-bridge" "agent-runtime" "channel-acp-server" "channel-discord" "channel-email" "channel-filesystem" "channel-git" "channel-lark" "channel-matrix" "channel-telegram" "channel-webhook" "gateway" "observability-prometheus" "schema-export" "whatsapp-web" ];
+        zerocodeDefaultFeatures = [  ];
+        buildZeroclaw = { pname, cargoPkg, features }:
+          (pkgs.makeRustPlatform {
+            cargo = rustToolchain;
+            rustc = rustToolchain;
+          }).buildRustPackage {
+            inherit pname;
+            version = "0.8.5";
+            src = ./.;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              outputHashes = builtins.fromJSON (builtins.readFile ./nix/hashes.json);
+            };
+            cargoBuildFlags =
+              [ "-p" cargoPkg "--no-default-features" ]
+              ++ pkgs.lib.optionals (features != [])
+                [ "--features" (pkgs.lib.concatStringsSep "," features) ];
+            doCheck = false;
+            buildInputs = [ pkgs.stdenv.cc.cc ];
+            meta = { mainProgram = pname; };
+          };
+        # >>> end generated:flake-packages <<<
+        webPkgs = pkgs.callPackage ./nix/web.nix { inherit rustToolchain; };
+      in {
+        packages.zeroclaw = buildZeroclaw { pname = "zeroclaw"; cargoPkg = "zeroclaw"; features = zeroclawDefaultFeatures; };
+        packages.zerocode = buildZeroclaw { pname = "zerocode"; cargoPkg = "zerocode"; features = zerocodeDefaultFeatures; };
+        packages.default = buildZeroclaw { pname = "zeroclaw"; cargoPkg = "zeroclaw"; features = zeroclawDefaultFeatures; };
+        # Web dashboard bundle (see nix/web.nix). Kept outside the
+        # `generated:flake-packages` block so `cargo generate installers`
+        # does not clobber it.
+        packages.zeroclaw-web = webPkgs.zeroclawWeb;
+        packages.zeroclaw-openapi-spec = webPkgs.openapiSpec;
+        checks = pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          nixos-module-eval = pkgs.writeText "zeroclaw-nixos-module-eval" (
+            builtins.toJSON nixosModuleEvalTests
+          );
+        };
+        devShells.default = pkgs.mkShell {
+          packages = [
+            rustToolchain
+            pkgs.rust-analyzer
+            pkgs.nix-prefetch-git
+            pkgs.jq
+          ];
+        };
+      }) // {
+      # The `services.zeroclaw` NixOS module (multi-instance; see nix/module.nix
+      # and nix/README.md). Exposed as the default so `nixosModules.default` can
+      # be imported directly into a system configuration.
+      nixosModules.default = import ./nix/module.nix;
+
+      # Toolchain test systems used to evaluate the dev-shell module on both
+      # supported Linux architectures; not a deployment target. The `checks`
+      # output evaluates these in CI.
+      nixosConfigurations = {
+        nixos = nixpkgs.lib.nixosSystem {
+          system = "x86_64-linux";
+          modules = [ nixosModule ];
+        };
+
+        nixos-aarch64 = nixpkgs.lib.nixosSystem {
+          system = "aarch64-linux";
+          modules = [ nixosModule ];
+        };
+      };
+    };
+}

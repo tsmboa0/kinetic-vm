@@ -1,0 +1,264 @@
+# PR Workflow
+
+The maintainer-side governance contract for PRs targeting `master`. Branch-protection settings, the DoR/DoD readiness contracts, and the failure-recovery protocol live here. Day-to-day reviewing lives in the [Reviewer Playbook](./reviewer-playbook.md). The contributor-facing flow lives in [How to contribute](../contributing/how-to.md).
+
+## Governance goals
+
+The workflow exists to keep five things true under high PR volume:
+
+1. Merge throughput is predictable.
+2. CI signal quality stays high, fast feedback, low false positives.
+3. Security review is explicit on risky surfaces.
+4. Changes are easy to reason about and easy to revert.
+5. Repository artifacts stay free of personal or sensitive data.
+
+The control loop that delivers this is layered on purpose:
+
+- **Intake classification**: path/size/risk labels route the PR to the right depth.
+- **Deterministic validation**: the merge gate depends on reproducible checks, not subjective comments.
+- **Risk-based review depth**: high-risk consequences and security boundaries get deep review, while low-risk work stays fast.
+- **Rollback-first merge contract**: every merge path includes a concrete recovery story.
+
+Automation handles path/scope labels, report-only risk evidence, manual issue-dashboard planning reports, and CI gating. Risk, size, type, and contributor-tier labels are maintainer intake decisions unless a maintained workflow explicitly owns them; Phase 2 risk reporting does not mutate them. Final merge accountability stays with human maintainers and PR authors. A PR carrying either `risk:high` or `domain:security` requires deep review and defaults to two independent Core Team approvals; automated reporting and automated review do not count as Core Team approvals. The only standing exception is the [expedited second-review lane](#expedited-second-review-lane).
+
+## Expedited second-review lane
+
+Two independent Core Team approvals remain the default for PRs carrying `risk:high` or `domain:security`. A human maintainer may evaluate a narrow exception when an active durable public request to a second Core reviewer, distinct from the author and approving reviewer, remains unanswered across five subsequent UTC business dates. This is an optional accountable merge decision, not an automatic approval or permission to proceed without a first independent Core approval.
+
+FND-003 §5.1 supplies the responsibility to review within five business days. Start the clock at the later of the qualifying non-author Core approval and the active public request for the distinct second reviewer. Use UTC calendar dates: that start date is day zero, and each subsequent Monday-through-Friday date counts once. No holiday calendar applies. Eligibility begins at 00:00 UTC on the fifth counted business date, not at the original request's time of day. Record both source timestamps, the five counted dates, and the eligibility date. For example, a Monday start becomes eligible at 00:00 UTC the following Monday.
+
+The request must remain active and unanswered. A review from the requested reviewer, a recorded decline or withdrawal, or removal or cancellation of the request ends that clock. If a second review is still required, reroute it with a new active public request. A request covering materially different scope starts its own clock.
+
+A head change requires a non-author Core approval and clean advisory review on the new current head before the lane can be used. A verified mechanical base integration that selects no behavior may preserve elapsed waiting time only: retain the previously recorded clock start instead of replacing it with the new approval timestamp. This does not waive the current-head approval, advisory evidence, or fresh required CI. Other head changes restart the clock under the later-of rule above. This lane does not carry approvals forward across production repairs.
+
+The report-only `second-core` queue may surface an older approval by a different reviewer for assessment under the ordinary two-Core path. That assessment does not replace the current-head approval required by this lane. A queue row never establishes eligibility for this exception.
+
+Every condition below must hold on the current head before proposing the exception:
+
+- The PR is non-draft, mergeable, and passing every required check.
+- One Core Team member other than the PR author has approved the current head.
+- `zeroclaw-reviewer[bot]` or an explicitly accepted equivalent advisory artifact has completed a clean exact-head review without tool failure, and a human has reconciled every finding. An equivalent artifact must identify its producer and link the durable public record that accepted it for this purpose.
+- Five subsequent UTC business dates have been counted from the qualifying start for the active second-review request.
+- No `do-not-merge`, `needs-author-action`, stale-candidate status, release hold, unresolved human changes-requested review, unresolved review thread, unresolved human or automated finding, or other blocking condition remains.
+- The PR body, labels, linked work, validation, rollback, compatibility disposition, and follow-ups are current and truthful.
+
+An objection or hold is not silence and never expires through this lane. It does not authorize dismissal of reviews, removal of holds, or bypassing CODEOWNERS or branch protection. Author-side assessment and advisory automation never count as independent human approval.
+
+Broad governance, security-floor, release, migration, and irreversible architecture changes still default to two human approvals. They are not automatically eligible because time elapsed. A proposed exception must explain why the exact change is bounded and why one independent human approval plus the named evidence is sufficient; unresolved technical or governance ambiguity stops the merge.
+
+The final packet names the approving Core maintainer, the distinct requested reviewer and active request, both source timestamps and the clock calculation, the advisory producer and reviewed head, any equivalent artifact's acceptance record, fresh required CI, reconciled findings, compatibility and rollback, and the likelihood, impact, and uncertainty of proceeding without the second human review. Publish the approved explanation before merging. The accountable human merger must approve the exact packet; neither silence nor automation supplies a vote.
+
+## Project board contract
+
+The Project board is an automated planning board, not the authoritative PR review queue.
+
+Use the board for issue readiness, routing evidence, roadmap grouping, dependencies, blocker state, and stale-exemption reasons. Those signals move slowly enough that a board field or planning lane can stay useful.
+
+The current automation is manual and report-only. [`project-dashboard-plan.yml`](https://github.com/zeroclaw-labs/zeroclaw/blob/master/.github/workflows/project-dashboard-plan.yml) runs on `workflow_dispatch` for a single issue number, reads the issue payload, and writes a step summary proposing the existing Project Status value that best matches the issue's live labels and state. It does not write Project fields, edit issues, add labels, post comments, or run automatically on issue events.
+
+A JSON summary of this planning split lives in [`project-board-contract.json`](./project-board-contract.json). Treat it as the contract for the report-only planner and future board refresh automation, not as approval for automatic issue-event runs or active GitHub Project mutation yet. Live ProjectV2 writes need an approved field mapping, a project-scoped credential or app installation, and readback that compares planned status with live Project state before maintainers rely on it.
+
+Do not mirror native PR review state into manual board lanes. GitHub PR state owns review decision, required checks, mergeability, conflicts, stale approvals, and merge readiness. If the board later displays derived PR routing such as `DIRTY`, `BEHIND`, or `APPROVED`, treat it as a dashboard view of GitHub state, not a separate source of truth.
+
+This keeps the board useful without asking maintainers to update it after every push, review, or CI run.
+
+Size and risk automation are separate workflow questions. #9345 may recalculate deterministic size labels on PR updates, while `pr-risk-labeler.yml` currently reports proposed risk evidence only. A later mutation phase needs a separate maintainer decision and must honor `risk:manual` until a maintainer removes that override. The issue-dashboard planner does not apply or recalculate PR risk, size, or type labels.
+
+### Issue routing evidence
+
+Issue triage stays a shared maintainer responsibility. Accepted issues do not need a standing owner map before they can remain open, and CODEOWNERS does not make code owners responsible for every issue in a matching area.
+
+Issues need contributor-visible routing evidence when a special state would otherwise hide them from routine review or stale sweeps: `status:no-stale`, active release/RFC/design tracker status, or a deferred maintainer decision. `status:blocked` keeps its simpler rule: record the unresolved blocker and revisit stale protection when the blocker clears.
+
+Use these meanings consistently:
+
+| Routing signal | Means | Does not mean |
+|---|---|---|
+| Assignee | Someone is actively implementing, investigating, or shepherding the immediate work. | Permanent area ownership or passive responsibility for every related issue. |
+| Routing evidence | A visible issue comment, body section, public field, board field, or linked tracker records the reason for special handling and the next decision surface. | Automatic implementation ownership or permanent area ownership. |
+| Tracker/RFC surface | An active release tracker, RFC, or design tracker can be the coordination surface while it remains current. | Permanent stale protection after the tracker closes, drifts, or stops representing an active decision. |
+| Project board field | Optional planning signal for readiness, routing evidence, blocker state, or stale-exemption rationale when it is visible and maintained. | A private stale-policy source or replacement for native PR review state. |
+| Labels and CODEOWNERS | Durable classification, likely area routing, and PR-review consultation hints. | Ownership or stale protection by themselves. |
+
+CODEOWNERS is a PR-review routing mechanism. It can identify people to consult when an issue clearly touches a path, but it does not create issue ownership and should not be mirrored into stale policy as a private routing map.
+
+Routing evidence is about the next decision, not delivery ownership. A routed issue should not sit in "owned" limbo; the next visible update should make one of these outcomes explicit: assign an active implementer, make the issue contributor-ready, route it to a tracker or milestone, record the blocker, schedule a concrete maintainer decision point, or close/defer it with rationale.
+
+Scheduling an issue for maintainer triage is valid only when the issue records what decision is needed, where that decision will be tracked, and when it will be revisited. After that triage pass, replace the triage routing with an active implementer, contributor-ready scope, tracker or milestone route, blocked/deferred state, or closure rationale.
+
+For protected issues, record both the stale-exemption reason and the next decision surface before adding or keeping `status:no-stale`. Useful visible evidence sources include:
+
+- an assignee doing active work plus an issue-visible note, body section, or tracker entry explaining why stale handling should not apply;
+- an issue comment, issue body section, or public issue field recording the stale-exemption reason and next decision surface;
+- a public Project field that is visible to normal issue readers and actively maintained;
+- a linked public tracker, milestone, RFC, or design issue that records why the issue stays open and when it should be revisited.
+
+Active release trackers and active RFC or design trackers are durable coordination surfaces. When the issue title, body, labels, or milestone clearly identify an active tracker or RFC, the tracker itself supplies the stale-exemption reason and contributor-visible routing surface; it does not need repetitive per-issue comments. Revisit the exemption when the milestone closes, the tracker drifts from live release state, the RFC reaches a decision, is superseded, or closes, or the issue no longer represents an active project decision surface.
+
+When a tracker marker label is needed, use `type:tracker`. It applies to issue-only parent coordination surfaces such as release trackers, roadmap or epic trackers, RFC/design trackers, implementation batch trackers, cleanup trackers, and audit trackers. Do not apply it to ordinary child issues, ordinary feature requests, bugs, PRs, or items merely linked from a tracker. `type:tracker` helps humans and automation find the parent surface; it does not replace the required stale-exemption reason, next decision surface, milestone, assignee, or close criteria. If the live label does not exist yet, do not substitute `roadmap`, `type:roadmap`, or another alias; create and migrate the canonical label through a separate exact label packet.
+
+If none of those exists and the issue is not an active tracker or RFC, the issue can still stay open while triage continues, but it should not rely on `status:no-stale` as a permanent shield. Until the stale-exemption audit lands, missing reason or routing evidence is an audit finding and proposed correction, not an automatic stale-closure trigger.
+
+### Named milestone policy
+
+Named milestones are finite delivery cohorts for bounded outcomes within capability domains, not permanent domain backlogs. For this policy, a named milestone is organized around an outcome rather than a numbered release; `Parking Lot` and `Icebox` are holding areas, not named milestones. Name each new milestone as `Domain: Bounded Outcome`. Prefer `RPC Client: Authentication & Authorization` over a broad reusable name such as `Auth`. A combined title occupies each domain it names.
+
+Treat every open named milestone as active. Before opening another, maintainers must explicitly confirm that coordination and review capacity exists for the added cohort. Record why the cohort cannot wait and which current milestone is expected to close next. When capacity is exhausted, do not open another named milestone until one closes or the proposed work is consolidated into an existing cohort. Reassess capacity whenever maintainer availability or review load materially changes.
+
+Keep at most one active named milestone per domain. An explicit maintainer exception may allow independent outcomes in the same domain to proceed in parallel when the decision records why the added coordination cost is justified.
+
+Every named milestone needs an explicit scope and close criteria, though a due date is optional. Do not leave a paused cohort open: reroute its unfinished work and close the milestone. Before closing any named milestone, close or reroute every unfinished issue and add a closure note stating whether the outcome was completed, canceled, or superseded. Closed named milestones stay closed. Follow-on work can form a new named milestone only when enough coherent scope exists to define another finite outcome. Name that milestone for the outcome; do not create rolling `v2`, `v2.1`, or similar successors by default.
+
+GitHub allows an issue or pull request to belong to only one milestone. Work required to complete a named cohort stays in that named milestone through completion, even when it ships in a numbered release. Record release inclusion in the release tracker and changelog. Use numbered release milestones for urgent bugs, maintenance, and other release-bound work outside a named cohort.
+
+Once a named milestone is active, limit new intake to work required to finish its stated cohort: direct scope, blockers, dependencies, and regressions. Route other work by intent:
+
+| Destination | Use for |
+|---|---|
+| Current named milestone | Work required to complete the milestone's defined cohort. |
+| Numbered release milestone | Urgent bugs, maintenance, or other release-bound work outside a named cohort. |
+| RFC or design issue | Work whose design or governance direction is not settled. |
+| `Parking Lot` | Short-term routing while maintainers decide the next concrete home. |
+| `Icebox` | Valid future work for a domain with an active named milestone when it is outside the current cohort and is not scheduled soon. |
+
+## PR lanes
+
+PR lanes are routing expectations, not another required label family. Use them to decide how much review depth, sequencing, and maintainer attention a PR needs. CODEOWNERS, native GitHub review state, CI, labels, linked issues, and explicit relationship keywords still carry the actual routing data.
+
+| Lane | Common examples | Expected movement |
+|---|---|---|
+| A: maintenance fast lane | Docs-only corrections, small tests that leave behavior unchanged, metadata/template fixes, narrow examples, CI/tooling fixes that preserve permissions and release behavior | Lightest review; fast merge once CI, template, labels, and privacy checks are clean. Usually `risk:low` and `size:XS` or `size:S`. |
+| B: narrow bug/fix lane | Small bug fixes with clear failing behavior, targeted provider/channel/tool fixes with focused validation, compatibility fixes that preserve behavior outside the reported path | Normal review by one subsystem-aware reviewer unless risk or ownership says otherwise. Merge when the linked issue is actually satisfied, validation is credible, and CI is green. |
+| C: feature slice lane | Additive feature work, new provider/channel/tool support, new config surface, scoped user-visible behavior changes | Normal review plus boundary-specific validation. Milestone fit matters, and the PR should say whether it implements, depends on, or is related to a tracker. |
+| D: architecture, migration, and elevated-review lane | Concrete trust, credential, compatibility, governance, release-authority, migration, lifecycle, persistence, permission, or toolchain-floor boundary; any PR carrying `risk:high` or `domain:security` | Deep review, evidence matched to the changed risk, and rollback and compatibility analysis. A PR carrying `risk:high` or `domain:security` defaults to two independent Core Team approvals; only the [expedited second-review lane](#expedited-second-review-lane) provides a standing exception. |
+| E: supersede, replacement, and overlap lane | Multiple PRs solving the same issue, newer PRs replacing older ones, contributor work carried forward from another PR, old PR made obsolete by current `master` | Coordinate before deep review. Choose one canonical path when possible, use `Supersedes #N` only when accurate, and preserve attribution when work is materially carried forward. |
+
+Do not build a separate manual PR board for these lanes unless native GitHub state and CODEOWNERS stop answering the routing question. Check native GitHub merge state before normal lane review: `DIRTY` means resolve conflicts first; `BEHIND` alone is mergeability housekeeping, not an author-facing blocker.
+
+## Required repository settings
+
+Branch protection on `master`:
+
+- Require status checks before merge.
+- Require check `CI Required Gate`.
+- Require pull request reviews before merge.
+- Require CODEOWNERS review for protected paths. `.github/**` (including `.github/workflows/**`) is owned by the maintainers listed in `.github/CODEOWNERS`, so workflow changes need an owning maintainer's review.
+- Keep branch / ruleset bypass limited to org owners.
+- Dismiss stale approvals when new commits are pushed.
+- Restrict force-push.
+- All contributor PRs target `master` directly.
+
+## Definition of Ready (DoR)
+
+Before requesting review, the PR has all of these:
+
+- PR template fully completed.
+- Scope boundary explicit (what changed / what did not).
+- Validation evidence attached, actual command output, not "CI will check."
+- Security & privacy, compatibility, and (for risky paths) rollback fields completed.
+- Privacy and data-hygiene rules satisfied, neutral, project-scoped test wording. See [Privacy](../contributing/privacy.md).
+- Identity-like wording, where unavoidable, uses ZeroClaw / project-native labels.
+
+## Definition of Done (DoD)
+
+Before merge:
+
+- `CI Required Gate` is green.
+- Required CODEOWNERS and branch-protection reviews are satisfied; a PR carrying `risk:high` or `domain:security` also satisfies the two-Core default or every condition of the [expedited second-review lane](#expedited-second-review-lane).
+- Risk labels match the actual diff and consequence rather than broad component location. See [Labels](./labels.md).
+- Migration / compatibility impact is documented.
+- Rollback path is concrete and fast.
+
+## Maintainer merge checklist
+
+Every merge:
+
+- Scope is focused and understandable.
+- CI gate is green.
+- Docs-quality checks are green when docs changed.
+- Security and privacy fields are complete; evidence is redacted / anonymized.
+- A PR carrying `risk:high` or `domain:security` satisfies the two-Core default or every condition of the [expedited second-review lane](#expedited-second-review-lane); automated review never counts as a Core Team approval.
+- Agent-workflow notes are sufficient for reproducibility (if AI-assisted).
+- Rollback plan is explicit.
+- Commit title follows Conventional Commits.
+
+Squash-merge with full commit history preserved in the body. The `squash-merge` skill produces both the purple **Merged** badge and the conventional-commits formatted body, see [Skills](./skills.md) for invocation.
+
+## AI / Agent contribution policy
+
+AI-assisted PRs are welcome. Review can also be agent-assisted.
+
+**Required:**
+
+1. Clear PR summary with scope boundary.
+2. Explicit test / validation evidence.
+3. Security impact and rollback notes for risky changes.
+
+**Recommended:**
+
+1. Brief tool / workflow notes when automation materially influenced the change.
+2. Optional prompt / plan snippets for reproducibility.
+
+We do **not** require contributors to quantify AI-vs-human line ownership. The diff and the validation evidence carry the load.
+
+For AI-heavy PRs, reviewers focus on:
+
+- Contract compatibility.
+- Security boundaries.
+- Error handling.
+- Performance and memory regressions.
+- Whether the author can answer questions about behavior and blast radius (intent comprehension).
+
+## Review SLA and queue discipline
+
+- First maintainer triage target: **within 48 hours**.
+- Blocked PRs get one actionable checklist comment, not a series of partial reviews.
+- `status:no-stale` is reserved for accepted or otherwise long-lived work with a recorded stale-exemption reason and contributor-visible routing evidence when the issue is not already protected by another stale exclusion. Active release trackers and active RFC or design trackers may use the tracker itself as that visible reason and routing surface while they remain active. Existing exemptions missing those facts are audit findings until the stale-exemption repair packet lands.
+
+For stacked work, require explicit `Depends on #...` so review order is deterministic.
+
+Apply that deterministic order operationally: prioritize and review a parent before its children; when a parent is not reviewable, defer deep child review unless a bounded independent slice benefits from early review; after the parent lands, refresh and revalidate the child. A parent becoming reviewable does not make previously collected child evidence current.
+
+For a report-only snapshot of the live GitHub queues, run `python3 scripts/github/pr_review_queue.py --queue all --older-than-days 7 --format table`. The `--queue` values are `near-ready`, `maintainer`, `second-core`, `author-action`, `stacked`, `mine`, and `all`; `--format` accepts `table`, `json`, or `links`. `near-ready` narrows the maintainer lane to PRs whose GitHub search status is successful, so maintainers can start with candidates that may need less work before merge; it does not establish mergeability or approval sufficiency. `all` runs the shared lanes independently, so one PR can appear in more than one lane; add `--author LOGIN` to include the `mine` lane. GitHub search supplies the candidate lists. Only `author-action` reads timeline detail to estimate unanswered-request age, and only `second-core` reads reviews. The `second-core` lane requires one Core approval on the current head. When a different Core reviewer has an active approval on an older revision, the row identifies both approvals as a carry-forward assessment candidate. A maintainer may carry that approval forward only when the later changes are mechanical integration or contract-preserving repair; a changed load-bearing premise, material decision, or risk requires renewed review. The queue does not decide equivalence or certify approval sufficiency. The command never writes queue state or mutates GitHub, and it reports missing or ambiguous detail as unknown. It is a work-selection aid, not merge-readiness evidence.
+
+For replacements, require explicit `Supersedes #...`. See [Superseding PRs](./superseding.md) for attribution and template rules.
+
+The reviewer-side queue management, backlog pruning order, stale handling, label hygiene, is in [Reviewer Playbook](./reviewer-playbook.md).
+
+## Security and stability rules
+
+Review these paths attentively because they often contain boundary-relevant behavior:
+
+- `crates/zeroclaw-runtime/` (including `src/security/`)
+- `crates/zeroclaw-gateway/` (ingress, authentication, pairing)
+- `crates/zeroclaw-tools/` (anything with execution capability)
+- `.github/workflows/` and the release pipeline
+
+Path location alone does not select `risk:high`. Classify the actual diff and consequence under [Labels → Risk labels](./labels.md#risk-labels). A trust, credential, compatibility, governance, release-authority, or cross-cutting security boundary receives deep review when the PR carries `risk:high` or `domain:security`.
+
+Filesystem access boundaries and network or authentication behavior inside these crates deserve particular attention even when the diff is small.
+
+**Minimum for `risk:high` or `domain:security` PRs:** threat or risk statement, mitigation notes, rollback steps, and either two independent Core Team approvals or every condition of the [expedited second-review lane](#expedited-second-review-lane).
+
+**Recommended for `risk:high` or `domain:security` PRs:** a focused test proving boundary behavior, plus one explicit failure-mode scenario with expected degradation.
+
+For agent-assisted contributions that cross these boundaries, reviewers also verify the author can talk through runtime behavior and blast radius, not just paste validation output.
+
+## Failure recovery
+
+If a merged PR causes regressions:
+
+1. Revert on `master` immediately.
+2. Open a follow-up issue with root-cause analysis.
+3. Re-introduce the fix only with regression tests covering the failure mode.
+
+Prefer fast restoration of service quality over a delayed perfect fix.
+
+## What this page does NOT cover
+
+- **Day-to-day review mechanics**: see [Reviewer Playbook](./reviewer-playbook.md) and [PR Review Protocol](../contributing/pr-review-protocol.md).
+- **Label thresholds and definitions**: see [Labels](./labels.md).
+- **Privacy and PII rules**: see [Privacy](../contributing/privacy.md).
+- **Supersede attribution and templates**: see [Superseding PRs](./superseding.md).
+- **CI workflow inventory and triage**: see [CI & Actions](./ci-and-actions.md).
+- **Release procedure**: see [Release Runbook](./release-runbook.md).

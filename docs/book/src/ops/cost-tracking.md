@@ -1,0 +1,305 @@
+# Cost tracking
+
+ZeroClaw records every token-bearing model call to an append-only ledger,
+including calls whose pricing is only partially available. It attributes spend
+to the originating agent, enforces daily / monthly budgets over the priced
+portion, and surfaces both spend and missing-pricing exposure to operators. The
+pricing rules live in config so operators can edit them without a rebuild.
+
+This page describes the schema, the lookup pipeline, and the operator
+surfaces. The code lives in `crates/zeroclaw-config/src/cost/` and
+`crates/zeroclaw-runtime/src/agent/cost.rs`.
+
+## Config schema
+
+Two related sections own the surface. `cost` covers budget enforcement and recording behavior. `cost.rates.*`
+is the operator-managed rate sheet; every subsection's dotted path mirrors
+the matching `providers.*` path with the trailing `<alias>` segment
+replaced by the upstream resource being priced.
+
+### Why the key is a resource id, not an alias
+
+A `[providers.models.anthropic.<alias>]` entry is keyed by an operator-chosen
+alias (`glados`, `production`) that follows the alias validator: lowercase
+ASCII, single underscores, no hyphens. A `[cost.rates.providers.models.anthropic.<resource>]`
+entry is keyed by the **upstream model id** as it appears in usage telemetry
+(`claude-opus-4-7`, `gpt-4o-mini`, `whisper-1`): those id strings come from
+the provider's namespace and almost always contain hyphens.
+
+The schema marks every rate-sheet HashMap with `#[resource_key]` (in
+`crates/zeroclaw-macros/src/lib.rs`). That attribute opts the field out of
+`validate_alias_key` in `create_map_key` / `rename_map_key`, so the
+gateway's `POST /api/config/map-key` accepts hyphenated ids. Without it,
+`create_map_key` rejects every realistic model id and the rate-sheet UI
+falls flat. Aliases and resource ids share the on-disk structure
+(`HashMap<String, T>`) but they're different naming systems with different
+validators.
+
+### Slot lists are the single source of truth
+
+The per-provider-type slots under `[cost.rates.providers.models.<type>]`,
+`[cost.rates.providers.tts.<type>]`, and `[cost.rates.providers.transcription.<type>]`
+expand from the same macros that drive the `[providers.*]` slot wrappers:
+
+```rust
+// crates/zeroclaw-config/src/providers.rs
+for_each_model_provider_slot!(emit_model_cost_rates_struct);
+for_each_tts_provider_slot!(emit_tts_cost_rates_struct, super::schema::TtsCostRates);
+for_each_transcription_provider_slot!(emit_transcription_cost_rates_struct, super::schema::TranscriptionCostRates);
+```
+
+Adding a new model provider type is one row in `for_each_model_provider_slot!`;
+the rate-sheet slot, the provider config slot, and the dashboard dropdowns
+all expand from it. No hand-typed dispatch tables, no parallel string lists
+on the frontend.
+
+## Pricing at request time
+
+The pipeline from `[cost.rates.*]` to a recorded `cost_usd` value is:
+
+1. **Orchestrator startup builds the pricing map.** When the channels
+   supervisor instantiates a runtime context for an agent it walks
+   `config.cost.rates.providers.models.iter_entries()` and merges the
+   rates into a `HashMap<provider_type, HashMap<key, f64>>` where `key`
+   is `"<model_id>.input"`, `"<model_id>.output"`, or
+   `"<model_id>.cached_input"`. The legacy per-alias
+   `[providers.models.<type>.<alias>].pricing` table is merged in too;
+   `[cost.rates.*]` wins on conflict because it's the forward-looking
+   surface.
+   (See `crates/zeroclaw-channels/src/orchestrator/mod.rs`,
+   the closure under `cost_tracking: CostTracker::get_or_init_global(...).map(|tracker| ...)`.)
+
+2. **Recording inside the agent loop.** Every successful LLM response
+   reaches `record_tool_loop_cost_usage(provider_name, model, usage)`
+   in `crates/zeroclaw-runtime/src/agent/cost.rs`. The function pulls
+   the pricing map slot for `provider_name`, calls `resolve_rates(map,
+   model)`, multiplies by token counts, and stores a `CostRecord` via
+   the global `CostTracker`.
+
+3. **Per-dimension resolution and validation.** `resolve_rates_opt` tries the model id first, then the path-suffix
+   form for `provider/model` strings (so `anthropic/claude-opus-4-7`
+   degrades to `claude-opus-4-7` if the operator stored only the
+   short form). It retains one `Option` per dimension so live pricing and the
+   global catalog fill only gaps. A deliberate `0.0` input or output rate
+   remains configured and free. A `0.0` cached-input rate is also configured,
+   but it is not free: the existing cost constructor treats it as "no cache
+   discount" and bills cached tokens at the standard input rate. Negative,
+   non-finite, or implausibly large rates (above the shared `$1,000,000` per
+   configured unit safety bound) are treated as unavailable at the recording
+   boundary even if an older or permissive config-load path let them through.
+
+   Missing input, cached-input, and output dimensions are evaluated only when
+   that dimension carries tokens. The one-shot runtime warning identifies the
+   incomplete dimensions. A partially priced call therefore records its known
+   cost and separately records only the token subset that could not be priced.
+
+4. **CostTracker is a process-global singleton** (`OnceLock` in
+   `crates/zeroclaw-config/src/cost/tracker.rs`). Reload applies the
+   latest `CostConfig` to the existing tracker, and if cost tracking
+   was disabled at boot, a later reload with `cost.enabled = true`
+   constructs the tracker on demand. The orchestrator's pricing map is
+   also rebuilt on every daemon reload from the live config, so rate
+   edits take effect on the next request after reload.
+
+## Live pricing from gateways
+
+Operators don't have to hand-maintain a rate for every model. A provider can
+opt into pulling token prices straight from its own gateway by setting
+`live_pricing = true` on that provider block (alongside its existing `api_key`
+and model settings); the prices come from the gateway's own `/models` listing.
+
+Behavior:
+
+- **Gateway is the primary source.** The provider's existing `/models` endpoint
+  (the same one onboarding uses to list models) is parsed for per-model pricing.
+  Gateways that publish prices there report them as per-token decimal strings
+  (OpenRouter's and Kilo's `pricing{prompt,completion,...}`), which are scaled
+  to USD per 1M tokens. A gateway whose `/models` listing carries no pricing at
+  all (such as opencode zen, which lists model ids only) is covered by the
+  models.dev fallback below. No second copy of the endpoint URL or credentials:
+  they are read from the provider's existing config.
+- **models.dev fallback.** A model the gateway doesn't price (or a provider
+  with no HTTP `/models` listing at all, such as a subprocess gateway like
+  `kilocli`) falls back to the public [models.dev](https://models.dev)
+  catalog (`api.json`), keyed by the family's models.dev name (see
+  `catalog_source_for` in `crates/zeroclaw-providers/src/catalog.rs`). The
+  fallback catalog is fetched fresh on each refresh cycle, so both sources
+  track upstream price changes on the same hourly cadence.
+- **Config always wins.** Live prices fill *only* the dimensions a model has
+  no `[cost.rates]` / `pricing` entry for. A configured rate (including a
+  deliberate `0.0`) is never overridden. This is a gap-filler, not a
+  replacement.
+- **One call per gateway, only flagged models.** Aliases sharing a gateway are
+  deduped to a single `/models` fetch; from that response only each opted-in
+  alias's own configured `model` is filled, not every model the gateway lists.
+- **Background refresh, never blocks.** A single task refreshes a process-wide
+  price snapshot hourly. The cost-recording path reads the cached snapshot
+  synchronously and never makes a network call inline, so a slow gateway can't
+  stall request accounting.
+- **Default off.** With no provider setting `live_pricing = true` there is no
+  refresher task and no network traffic; behavior is identical to a build
+  without the feature. Turning the last flagged provider off at runtime
+  (config reload) clears the snapshot on the next refresh cycle, so live
+  prices stop filling without a restart. The snapshot lives only in
+  `zeroclaw_providers::pricing` (see `crates/zeroclaw-providers/src/pricing.rs`);
+  it is read by `record_tool_loop_cost_usage` and spawned once from the
+  channels supervisor and the gateway startup.
+
+Like `[cost.rates]`, a live price only affects requests made after the snapshot
+is populated; there's no retroactive repricing of past records.
+
+## Persistence
+
+`CostTracker::record_usage_with_agent` appends one `CostRecord` per
+token-bearing response to `<workspace>/state/costs.jsonl`, one JSON object
+per line. The ledger is read on startup so the dashboard's current-month
+per-agent rollup survives restarts.
+
+Each `TokenUsage` record carries two pricing-provenance fields:
+
+- `unpriced_tokens`: the input, cached-input, or output token subset whose
+  effective rate was unavailable. It is `0` for fully priced calls, including
+  calls priced at a deliberately free `0.0` input or output rate and calls
+  whose `0.0` cached-input rate fell back to the standard input rate.
+- `pricing_available`: compatibility summary of that provenance. New records
+  set it to `false` when `unpriced_tokens > 0`.
+
+Ledger rows written before these fields existed deserialize with
+`pricing_available = true` and `unpriced_tokens = 0`. Zero spend on a legacy
+row therefore does **not** prove that historical pricing was available; the
+missing provenance cannot be reconstructed safely after the fact.
+
+`cost_usd` is computed at record time from the rate sheet in effect
+**at that moment**. Records are immutable: if the operator adds
+rates after some requests have already been recorded, those existing
+records keep `cost_usd = 0`. Only requests made after the rate is
+configured (and the daemon reloaded so the orchestrator's pricing
+map rebuilds) carry a non-zero cost.
+
+This is the most common surprise after first enabling the rate sheet.
+The fix is to wait for new requests; there's no retroactive repricing.
+
+## Budget enforcement
+
+`CostConfig::enforcement.mode` decides what happens when a projected
+cost would push `daily_total` or `monthly_total` past the configured
+limit:
+
+- `warn`: the default; record the event with a warn-level log and
+  let the request through.
+- `block`: refuse the request with a `BudgetExceeded` error.
+- `route_down`: substitute `route_down_model` (a cheaper
+  alternative) for the original model. The substitution happens before
+  the request is dispatched.
+
+`allow_override = true` lets a request bypass `block` by passing an
+override token on the CLI (`zeroclaw --override`). Defaults to
+`false`. `warn_at_percent` controls when the gateway surfaces a
+warning banner ahead of the hard limit; defaults to 80%.
+
+Budget comparisons use recorded `cost_usd`, so they cannot account for the
+`unpriced_tokens` subset. A daily or monthly total below its cap is not a safety
+assurance while the current month contains unpriced tokens. Configure the
+missing rate dimensions and generate a new request before relying on cap
+enforcement; existing ledger rows are never retroactively repriced.
+
+## Per-agent attribution
+
+When `cost.track_per_agent` is true (default) every recorded
+`CostRecord` carries the originating agent alias. The dashboard's
+**Spend by agent** panel and `GET /api/cost?agent=<alias>` consume
+this field. Setting `track_per_agent = false` is an optimization for
+high-volume installs where the extra HashMap aggregation shows up in
+profiles; the trade-off is losing the per-agent dimension everywhere.
+
+## Operator surfaces
+
+### CLI status
+
+`zeroclaw status` prints today's and the current month's spend from the ledger.
+When any model recorded `unpriced_tokens > 0` anywhere in the current UTC
+month, it also prints a pricing-unavailable warning listing the affected models
+and the total uncosted token count across them. The warning reads a
+month-scoped model rollup (`CostTracker::get_current_month_model_stats`), not
+the daily `by_model` breakdown the dashboard uses, so unpriced usage from an
+earlier day of the month stays visible after UTC day rollover and after a
+restart. The warning is intentionally independent of the aggregate dollar
+total: mixed priced/unpriced rows remain visible, while a fully configured free
+model stays quiet.
+
+This warning means the displayed spend is a lower bound and the remaining cap
+headroom is an upper bound, not complete accounting. Legacy rows cannot trigger
+it because their historical pricing provenance is unknown.
+
+### Config UI
+
+- `/config/cost` → **Limits** tab: every flat `[cost].*` field
+  (enabled, limits, enforcement, track_per_agent). Rate-sheet rows
+  are not edited here, they're tied to the provider that owns the
+  model, so they live one tier down.
+- `/config/providers.<category>/<type>` → **Costs** tab: rate-sheet
+   editor for that provider type. The `+ Add` input suggests upstream
+   resource ids drawn from `providers.<category>.<type>.*.model`
+   across configured aliases, so the operator can one-click a rate row
+   for every model they've actually bound. This is the only entry
+   point for editing `[cost.rates.providers.<category>.<type>.*]`.
+
+### Dashboard
+
+The dashboard's **Cost** tab shows three panels plus a Window picker
+(today / last 7 days / last 30 days / this month / all time):
+
+- **Spend totals**: daily and monthly totals from `costs.jsonl`.
+- **Spend by agent · `<window>`**: per-agent rollup over the picked
+  window. Visible when `track_per_agent` is true.
+- **Spend by model · `<window>`**: per-model rollup. Each row's model
+  id is clickable; the click resolves the owning provider type from
+  configured aliases and navigates to that provider's Costs tab. When
+  the model id isn't bound to any configured provider the click is a
+  no-op (there's no qualified rate-sheet route for an orphan model).
+
+### Gateway
+
+- `GET /api/cost`: current `CostSummary` (matches the dashboard's
+  Cost overview shape). Add `?agent=<alias>` for a single-agent view.
+- `GET /api/config/templates`: every map-keyed section the schema
+  registers, used by the Rates tab's category × provider-type
+  dropdowns.
+- `POST /api/config/map-key?path=cost.rates.providers.<category>.<type>&key=<resource>`
+  create a new rate row. The path is rejected if no such map
+  section exists; the resource key passes `#[resource_key]` instead
+  of `validate_alias_key`.
+
+## Troubleshooting
+
+**Dashboard shows $0.0000 for all agents after configuring rates.**
+Old records are immutable, they were recorded with `cost_usd = 0`
+because no rate was set when they happened. Make a new chat request
+after the daemon reload and check **Cost overview > Session** plus
+**Spend by model**; both should populate for the new request.
+
+**`zeroclaw status` says pricing is unavailable even though some rates are configured.**
+Pricing is resolved per token-bearing dimension. For example, an input rate
+does not price output tokens, and a cached-input rate does not price uncached
+input. Add the dimensions named by the runtime warning. A configured `0.0`
+input or output rate is a valid free rate and does not trigger the status
+warning; a configured `0.0` cached-input rate bills cached tokens at the
+standard input rate and does not trigger it either.
+
+**Drift detected against `cost.rates.*` paths after save.** A pre
+v0.8.0 daemon mangled hyphenated HashMap keys in the dirty-save path,
+silently dropping every write to the rate sheet. If you see this on
+v0.8.0+ it's a real bug: the dirty-path resolution lives in
+`crates/zeroclaw-config/src/schema.rs::apply_dirty_path`; file an
+issue with the daemon version and the path that drifted.
+
+**`missing_pricing` warns spam the log.** The runtime emits this once per
+`(provider_type, model)` pair when a token-bearing input, cached-input, or
+output dimension remains unpriced after `resolve_rates_opt` merges configured,
+live, and global-catalog rates. The warning names the incomplete dimensions; a
+partially configured model can therefore warn even though another dimension is
+already priced. Add only the missing dimensions for the exact model id named by
+the warning. Some providers return versioned ids such as
+`claude-3-5-sonnet-20241022` even when the configured id is
+`claude-3-5-sonnet`; the resolver also tries its documented path-suffix
+candidate before reporting the gap.

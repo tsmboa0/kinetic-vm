@@ -1,0 +1,140 @@
+# Tools: Overview
+
+**Tools** are the agent's hands. A tool is a capability the model can invoke mid-conversation, run a shell command, fetch an HTTP URL, open a browser, write a file, read a sensor. Every tool call is subject to [security policy](../security/overview.md). Successful executions can include a [tool receipt](../security/tool-receipts.md) when receipts are enabled.
+
+Tools are not to be confused with `zeroclaw` CLI subcommands. CLI commands are for operators; tools are for the agent.
+
+An agent gets its tools through the skill, knowledge, and MCP bundles it references; see [Agents](../agents/overview.md) for how bundles attach to an agent.
+For the turn-level path from provider tool call to approval, dispatch, receipt,
+observer event, and history entry, see
+[Tool execution lifecycle](../architecture/tool-execution-lifecycle.md).
+
+Before adding a built-in tool or replacing one with an external integration,
+use the [Built-In Tool Inventory](../developing/tool-inventory.md)
+to choose the smallest durable home. Working built-in integrations stay
+available until a replacement is real, documented, and independently reviewed;
+that replacement-first rule is the accepted
+[RFC #6165](https://github.com/zeroclaw-labs/zeroclaw/issues/6165) policy,
+recorded in the inventory's
+[Replacement-First Policy](../developing/tool-inventory.md#replacement-first-policy)
+section.
+
+## Built-in tools
+
+A minimal build ships with:
+
+| Tool | What it does |
+|---|---|
+| `shell` | Execute a shell command in the workspace directory. Subject to command allow/deny lists |
+| `file_read` | Read a file with line numbers; supports partial reads and base64 encoding for binary files (path must be inside the workspace unless autonomy permits otherwise) |
+| `file_write` | Write a file (same path constraint) |
+| `file_edit` | Replace an exact string match in a file with new content |
+| `glob_search` | List files matching a glob pattern within the workspace |
+| `content_search` | Search file contents by regex within the workspace (ripgrep with grep fallback) |
+| `http_request` | HTTP GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS to allowlisted domains |
+| `web_search_tool` | Web search. Provider is configurable: DuckDuckGo (default, no key), Brave, Tavily, SearXNG, Jina, Bocha, AnySearch, Serply, or Keenable (no key required; optional key lifts rate limits) |
+| `web_fetch` | Fetch a page and return clean plain text |
+| `browser` | Headless-browser automation. Opt-in: requires `[browser] automation_enabled = true`. See [Browser automation](./browser.md) |
+| `memory_recall` | Search long-term memory for relevant facts, preferences, or context |
+| `memory_store` | Store a fact, preference, or note in long-term memory |
+| `ask_user` | Send a question to the active channel and wait for a reply. Supports optional `choices` for structured responses (inline keyboard on Telegram, numbered list on CLI). On ACP, `choices` are required: free-form ask awaits the ACP elicitation RFD. Parameters: `question` (required), `choices` (optional list), `timeout_secs` (default 600). |
+| `escalate_to_human` | Send a structured escalation message with urgency routing. `high` / `critical` urgency additionally notifies any channels listed in `[escalation] alert_channels`. Parameters: `summary` (required), `context` (optional), `urgency` (`low`/`medium`/`high`/`critical`, default `medium`), `wait_for_response` (bool, default false), `timeout_secs` (default 600). On ACP, `wait_for_response: true` fails immediately if the channel cannot receive free-form replies (awaits ACP elicitation RFD). |
+
+### AnySearch provider
+
+AnySearch is an explicit, opt-in backend for `web_search_tool`:
+
+```toml
+[web_search]
+search_provider = "anysearch"
+# Optional; omit to use AnySearch's lower, rate-limited anonymous quota.
+anysearch_api_key = "..."
+```
+
+Search queries and the configured result limit are sent to
+`https://api.anysearch.com/v1/search`. When `anysearch_api_key` is configured,
+ZeroClaw sends it only as a Bearer authorization header; without a key, no
+`Authorization` header is sent. Selecting this provider therefore sends search
+queries to a third-party service even in anonymous mode. It does not change the
+default provider and is not used as an automatic fallback.
+
+Always registered alongside the built-ins:
+
+| Tool | Notes |
+|---|---|
+| `cron_*` | Manage scheduled jobs: `cron_add`, `cron_list`, `cron_remove`, `cron_update`, `cron_run`, `cron_runs` |
+| `schedule` | Shell-only one-shot/recurring scheduling |
+| `memory_forget`, `memory_export`, `memory_purge` | Long-term memory management |
+| `spawn_subagent`, `delegate` | Run a subtask in a child agent |
+
+Conditionally registered:
+
+| Tool | Enabled by |
+|---|---|
+| `knowledge` | `[knowledge].enabled = true`. Stores structured relationship memory; see [Relationship memory](./relationship-memory.md) |
+| Hardware probes | `--features hardware`: GPIO reads/writes, device discovery, firmware flashing |
+| `sop_*` tools | Registered when the SOP runtime is enabled (`sop.sops_dir` set to a non-empty value; unset by default, which disables it; the documented value is `shared/sops`): run and inspect SOPs |
+| `discord_search` | Registered when a Discord alias has `archive` enabled |
+
+## Extension protocols
+
+Beyond built-in tools, ZeroClaw supports the **[MCP](./mcp.md)** (Model Context Protocol) extension surface. Connect any MCP server (Claude Code's filesystem, Playwright, your own) and the agent picks up its tools at startup.
+
+For IDE-side integration where an editor drives ZeroClaw as a subprocess, see [ACP](../channels/acp.md): Agent Client Protocol lives under channels since it's an inbound session-management surface, not a tool the agent invokes.
+
+## Authoring a tool
+
+Implement the `Tool` trait in `zeroclaw-api`:
+
+```rust
+#[async_trait]
+pub trait Tool: Send + Sync + Attributable {
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
+    fn parameters_schema(&self) -> serde_json::Value;   // JSON Schema for args
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult>;
+}
+```
+
+Every `Tool` is also `Attributable`, so a tool call's log emissions and audit traces carry the same `<kind>.<alias>` attribution the rest of the runtime uses.
+
+Register via the runtime's tool factory. See [Developing → Plugin protocol](../developing/plugin-protocol.md) for the full pattern.
+
+## Describing tools to the model
+
+Tool descriptions are [Mozilla Fluent](https://projectfluent.org/) strings: one per tool, localised per locale. This keeps tool descriptions terse in the model's context window while allowing UI localisation.
+
+Source of truth: `crates/zeroclaw-runtime/locales/en/tools.ftl`. Translations are generated and maintained via `cargo fluent fill --locale <code>` (see [Maintainers → Docs & Translations](../maintainers/docs-and-translations.md)).
+
+## Risk and approval
+
+Every tool invocation is classified by risk:
+
+- **Low** (read-only, no side effects): `file_read`, `memory_recall`, `http_request GET` to allowed domains
+- **Medium** (mutates local state): `file_write`, `shell` with known safe commands
+- **High** (destructive or remote side effects): `shell` with unknown commands, `http_request POST` to unconstrained URLs
+
+The [autonomy level](../security/autonomy.md) determines what each risk tier can do without operator approval. Default (`Supervised`): low runs, medium asks, high blocks.
+
+When receipts are enabled, successful executions receive a [tool receipt](../security/tool-receipts.md). Denied, blocked, replaced, failed, or interrupted calls do not receive receipts.
+
+## Disabling tools on non-CLI channels
+
+The schema has no per-channel `tools_allow` / `tools_deny` field. Tool gating lives on the agent's risk profile (`[risk_profiles.<alias>]`):
+
+- `excluded_tools` removes the listed tools from every non-CLI channel (Discord, Telegram, Bluesky, Matrix, Slack, etc.) while leaving the local CLI untouched. The granularity is binary (CLI vs non-CLI), not per-channel. It also subtracts from the agentic-delegate allow-list resolved at runtime, which is the only way to block individual `<server>__<tool>` MCP names that would otherwise be auto-admitted by the rule below.
+- `allowed_tools` is an allowlist. Omitted and an explicit empty list (`allowed_tools = []`) mean the same legacy state: no authorization constraint. A nonempty list is a closed set for built-ins (and, via the MCP exception below, auto-admits namespaced MCP tools). An empty list does **not** mean deny-all; for that, set the sibling `deny_all_tools = true`, which denies built-ins, MCP tools, and skill-defined tools alike. Setting both `deny_all_tools = true` and a nonempty `allowed_tools` is a configuration error rejected at load.
+- **MCP exception**: when `allowed_tools` is non-empty, runtime-discovered MCP tools (any name containing `__`, the `<server>__<tool>` convention) are auto-admitted into the effective allow-list without having to be listed there individually. This keeps the post-#7464 eager-MCP default usable for agents that already pin an explicit allow-list. To block individual MCP tools, list them in `excluded_tools`.
+- The MCP exception is scoped to the **risk profile**'s `allowed_tools` only. Caller-supplied per-run allow-lists (cron job `allowed_tools`, narrowed delegate invocations, etc.) are still treated as strict explicit-list intersections. A job that narrows itself to `allowed_tools = ["cron_add"]` will not surface runtime-discovered MCP wrappers it did not name, even when the agent's risk profile would auto-admit them.
+
+If you need finer-grained gating under Full autonomy, put sensitive tools in the per-profile `always_ask` list: they still prompt (or fail closed) even when `level = "full"`. Dropping the profile to `read_only` or `supervised` is only required when you want the whole risk-tier matrix, not when you need a handful of exceptions.
+
+See [Autonomy levels](../security/autonomy.md) for the full set of per-profile fields.
+
+## See also
+
+- [MCP](./mcp.md)
+- [Tool execution lifecycle](../architecture/tool-execution-lifecycle.md)
+- [ACP](../channels/acp.md)
+- [Browser automation](./browser.md)
+- [Security → Overview](../security/overview.md)

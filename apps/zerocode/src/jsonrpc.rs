@@ -1,0 +1,304 @@
+//! JSON-RPC 2.0 transport.
+//!
+//! `apps/zerocode` keeps local ownership of its transport plumbing.
+//! Wire shape is the contract; if the daemon evolves its envelope, this file
+//! evolves to match.
+//!
+//! `RpcOutbound` carries the writer channel + a pending-request map
+//! so concurrent notifications and outbound calls cannot interleave
+//! bytes. The TUI uses it both for client-issued requests
+//! (`session/turn`, `quickstart/apply`, …) and for routing
+//! daemon-originated notifications.
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::{mpsc, oneshot};
+
+// ── Protocol constants ───────────────────────────────────────────
+
+pub const JSONRPC_VERSION: &str = "2.0";
+pub const OUTBOUND_ID_PREFIX: &str = "zc-out-";
+
+// ── Wire field name constants ────────────────────────────────────
+
+pub mod field {
+    pub const METHOD: &str = "method";
+    pub const ID: &str = "id";
+    pub const RESULT: &str = "result";
+    pub const ERROR: &str = "error";
+}
+
+// ── Wire types ───────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JsonRpcRequest {
+    pub jsonrpc: String,
+    pub method: String,
+    #[serde(default)]
+    pub params: Value,
+    pub id: Option<Value>,
+}
+
+impl JsonRpcRequest {
+    pub fn new(method: &str, params: Value, id: Value) -> Self {
+        Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            method: method.to_string(),
+            params,
+            id: Some(id),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct JsonRpcResponse {
+    pub jsonrpc: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<JsonRpcError>,
+    pub id: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcError {
+    pub code: i32,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+// ── Error codes ──────────────────────────────────────────────────
+
+pub mod error_codes {
+    pub const METHOD_NOT_FOUND: i32 = -32601;
+    pub const INTERNAL_ERROR: i32 = -32603;
+
+    pub const SESSION_NOT_FOUND: i32 = -32000;
+    #[cfg(test)]
+    pub const SESSION_BUSY: i32 = -32002;
+}
+
+pub const ACP_PROTOCOL_VERSION: u64 = 1;
+
+// ── Outbound RPC plumbing ────────────────────────────────────────
+
+type PendingResponder = oneshot::Sender<std::result::Result<Value, JsonRpcError>>;
+
+#[derive(Debug)]
+pub(crate) enum OutboundMessage {
+    Frame(String),
+    Flush(oneshot::Sender<()>),
+}
+
+#[derive(Debug)]
+enum OutboundSender {
+    #[cfg(test)]
+    Raw(mpsc::Sender<String>),
+    Transport(mpsc::Sender<OutboundMessage>),
+}
+
+#[derive(Debug, Default)]
+struct OutboundState {
+    pending: HashMap<String, PendingResponder>,
+    closed_error: Option<JsonRpcError>,
+}
+
+/// Writer + outbound-call tracker shared between the read loop and
+/// the calling tasks. All writes go through `writer_tx` so concurrent
+/// notifications and outbound requests cannot interleave bytes.
+#[derive(Debug)]
+pub struct RpcOutbound {
+    writer_tx: OutboundSender,
+    state: std::sync::Mutex<OutboundState>,
+    next_id: AtomicU64,
+}
+
+struct PendingRequestGuard<'a> {
+    state: &'a std::sync::Mutex<OutboundState>,
+    id: String,
+}
+
+impl Drop for PendingRequestGuard<'_> {
+    fn drop(&mut self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .remove(&self.id);
+    }
+}
+
+impl RpcOutbound {
+    #[cfg(test)]
+    pub fn new(writer_tx: mpsc::Sender<String>) -> Self {
+        Self {
+            writer_tx: OutboundSender::Raw(writer_tx),
+            state: std::sync::Mutex::new(OutboundState::default()),
+            next_id: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn new_transport(writer_tx: mpsc::Sender<OutboundMessage>) -> Self {
+        Self {
+            writer_tx: OutboundSender::Transport(writer_tx),
+            state: std::sync::Mutex::new(OutboundState::default()),
+            next_id: AtomicU64::new(0),
+        }
+    }
+
+    async fn send_frame(&self, frame: String) -> bool {
+        match &self.writer_tx {
+            #[cfg(test)]
+            OutboundSender::Raw(writer_tx) => writer_tx.send(frame).await.is_ok(),
+            OutboundSender::Transport(writer_tx) => {
+                writer_tx.send(OutboundMessage::Frame(frame)).await.is_ok()
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn send_raw(&self, json: String) -> bool {
+        self.send_frame(json).await
+    }
+
+    pub async fn flush_outbound(&self) -> bool {
+        // `Raw` exists only in test builds, so the pattern is refutable there
+        // and irrefutable in production; both forms keep clippy clean.
+        #[cfg(test)]
+        let OutboundSender::Transport(writer_tx) = &self.writer_tx else {
+            return true;
+        };
+        #[cfg(not(test))]
+        let OutboundSender::Transport(writer_tx) = &self.writer_tx;
+        let (ack_tx, ack_rx) = oneshot::channel();
+        if writer_tx
+            .send(OutboundMessage::Flush(ack_tx))
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        ack_rx.await.is_ok()
+    }
+
+    /// Write a JSON-RPC response (success or error) keyed to a
+    /// server-originated request id. Used by the TUI when the daemon
+    /// invokes a method on us (e.g. `elicitation/create`) and we need
+    /// to ship back an `Accept` / `Decline` / `Cancel`.
+    pub async fn respond(
+        &self,
+        id: Value,
+        result: std::result::Result<Value, JsonRpcError>,
+    ) -> bool {
+        let resp = JsonRpcResponse {
+            jsonrpc: JSONRPC_VERSION,
+            result: result.as_ref().ok().cloned(),
+            error: result.err(),
+            id,
+        };
+        match serde_json::to_string(&resp) {
+            Ok(s) => self.send_frame(s).await,
+            Err(_) => false,
+        }
+    }
+
+    pub async fn request(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> std::result::Result<Value, JsonRpcError> {
+        let n = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = format!("{OUTBOUND_ID_PREFIX}{n}");
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(error) = &state.closed_error {
+                return Err(error.clone());
+            }
+            state.pending.insert(id.clone(), tx);
+        }
+        let _pending_guard = PendingRequestGuard {
+            state: &self.state,
+            id: id.clone(),
+        };
+        let req = JsonRpcRequest::new(method, params, Value::String(id));
+        let body = match serde_json::to_string(&req) {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(JsonRpcError {
+                    code: error_codes::INTERNAL_ERROR,
+                    message: format!("Failed to encode request: {e}"),
+                    data: None,
+                });
+            }
+        };
+        if !self.send_frame(body).await {
+            return Err(JsonRpcError {
+                code: error_codes::INTERNAL_ERROR,
+                message: "Writer task closed".to_string(),
+                data: None,
+            });
+        }
+        rx.await.unwrap_or_else(|_| {
+            Err(JsonRpcError {
+                code: error_codes::INTERNAL_ERROR,
+                message: "Outbound RPC dropped".to_string(),
+                data: None,
+            })
+        })
+    }
+
+    pub fn dispatch_response(
+        &self,
+        id_str: &str,
+        result: Option<Value>,
+        error: Option<JsonRpcError>,
+    ) {
+        let responder = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .remove(id_str);
+        if let Some(tx) = responder {
+            let payload = if let Some(err) = error {
+                Err(err)
+            } else {
+                Ok(result.unwrap_or(Value::Null))
+            };
+            let _ = tx.send(payload);
+        }
+    }
+
+    /// Close request admission and fail every request still awaiting a response
+    /// when the owning transport terminates. Responders are woken after release.
+    pub fn fail_pending(&self, message: &str) {
+        let (responders, error) = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let error = state
+                .closed_error
+                .get_or_insert_with(|| JsonRpcError {
+                    code: error_codes::INTERNAL_ERROR,
+                    message: message.to_string(),
+                    data: None,
+                })
+                .clone();
+            (std::mem::take(&mut state.pending), error)
+        };
+        for (_, responder) in responders {
+            let _ = responder.send(Err(error.clone()));
+        }
+    }
+
+    #[cfg(test)]
+    pub fn pending_count(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .len()
+    }
+}

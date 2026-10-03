@@ -1,0 +1,1382 @@
+//! Shared paired-identity persistence for QR-pairing channels.
+//!
+//! When a QR pairing completes, the linked account identity becomes an
+//! authorized external peer. The canonical home for that authorization is
+//! a `[peer_groups.<name>]` entry in `config.toml` whose `channel` field
+//! is the dotted `<channel_type>.<alias>` instance ref — the same
+//! channel-ref contract `Config::channel_external_peers` matches at
+//! message-time (the runtime reader never looks at the map key). This
+//! module is the single writer for that shape: Telegram, LINE, WeChat, and
+//! WhatsApp Web all persist through it, so the channels cannot drift into
+//! different on-disk layouts (and no channel grows a local allowlist
+//! cache).
+//!
+//! Writes go through the shared live-config authority the orchestrator wires
+//! into each channel: acquire its mutation witness, clone and mutate a
+//! snapshot, persist its peer policy, then publish it in memory.
+//! Channels constructed without the handle (tests, one-shot CLI runs) skip
+//! persistence with a warning: pairing still works for the process lifetime,
+//! it just isn't durable.
+
+use zeroclaw_config::schema::Config;
+#[cfg(any(
+    feature = "channel-telegram",
+    feature = "channel-line",
+    feature = "channel-wechat",
+    feature = "whatsapp-web",
+    test
+))]
+use zeroclaw_runtime::LiveConfigAuthority;
+
+/// The conflict message when a matching `ignore` already denies `identity`,
+/// or `None` when a pairing write would take effect.
+///
+/// This is the deny half of `merge_external_peer`'s contract, split out so a
+/// handler can ask it *before* the pairing transition. `PairingGuard::try_pair`
+/// consumes the one-time code and mints a bearer token; discovering the deny
+/// only after that leaves the operator's single code spent on a pairing that
+/// can never admit the sender, with `pairing_code_active()` false and no route
+/// to retry. The writer delegates here too, so the pre-check and the write
+/// cannot disagree about what "denied" means.
+pub(crate) fn external_peer_deny_conflict(
+    cfg: &Config,
+    channel_type: &str,
+    alias: &str,
+    identities: &[&str],
+    match_fn: impl Fn(&str, &str) -> bool,
+) -> Option<String> {
+    let usable: Vec<&str> = identities
+        .iter()
+        .map(|identity| identity.trim())
+        .filter(|identity| !identity.is_empty())
+        .collect();
+    if usable.is_empty() {
+        return None;
+    }
+    let resolved = cfg.channel_external_peers(channel_type, alias);
+    crate::allowlist::pairing_deny_conflict(&resolved, channel_type, alias, &usable, match_fn)
+}
+
+/// The `peer_groups` key whose `channel` is exactly `<channel_type>.<alias>`,
+/// which is where a write for that instance lands.
+///
+/// Prefers the conventional `<channel_type>_<alias>` key when several groups
+/// carry the same dotted ref, then falls back to the lexicographically first
+/// for determinism (`peer_groups` is a `HashMap`, so iteration order is
+/// unspecified). Callers reporting where an identity is bound use this rather
+/// than assuming the conventional name: a custom key such as
+/// `[peer_groups.ops]` with `channel = "telegram.alerts"` is a legitimate
+/// destination, and the conventional name may name nothing at all.
+#[must_use]
+pub fn instance_group_key(cfg: &Config, channel_type: &str, alias: &str) -> Option<String> {
+    let dotted_ref = format!("{channel_type}.{alias}");
+    let conventional_key = format!("{channel_type}_{alias}");
+    if cfg
+        .peer_groups
+        .get(&conventional_key)
+        .is_some_and(|group| group.channel.as_str() == dotted_ref)
+    {
+        return Some(conventional_key);
+    }
+    cfg.peer_groups
+        .iter()
+        .filter(|(_, group)| group.channel.as_str() == dotted_ref)
+        .map(|(key, _)| key.clone())
+        .min()
+}
+
+/// The `peer_groups` key whose grant actually authorizes `identity` for
+/// `<channel_type>.<alias>`.
+///
+/// [`instance_group_key`] answers a different question: which group a *write*
+/// for this instance belongs in. It only matches exact dotted refs, so when an
+/// identity is already authorized through a bare type-wide group
+/// (`channel = "telegram"`) it returns `None` and a caller that falls back to
+/// the conventional `<type>_<alias>` name reports a group that need not exist.
+/// That sends an operator to edit the wrong block.
+///
+/// Type-wide groups are included here because the runtime reader honors them,
+/// and the lowest key wins so the answer is stable rather than map-order
+/// dependent.
+#[must_use]
+pub fn authorizing_group_key(
+    cfg: &Config,
+    channel_type: &str,
+    alias: &str,
+    identity: &str,
+    match_fn: impl Fn(&str, &str) -> bool,
+) -> Option<String> {
+    let dotted_ref = format!("{channel_type}.{alias}");
+    cfg.peer_groups
+        .iter()
+        .filter(|(_, group)| {
+            let channel = group.channel.as_str();
+            channel == dotted_ref || channel == channel_type
+        })
+        .filter(|(_, group)| {
+            // The group's own grants only: the caller has already established
+            // that the identity is authorized overall, and this asks which
+            // block carries the entry that says so.
+            let grants: Vec<String> = group
+                .external_peers
+                .iter()
+                .map(|peer| peer.as_str().to_string())
+                .collect();
+            crate::allowlist::is_user_allowed_by(&grants, identity, &match_fn)
+        })
+        .map(|(key, _)| key.clone())
+        .min()
+}
+
+/// Merge `identity` into the `external_peers` of the peer group whose
+/// `channel` ref matches `<channel_type>.<alias>`, on the canonical
+/// in-memory config. Returns the `peer_groups` key that was written when the
+/// config changed (the caller persists a snapshot, and callers that report the
+/// destination must report *this* key rather than assuming the conventional
+/// one), or `None` when the identity was already authorized.
+///
+/// `match_fn` is the calling channel's own identity comparison, the one its
+/// admission path applies. Both decisions this writer makes — whether a deny
+/// shadows the identity, and whether a grant already admits it — are identity
+/// questions, and only the channel can answer them: WhatsApp Web reads
+/// `+15551234567`, `15551234567` and `15551234567@s.whatsapp.net` as one
+/// account, WeChat distinguishes case. A generic comparison here is narrower
+/// than one channel's rule and wider than another's, and in both directions it
+/// breaks the invariant the writer exists to hold: **a write or a no-op must
+/// leave the identity admissible under the same resolved policy, otherwise the
+/// conflict is returned.** Report a pairing the admission matcher then
+/// rejects, and the operator is left with no route back.
+///
+/// The merge target is chosen by the same channel-ref contract the runtime
+/// reader (`Config::channel_external_peers`) authorizes by — the group's
+/// `channel` field, never the `peer_groups` map key:
+///
+/// - If a matching group's `ignore` denies the identity, the merge is
+///   rejected: the deny outranks any grant, so appending one would persist
+///   an entry the admission matcher immediately shadows and report a
+///   pairing that cannot work.
+/// - If the identity is already authorized for `<channel_type>.<alias>`
+///   through *any* matching group (instance-scoped or type-wide), nothing
+///   is written.
+/// - Otherwise the identity is appended to an existing group whose
+///   `channel` is exactly `<channel_type>.<alias>` (preferring the
+///   conventional `<channel_type>_<alias>` key when several match).
+/// - When no group matches, a new group is created under the conventional
+///   `<channel_type>_<alias>` key with `channel = "<channel_type>.<alias>"`
+///   — the shape WeChat pairing established. If that key is already taken
+///   by a group whose `channel` points elsewhere, the merge is rejected:
+///   appending there would store the identity where the reader for this
+///   channel never looks (and another channel's reader would pick it up).
+///
+/// Existing group entries (agents, other peers) are preserved.
+pub(crate) fn merge_external_peer(
+    cfg: &mut Config,
+    channel_type: &str,
+    alias: &str,
+    identity: &str,
+    match_fn: impl Fn(&str, &str) -> bool,
+) -> anyhow::Result<Option<String>> {
+    use zeroclaw_config::multi_agent::{PeerGroupConfig, PeerUsername};
+    use zeroclaw_config::providers::ChannelRef;
+
+    let normalized = identity.trim();
+    if normalized.is_empty() {
+        anyhow::bail!("Cannot persist empty {channel_type} identity");
+    }
+    // Existence comes from the canonical channel registry
+    // (`Config::channels_by_alias()` walks every configured
+    // `[channels.<type>.<alias>]` block regardless of type), so this writer
+    // holds no channel-type list of its own and a future QR-pairing channel
+    // needs no edit here.
+    let configured = cfg
+        .channels_by_alias()
+        .iter()
+        .any(|info| info.channel_type == channel_type && info.alias == alias);
+    if !configured {
+        anyhow::bail!(
+            "Missing [channels.{channel_type}.{alias}] section in config.toml — \
+             configure the channel before pairing"
+        );
+    }
+
+    let resolved = cfg.channel_external_peers(channel_type, alias);
+
+    if let Some(conflict) =
+        external_peer_deny_conflict(cfg, channel_type, alias, &[normalized], &match_fn)
+    {
+        anyhow::bail!(conflict);
+    }
+
+    // Already authorized through any group the reader matches (including
+    // type-wide groups)? Then there is nothing to persist. This asks the same
+    // question the runtime asks, through the same helper and the same matcher,
+    // so writer and reader cannot disagree about what "already authorized"
+    // means. Comparing the resolved entries by string would not: a grant this
+    // identity matches may sit alongside an `ignore` that denies it, and
+    // pairing must not report an ignored identity as authorized.
+    if crate::allowlist::is_user_allowed_by(&resolved, normalized, &match_fn) {
+        return Ok(None);
+    }
+
+    let dotted_ref = format!("{channel_type}.{alias}");
+    let conventional_key = format!("{channel_type}_{alias}");
+
+    let target_key = instance_group_key(cfg, channel_type, alias);
+
+    if let Some(key) = target_key {
+        // Invariant: `target_key` was selected from existing map entries.
+        if let Some(group) = cfg.peer_groups.get_mut(&key) {
+            group
+                .external_peers
+                .push(PeerUsername::new(normalized.to_string()));
+        }
+        return Ok(Some(key));
+    }
+
+    // No group carries this channel's dotted ref yet — create the
+    // conventional shape. Refuse to squat on a key that belongs to a
+    // different channel: writing there would put the identity where this
+    // channel's reader never looks, while the *other* channel's reader
+    // would silently start authorizing it.
+    if let Some(existing) = cfg.peer_groups.get(&conventional_key) {
+        anyhow::bail!(
+            "peer group [{conventional_key}] already exists but its channel ref \
+             is `{}` (expected `{dotted_ref}`) — fix the group key or channel ref \
+             in config.toml before pairing",
+            existing.channel.as_str()
+        );
+    }
+    cfg.peer_groups.insert(
+        conventional_key.clone(),
+        PeerGroupConfig {
+            channel: ChannelRef::new(dotted_ref),
+            external_peers: vec![PeerUsername::new(normalized.to_string())],
+            ..PeerGroupConfig::default()
+        },
+    );
+    Ok(Some(conventional_key))
+}
+
+/// Persist a paired identity as an authorized external peer.
+///
+/// Clones the shared canonical config under the write lock, mutates the clone
+/// via [`merge_external_peer`], saves its peer policy, then publishes it.
+/// The authority's writer is held through the durable write and publication.
+///
+/// Idempotent: an already-authorized identity returns without writing, so
+/// callers may invoke this on every connect/reconnect. `persist = None`
+/// (no handle wired) warns and succeeds without persisting. `match_fn` is the
+/// channel's own admission comparison; see [`merge_external_peer`].
+#[cfg(any(
+    feature = "channel-telegram",
+    feature = "channel-line",
+    feature = "channel-wechat",
+    feature = "whatsapp-web",
+    test
+))]
+pub(crate) async fn persist_external_peer(
+    persist: Option<&LiveConfigAuthority>,
+    channel_type: &str,
+    alias: &str,
+    identity: &str,
+    match_fn: impl Fn(&str, &str) -> bool,
+) -> anyhow::Result<()> {
+    persist_external_peer_with_cancellation(persist, channel_type, alias, identity, match_fn, None)
+        .await
+}
+
+/// Fence detached pairing callbacks with their listener's lifetime. Once a
+/// write owns the config lock, finish save and publication without cancellation.
+#[cfg(any(
+    feature = "channel-telegram",
+    feature = "channel-line",
+    feature = "channel-wechat",
+    feature = "whatsapp-web",
+    test
+))]
+pub(crate) async fn persist_external_peer_with_cancellation(
+    persist: Option<&LiveConfigAuthority>,
+    channel_type: &str,
+    alias: &str,
+    identity: &str,
+    match_fn: impl Fn(&str, &str) -> bool,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let Some(authority) = persist else {
+        // The raw identity is a durable personal identifier (e.g. a phone
+        // number) and must not reach the log sink; channel_type/alias give
+        // the operator enough to locate the unwired constructor path.
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({
+                    "channel_type": channel_type,
+                    "alias": alias,
+                })),
+            "paired identity not persisted (no persistence handle wired)"
+        );
+        return Ok(());
+    };
+    let config_write_lock = authority.config_write_lock();
+    let _config_write_guard = match cancellation {
+        Some(cancel) => {
+            let guard = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => anyhow::bail!("pairing listener retired before persistence"),
+                guard = config_write_lock.lock() => guard,
+            };
+            // Gateway generation retirement holds this same lock. Logout/drop
+            // only stops admission; an already-admitted save must finish.
+            anyhow::ensure!(
+                !cancel.is_cancelled(),
+                "pairing listener retired before persistence"
+            );
+            guard
+        }
+        None => config_write_lock.lock().await,
+    };
+    let config = authority.config();
+    let mut staged = config.read().clone();
+    // Standalone compatibility handles can predate the persisted peer policy.
+    // Refresh it under the writer before checking denies or choosing a group.
+    if let Some(persisted) =
+        zeroclaw_config::schema::persisted_peer_groups(&staged.config_path).await?
+    {
+        staged.peer_groups = persisted;
+    }
+    if merge_external_peer(&mut staged, channel_type, alias, identity, &match_fn)?.is_none() {
+        return Ok(());
+    }
+    // Incremental: only `peer_groups` is applied onto the current on-disk
+    // document, so the rest of this snapshot — which is still whatever this
+    // handle last saw — cannot drop another writer's keys. The refresh above is
+    // what makes this sufficient; on its own it would still rewrite the policy
+    // table from stale state.
+    staged.mark_dirty("peer_groups");
+    staged
+        .save_dirty()
+        .await
+        .with_context(|| format!("Failed to persist {channel_type} peer to config.toml"))?;
+    config.write().peer_groups = staged.peer_groups;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// Stands in for a channel whose identities are compared verbatim, for the
+    /// group-selection tests where the matcher is not what is under test.
+    fn exact(entry: &str, user: &str) -> bool {
+        entry == user
+    }
+
+    fn config_with_whatsapp(alias: &str) -> Config {
+        let mut config = Config::default();
+        config.channels.whatsapp.insert(
+            alias.to_string(),
+            zeroclaw_config::schema::WhatsAppConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        config
+    }
+
+    #[test]
+    fn merge_creates_group_in_the_wechat_shape() {
+        let mut config = config_with_whatsapp("admin");
+
+        let changed = merge_external_peer(&mut config, "whatsapp", "admin", "+15551234567", exact)
+            .expect("merge succeeds");
+        assert!(changed.is_some());
+
+        let group = config
+            .peer_groups
+            .get("whatsapp_admin")
+            .expect("group created under <type>_<alias>");
+        assert_eq!(group.channel.as_str(), "whatsapp.admin");
+        assert_eq!(
+            group
+                .external_peers
+                .iter()
+                .map(|p| p.as_str().to_string())
+                .collect::<Vec<_>>(),
+            vec!["+15551234567".to_string()]
+        );
+    }
+
+    #[test]
+    fn merge_is_idempotent_and_additive() {
+        let mut config = config_with_whatsapp("admin");
+
+        assert!(
+            merge_external_peer(&mut config, "whatsapp", "admin", "+15551234567", exact)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            merge_external_peer(&mut config, "whatsapp", "admin", "+15551234567", exact)
+                .unwrap()
+                .is_none(),
+            "an already-authorized identity is not re-added"
+        );
+        assert!(
+            merge_external_peer(&mut config, "whatsapp", "admin", "+15559876543", exact)
+                .unwrap()
+                .is_some(),
+            "a second identity extends the same group"
+        );
+        assert_eq!(
+            config
+                .peer_groups
+                .get("whatsapp_admin")
+                .unwrap()
+                .external_peers
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn merge_preserves_existing_group_membership() {
+        use zeroclaw_config::multi_agent::{AgentAlias, PeerGroupConfig, PeerUsername};
+        use zeroclaw_config::providers::ChannelRef;
+
+        let mut config = config_with_whatsapp("admin");
+        config.peer_groups.insert(
+            "whatsapp_admin".to_string(),
+            PeerGroupConfig {
+                channel: ChannelRef::new("whatsapp.admin".to_string()),
+                agents: vec![AgentAlias::new("rowan".to_string())],
+                external_peers: vec![PeerUsername::new("+15550000000".to_string())],
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            merge_external_peer(&mut config, "whatsapp", "admin", "+15551234567", exact)
+                .unwrap()
+                .is_some()
+        );
+        let group = config.peer_groups.get("whatsapp_admin").unwrap();
+        assert_eq!(group.agents.len(), 1, "agent bindings survive the merge");
+        assert_eq!(group.external_peers.len(), 2);
+    }
+
+    #[test]
+    fn merge_rejects_empty_identity_and_unconfigured_channel() {
+        let mut config = config_with_whatsapp("admin");
+        assert!(merge_external_peer(&mut config, "whatsapp", "admin", "  ", exact).is_err());
+        assert!(
+            merge_external_peer(&mut config, "whatsapp", "ghost", "+15551234567", exact).is_err(),
+            "an alias with no [channels.whatsapp.ghost] block is rejected"
+        );
+        assert!(
+            merge_external_peer(&mut config, "telegram", "admin", "someone", exact).is_err(),
+            "a type/alias pair with no configured block is rejected"
+        );
+        assert!(
+            config.peer_groups.is_empty(),
+            "failed merges must not leave partial groups behind"
+        );
+    }
+
+    #[test]
+    fn merge_accepts_any_configured_channel_type_via_the_registry() {
+        // The existence check reads the canonical channel registry, not a
+        // hardcoded channel-type list: a configured channel of any type can
+        // persist a paired identity without this module needing an edit.
+        let mut config = Config::default();
+        config.channels.telegram.insert(
+            "admin".to_string(),
+            zeroclaw_config::schema::TelegramConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            merge_external_peer(&mut config, "telegram", "admin", "someone", exact)
+                .unwrap()
+                .is_some()
+        );
+        let group = config
+            .peer_groups
+            .get("telegram_admin")
+            .expect("group created under <type>_<alias>");
+        assert_eq!(group.channel.as_str(), "telegram.admin");
+    }
+
+    #[test]
+    fn merge_surfaces_a_conflict_instead_of_persisting_a_shadowed_grant() {
+        use zeroclaw_config::multi_agent::{PeerGroupConfig, PeerUsername};
+        use zeroclaw_config::providers::ChannelRef;
+
+        // The end of the recovery path: pairing is available again once a
+        // fully shadowed grant no longer counts as authorization, so it must
+        // not dead-end by appending a grant the deny immediately shadows.
+        let mut config = config_with_whatsapp("admin");
+        config.peer_groups.insert(
+            "whatsapp_admin".to_string(),
+            PeerGroupConfig {
+                channel: ChannelRef::new("whatsapp.admin".to_string()),
+                external_peers: vec![PeerUsername::new("+15551234567".to_string())],
+                ignore: vec![PeerUsername::new("+15551234567".to_string())],
+                ..Default::default()
+            },
+        );
+
+        let err = merge_external_peer(&mut config, "whatsapp", "admin", "+15551234567", exact)
+            .expect_err("an ignored identity must not be persisted as a grant");
+        let message = err.to_string();
+        assert!(
+            message.contains("ignore"),
+            "names the field to edit: {message}"
+        );
+        assert!(
+            !message.contains("+15551234567"),
+            "the identity is personal data and callers log this error: {message}"
+        );
+
+        let group = config.peer_groups.get("whatsapp_admin").unwrap();
+        assert_eq!(
+            group.external_peers.len(),
+            1,
+            "no second, equally shadowed grant was appended"
+        );
+        assert!(
+            !crate::allowlist::is_user_allowed_by(
+                &config.channel_external_peers("whatsapp", "admin"),
+                "+15551234567",
+                exact,
+            ),
+            "the operator's ignore stays authoritative"
+        );
+
+        // With the ignore removed, the same pairing attempt succeeds and the
+        // identity is genuinely admissible: the recovery path terminates.
+        config
+            .peer_groups
+            .get_mut("whatsapp_admin")
+            .unwrap()
+            .ignore
+            .clear();
+        assert!(
+            merge_external_peer(&mut config, "whatsapp", "admin", "+15551234567", exact)
+                .expect("merge succeeds once the deny is gone")
+                .is_none(),
+            "the existing grant is now effective, so nothing needs writing"
+        );
+        assert!(crate::allowlist::is_user_allowed_by(
+            &config.channel_external_peers("whatsapp", "admin"),
+            "+15551234567",
+            exact,
+        ));
+    }
+
+    #[test]
+    fn merge_rejects_conventional_key_with_mismatched_channel_ref() {
+        use zeroclaw_config::multi_agent::{PeerGroupConfig, PeerUsername};
+        use zeroclaw_config::providers::ChannelRef;
+
+        // A stale/hand-edited [peer_groups.whatsapp_admin] that points at a
+        // different channel must not silently receive the WhatsApp identity:
+        // whatsapp.admin's reader would never see it, telegram.admin's would.
+        let mut config = config_with_whatsapp("admin");
+        config.peer_groups.insert(
+            "whatsapp_admin".to_string(),
+            PeerGroupConfig {
+                channel: ChannelRef::new("telegram.admin".to_string()),
+                external_peers: vec![PeerUsername::new("someone".to_string())],
+                ..Default::default()
+            },
+        );
+
+        let err = merge_external_peer(&mut config, "whatsapp", "admin", "+15551234567", exact)
+            .expect_err("mismatched channel ref must be rejected");
+        assert!(err.to_string().contains("telegram.admin"));
+
+        let group = config.peer_groups.get("whatsapp_admin").unwrap();
+        assert_eq!(group.channel.as_str(), "telegram.admin", "group untouched");
+        assert_eq!(group.external_peers.len(), 1, "no identity appended");
+        assert!(
+            config
+                .channel_external_peers("whatsapp", "admin")
+                .is_empty(),
+            "the identity must not be stored anywhere the reader matches"
+        );
+    }
+
+    #[test]
+    fn merge_targets_group_by_channel_ref_not_map_key() {
+        use zeroclaw_config::multi_agent::PeerGroupConfig;
+        use zeroclaw_config::providers::ChannelRef;
+
+        // The reader authorizes by the group's `channel` field, so the
+        // writer appends to the group carrying the dotted ref even when it
+        // lives under a non-conventional key — and creates no second group.
+        let mut config = config_with_whatsapp("admin");
+        config.peer_groups.insert(
+            "my_custom_group".to_string(),
+            PeerGroupConfig {
+                channel: ChannelRef::new("whatsapp.admin".to_string()),
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            merge_external_peer(&mut config, "whatsapp", "admin", "+15551234567", exact)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            !config.peer_groups.contains_key("whatsapp_admin"),
+            "no duplicate conventional group is created"
+        );
+        assert_eq!(
+            config
+                .peer_groups
+                .get("my_custom_group")
+                .unwrap()
+                .external_peers
+                .len(),
+            1
+        );
+        assert_eq!(
+            config.channel_external_peers("whatsapp", "admin"),
+            vec!["+15551234567".to_string()],
+            "the reader sees the persisted identity"
+        );
+    }
+
+    #[test]
+    fn merge_appends_to_matching_group_even_when_conventional_key_is_taken() {
+        use zeroclaw_config::multi_agent::{PeerGroupConfig, PeerUsername};
+        use zeroclaw_config::providers::ChannelRef;
+
+        // The mismatched conventional key only blocks *creation*. When some
+        // other group already carries this channel's dotted ref, the append
+        // goes there and the foreign group is left untouched.
+        let mut config = config_with_whatsapp("admin");
+        config.peer_groups.insert(
+            "whatsapp_admin".to_string(),
+            PeerGroupConfig {
+                channel: ChannelRef::new("telegram.admin".to_string()),
+                external_peers: vec![PeerUsername::new("someone".to_string())],
+                ..Default::default()
+            },
+        );
+        config.peer_groups.insert(
+            "renamed_whatsapp_group".to_string(),
+            PeerGroupConfig {
+                channel: ChannelRef::new("whatsapp.admin".to_string()),
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            merge_external_peer(&mut config, "whatsapp", "admin", "+15551234567", exact)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            config
+                .peer_groups
+                .get("renamed_whatsapp_group")
+                .unwrap()
+                .external_peers
+                .iter()
+                .map(|p| p.as_str().to_string())
+                .collect::<Vec<_>>(),
+            vec!["+15551234567".to_string()],
+            "identity lands in the group whose channel ref matches"
+        );
+        let foreign = config.peer_groups.get("whatsapp_admin").unwrap();
+        assert_eq!(foreign.channel.as_str(), "telegram.admin");
+        assert_eq!(
+            foreign.external_peers.len(),
+            1,
+            "the foreign group under the conventional key is untouched"
+        );
+        assert_eq!(
+            config.channel_external_peers("whatsapp", "admin"),
+            vec!["+15551234567".to_string()],
+            "the reader authorizes the identity for this channel"
+        );
+    }
+
+    #[test]
+    fn merge_prefers_the_conventional_key_when_several_groups_match() {
+        use zeroclaw_config::multi_agent::PeerGroupConfig;
+        use zeroclaw_config::providers::ChannelRef;
+
+        // Two instance-scoped groups both carry `whatsapp.admin`; the append
+        // deterministically targets the conventional `<type>_<alias>` key.
+        let mut config = config_with_whatsapp("admin");
+        for key in ["whatsapp_admin", "another_group"] {
+            config.peer_groups.insert(
+                key.to_string(),
+                PeerGroupConfig {
+                    channel: ChannelRef::new("whatsapp.admin".to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+
+        assert!(
+            merge_external_peer(&mut config, "whatsapp", "admin", "+15551234567", exact)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            config
+                .peer_groups
+                .get("whatsapp_admin")
+                .unwrap()
+                .external_peers
+                .len(),
+            1,
+            "conventional key receives the append"
+        );
+        assert!(
+            config
+                .peer_groups
+                .get("another_group")
+                .unwrap()
+                .external_peers
+                .is_empty(),
+            "the other matching group is untouched"
+        );
+    }
+
+    #[test]
+    fn merge_is_a_noop_when_a_type_wide_group_already_authorizes() {
+        use zeroclaw_config::multi_agent::{PeerGroupConfig, PeerUsername};
+        use zeroclaw_config::providers::ChannelRef;
+
+        // A bare-type group (`channel = "whatsapp"`) already authorizes the
+        // identity for every alias of the type; the reader-driven
+        // idempotency check must catch that and write nothing.
+        let mut config = config_with_whatsapp("admin");
+        config.peer_groups.insert(
+            "whatsapp_everyone".to_string(),
+            PeerGroupConfig {
+                channel: ChannelRef::new("whatsapp".to_string()),
+                external_peers: vec![PeerUsername::new("+15551234567".to_string())],
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            merge_external_peer(&mut config, "whatsapp", "admin", "+15551234567", exact)
+                .unwrap()
+                .is_none(),
+            "already authorized via the type-wide group"
+        );
+        assert_eq!(config.peer_groups.len(), 1, "no new group created");
+    }
+
+    #[test]
+    fn merge_does_not_treat_an_ignored_identity_as_already_authorized() {
+        use zeroclaw_config::multi_agent::{PeerGroupConfig, PeerUsername};
+        use zeroclaw_config::providers::ChannelRef;
+
+        // The resolved list carries grants and denies together, so a grant this
+        // identity matches can sit beside an `ignore` that denies it. Comparing
+        // the entries by string would find the grant and report the identity as
+        // already authorized, which is the opposite of the truth. The deny
+        // reaches here through a type-wide group, not the instance-scoped one.
+        let mut config = config_with_whatsapp("admin");
+        config.peer_groups.insert(
+            "whatsapp_everyone".to_string(),
+            PeerGroupConfig {
+                channel: ChannelRef::new("whatsapp".to_string()),
+                external_peers: vec![PeerUsername::new("+15551234567".to_string())],
+                ignore: vec![PeerUsername::new("+15551234567".to_string())],
+                ..Default::default()
+            },
+        );
+
+        // Neither of the two silent outcomes is right: `Ok(false)` would claim
+        // the identity is already authorized, and `Ok(true)` would append a
+        // grant the deny shadows just as thoroughly.
+        merge_external_peer(&mut config, "whatsapp", "admin", "+15551234567", exact)
+            .expect_err("an ignored identity is neither authorized nor grantable by appending");
+        assert_eq!(
+            config.peer_groups.len(),
+            1,
+            "no group was created to hold a shadowed grant"
+        );
+    }
+
+    #[cfg(any(feature = "channel-wechat", feature = "whatsapp-web"))]
+    #[tokio::test]
+    async fn persist_without_handle_warns_and_returns_ok() {
+        persist_external_peer(None, "whatsapp", "admin", "+15551234567", exact)
+            .await
+            .expect("missing handle is a soft no-op");
+    }
+
+    #[tokio::test]
+    async fn retired_listener_cannot_persist_from_a_detached_callback() {
+        use std::future::Future;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut config = config_with_whatsapp("admin");
+        config.config_path = temp.path().join("config.toml");
+        config.data_dir = temp.path().join("data");
+        let authority = LiveConfigAuthority::new(config);
+        let config_write_lock = authority.config_write_lock();
+        let guard = config_write_lock.lock().await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let listener_guard = cancel.clone().drop_guard();
+        let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+        let callback_authority = authority.clone();
+        let callback_cancel = cancel.clone();
+        let mut callback = ::zeroclaw_spawn::spawn!(async move {
+            let persistence = persist_external_peer_with_cancellation(
+                Some(&callback_authority),
+                "whatsapp",
+                "admin",
+                "+15551234567",
+                exact,
+                Some(&callback_cancel),
+            );
+            tokio::pin!(persistence);
+            let mut waiting_tx = Some(waiting_tx);
+            std::future::poll_fn(|cx| {
+                let result = persistence.as_mut().poll(cx);
+                if result.is_pending()
+                    && let Some(tx) = waiting_tx.take()
+                {
+                    let _ = tx.send(());
+                }
+                result
+            })
+            .await
+        });
+
+        let waiting = tokio::time::timeout(std::time::Duration::from_secs(5), waiting_rx).await;
+        drop(listener_guard);
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), &mut callback).await;
+        if settled.is_err() {
+            callback.abort();
+            let _ = callback.await;
+        }
+        waiting
+            .expect("callback must reach the held config lock")
+            .expect("callback must signal its pending write");
+        let error = settled
+            .expect("retired callback must settle before the config lock is released")
+            .expect("callback must not panic")
+            .expect_err("retired listener cannot authorize a peer");
+        assert!(error.to_string().contains("pairing listener retired"));
+        drop(guard);
+
+        // A callback delivered after retirement must also fail when the lock
+        // is immediately available and the same alias still exists.
+        persist_external_peer_with_cancellation(
+            Some(&authority),
+            "whatsapp",
+            "admin",
+            "+15551234567",
+            exact,
+            Some(&cancel),
+        )
+        .await
+        .expect_err("late callback cannot write after retirement");
+        assert!(authority.config().read().peer_groups.is_empty());
+        assert!(!temp.path().join("config.toml").exists());
+
+        let active = tokio_util::sync::CancellationToken::new();
+        persist_external_peer_with_cancellation(
+            Some(&authority),
+            "whatsapp",
+            "admin",
+            "+15551234567",
+            exact,
+            Some(&active),
+        )
+        .await
+        .expect("replacement listener can persist its own pairing");
+        assert_eq!(
+            authority
+                .config()
+                .read()
+                .channel_external_peers("whatsapp", "admin"),
+            vec!["+15551234567".to_string()]
+        );
+        let saved: Config =
+            toml::from_str(&std::fs::read_to_string(temp.path().join("config.toml")).unwrap())
+                .unwrap();
+        assert_eq!(
+            saved.channel_external_peers("whatsapp", "admin"),
+            vec!["+15551234567".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_save_failure_does_not_publish_peer_in_memory() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let blocked_parent = temp.path().join("not-a-directory");
+        std::fs::write(&blocked_parent, "file").unwrap();
+        let mut config = config_with_whatsapp("admin");
+        config.config_path = blocked_parent.join("config.toml");
+        config.data_dir = temp.path().join("data");
+        let authority = LiveConfigAuthority::new(config);
+
+        persist_external_peer(Some(&authority), "whatsapp", "admin", "+15551234567", exact)
+            .await
+            .expect_err("save failure must reject paired identity");
+
+        assert!(
+            authority
+                .config()
+                .read()
+                .channel_external_peers("whatsapp", "admin")
+                .is_empty()
+        );
+    }
+
+    /// A failed `Config::save()` must leave nothing behind: not on disk, and
+    /// not in the live config either.
+    ///
+    /// Mutating the shared config before the save made the grant survive a
+    /// failure the file never recorded. The retry then read its own leftover
+    /// through the already-authorized check, returned `Ok` without attempting
+    /// another write, and the channel answered "bound" for an authorization
+    /// that vanished on restart.
+    #[tokio::test]
+    async fn failed_save_leaves_no_grant_and_the_retry_still_persists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The config's parent directory is an existing regular file, so
+        // `create_dir_all` in the atomic writer fails on every platform.
+        // A path under a non-existent root does not: `/nonexistent-.../` is
+        // creatable on the Windows runner, so the expected save error never
+        // occurred there and the test failed for the wrong reason.
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, b"").expect("create the blocking file");
+        let config_path = blocker.join("config.toml");
+        let mut config = config_with_whatsapp("admin");
+        config.config_path = config_path.clone();
+        let shared = Arc::new(parking_lot::RwLock::new(config));
+        let authority = LiveConfigAuthority::from_config(Arc::clone(&shared));
+
+        let first =
+            persist_external_peer(Some(&authority), "whatsapp", "admin", "+15551234567", exact)
+                .await;
+        assert!(first.is_err(), "an unwritable config path must surface");
+
+        assert!(
+            shared
+                .read()
+                .channel_external_peers("whatsapp", "admin")
+                .is_empty(),
+            "a save that failed must not leave the grant live in memory"
+        );
+
+        // The retry must reach the writer again rather than short-circuit on a
+        // leftover grant. Under the old ordering this returned Ok(()), which is
+        // the channel reporting a successful binding that was never persisted.
+        let second =
+            persist_external_peer(Some(&authority), "whatsapp", "admin", "+15551234567", exact)
+                .await;
+        assert!(
+            second.is_err(),
+            "the retry must attempt persistence again, not report success"
+        );
+        assert!(
+            shared
+                .read()
+                .channel_external_peers("whatsapp", "admin")
+                .is_empty(),
+            "still nothing authorized after the second failure"
+        );
+
+        // Repointed at a writable path the same call succeeds, so the two
+        // failures above came from the unwritable location and not from a
+        // writer that could never have persisted anything.
+        shared.write().config_path = dir.path().join("config.toml");
+        persist_external_peer(Some(&authority), "whatsapp", "admin", "+15551234567", exact)
+            .await
+            .expect("the retry persists once the path is writable");
+        assert_eq!(
+            shared.read().channel_external_peers("whatsapp", "admin"),
+            vec!["+15551234567".to_string()]
+        );
+    }
+
+    /// An identity already authorized by a bare type-wide group must be
+    /// reported against that group, not the conventional instance key.
+    ///
+    /// `instance_group_key` only matches exact dotted refs, so the bind
+    /// endpoint fell back to `<type>_<alias>` and named a block that need not
+    /// exist. An operator following that answer edits the wrong group.
+    #[test]
+    fn authorizing_group_key_names_a_type_wide_source() {
+        use zeroclaw_config::multi_agent::{PeerGroupConfig, PeerUsername};
+        use zeroclaw_config::providers::ChannelRef;
+
+        let mut config = config_with_whatsapp("admin");
+        config.peer_groups.insert(
+            "whatsapp_all".to_string(),
+            PeerGroupConfig {
+                channel: ChannelRef::new("whatsapp".to_string()),
+                external_peers: vec![PeerUsername::new("+15551234567".to_string())],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(
+            authorizing_group_key(&config, "whatsapp", "admin", "+15551234567", exact).as_deref(),
+            Some("whatsapp_all"),
+            "the group carrying the grant is the one to name"
+        );
+        assert_eq!(
+            instance_group_key(&config, "whatsapp", "admin"),
+            None,
+            "and the write-target resolver genuinely cannot answer this"
+        );
+
+        // An identity no group grants has no source to report.
+        assert_eq!(
+            authorizing_group_key(&config, "whatsapp", "admin", "+15559999999", exact),
+            None
+        );
+    }
+
+    /// A deny written by a competing config writer must survive a pairing bind,
+    /// on disk and not only in memory.
+    ///
+    /// `Config::save` syncs the staged snapshot onto the existing document and
+    /// drops keys the snapshot does not carry, so pairing's save used to write
+    /// the pre-deny policy back over the file. Publishing the merge into the
+    /// live config kept the deny in memory and could not undo the file, so the
+    /// next load authorized the account the operator had just denied.
+    ///
+    /// The interleaving is forced rather than raced: the test holds the shared
+    /// config write lock the way a gateway handler does, so the spawned pairing
+    /// transaction cannot take its snapshot until the competing `ignore` has
+    /// been published and saved.
+    #[tokio::test]
+    async fn a_competing_ignore_survives_a_pairing_write() {
+        use zeroclaw_config::multi_agent::{PeerGroupConfig, PeerUsername};
+        use zeroclaw_config::providers::ChannelRef;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let mut config = config_with_whatsapp("admin");
+        config.config_path = config_path.clone();
+        config.save().await.expect("seed the config file");
+        let shared = Arc::new(parking_lot::RwLock::new(config));
+        let authority = LiveConfigAuthority::from_config(Arc::clone(&shared));
+
+        let guard = authority.config_write_lock().lock_owned().await;
+
+        let pairing = {
+            let authority = authority.clone();
+            zeroclaw_spawn::spawn!(async move {
+                persist_external_peer(Some(&authority), "whatsapp", "admin", "+15551234567", exact)
+                    .await
+            })
+        };
+
+        // Let the task reach the lock and block there.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !pairing.is_finished(),
+            "pairing must not run its transaction while another writer holds the lock"
+        );
+
+        // The competing writer, in the shape the gateway uses: mutate the live
+        // config, then save the whole snapshot.
+        {
+            let mut cfg = shared.write();
+            cfg.peer_groups.insert(
+                "whatsapp_admin_denies".to_string(),
+                PeerGroupConfig {
+                    channel: ChannelRef::new("whatsapp.admin".to_string()),
+                    ignore: vec![PeerUsername::new("+15559999999".to_string())],
+                    ..Default::default()
+                },
+            );
+        }
+        let competing = shared.read().clone();
+        competing.save().await.expect("the competing save lands");
+
+        drop(guard);
+        pairing
+            .await
+            .expect("the pairing task joins")
+            .expect("pairing persists once the lock is free");
+
+        let on_disk: Config = toml::from_str(
+            &std::fs::read_to_string(&config_path).expect("config.toml is readable"),
+        )
+        .expect("config.toml round-trips");
+
+        let peers = on_disk.channel_external_peers("whatsapp", "admin");
+        assert!(
+            peers.iter().any(|p| p == "!+15559999999"),
+            "the competing deny must still be on disk after pairing saved: {peers:?}"
+        );
+        assert!(
+            peers.iter().any(|p| p == "+15551234567"),
+            "and pairing's own grant must have landed too: {peers:?}"
+        );
+    }
+
+    /// Separate compatibility handles can hold different `Config` snapshots
+    /// over the same file. Even with sequential writes, a deny saved through
+    /// one handle is invisible to the other. Pairing used to check denies
+    /// against that stale policy
+    /// and then write it back over the file, erasing a security decision the
+    /// operator had already saved.
+    ///
+    /// `a_competing_ignore_survives_a_pairing_write` cannot catch this: both of
+    /// its writers share one `Arc<RwLock<Config>>`, so pairing's snapshot sees
+    /// the deny for free. Here the channel handle never sees it, and the repair
+    /// has to come from re-reading the persisted policy under the lock.
+    #[tokio::test]
+    async fn a_deny_saved_through_a_separate_handle_survives_and_blocks_the_bind() {
+        use zeroclaw_config::multi_agent::{PeerGroupConfig, PeerUsername};
+        use zeroclaw_config::providers::ChannelRef;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+
+        let mut seed = config_with_whatsapp("admin");
+        seed.config_path = config_path.clone();
+        seed.save().await.expect("seed the config file");
+
+        // Independent compatibility snapshots over one file, used sequentially.
+        // Daemon writers instead share one live-config authority.
+        let mut gateway = seed.clone();
+        let channel = Arc::new(parking_lot::RwLock::new(seed.clone()));
+        let channel_authority = LiveConfigAuthority::from_config(Arc::clone(&channel));
+
+        // The operator denies an account through the gateway and it lands.
+        gateway.peer_groups.insert(
+            "whatsapp_admin_denies".to_string(),
+            PeerGroupConfig {
+                channel: ChannelRef::new("whatsapp.admin".to_string()),
+                ignore: vec![PeerUsername::new("+15559999999".to_string())],
+                ..Default::default()
+            },
+        );
+        gateway.save().await.expect("the deny save lands");
+
+        // The channel handle is stale, which is the whole point.
+        assert!(
+            !channel
+                .read()
+                .peer_groups
+                .contains_key("whatsapp_admin_denies"),
+            "the channel handle must not have seen the gateway's write"
+        );
+
+        // Pairing the denied account must be refused, from the file rather than
+        // from this handle's memory.
+        let refused = persist_external_peer(
+            Some(&channel_authority),
+            "whatsapp",
+            "admin",
+            "+15559999999",
+            exact,
+        )
+        .await;
+        assert!(
+            refused.is_err(),
+            "a denied identity must not bind through a stale handle"
+        );
+
+        // An unrelated account still pairs, and the deny must survive that write.
+        persist_external_peer(
+            Some(&channel_authority),
+            "whatsapp",
+            "admin",
+            "+15551234567",
+            exact,
+        )
+        .await
+        .expect("an undenied bind still persists");
+
+        let on_disk: Config = toml::from_str(
+            &std::fs::read_to_string(&config_path).expect("config.toml is readable"),
+        )
+        .expect("config.toml round-trips");
+
+        let peers = on_disk.channel_external_peers("whatsapp", "admin");
+        assert!(
+            peers.iter().any(|p| p == "!+15559999999"),
+            "the deny saved through the other handle must still be on disk: {peers:?}"
+        );
+        assert!(
+            peers.iter().any(|p| p == "+15551234567"),
+            "and the undenied grant must have landed: {peers:?}"
+        );
+    }
+
+    /// The other half of the same repair: pairing writes `peer_groups`
+    /// incrementally, so a snapshot that predates another writer cannot drop
+    /// the keys it never saw.
+    ///
+    /// Refreshing the policy alone would not cover this — the refresh only
+    /// touches `peer_groups`, while a full `Config::save` rewrites the entire
+    /// document from the stale snapshot.
+    #[tokio::test]
+    async fn a_pairing_write_through_a_stale_handle_keeps_keys_it_never_saw() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+
+        let mut seed = config_with_whatsapp("admin");
+        seed.config_path = config_path.clone();
+        seed.save().await.expect("seed the config file");
+
+        // Sequential compatibility snapshots, not separate daemon authorities.
+        let mut gateway = seed.clone();
+        let channel = Arc::new(parking_lot::RwLock::new(seed.clone()));
+        let channel_authority = LiveConfigAuthority::from_config(Arc::clone(&channel));
+
+        // A second channel instance is configured through the gateway, outside
+        // `peer_groups` entirely.
+        gateway.channels.whatsapp.insert(
+            "ops".to_string(),
+            zeroclaw_config::schema::WhatsAppConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        );
+        gateway.save().await.expect("the gateway save lands");
+
+        assert!(
+            !channel.read().channels.whatsapp.contains_key("ops"),
+            "the channel handle must not have seen the new instance"
+        );
+
+        persist_external_peer(
+            Some(&channel_authority),
+            "whatsapp",
+            "admin",
+            "+15551234567",
+            exact,
+        )
+        .await
+        .expect("pairing persists");
+
+        let on_disk: Config = toml::from_str(
+            &std::fs::read_to_string(&config_path).expect("config.toml is readable"),
+        )
+        .expect("config.toml round-trips");
+
+        assert!(
+            on_disk.channels.whatsapp.contains_key("ops"),
+            "pairing must not drop a key its snapshot predates"
+        );
+        assert!(
+            on_disk
+                .channel_external_peers("whatsapp", "admin")
+                .iter()
+                .any(|p| p == "+15551234567"),
+            "and pairing's own grant must still have landed"
+        );
+    }
+
+    /// A deny that lands mid-transaction and names the identity being paired
+    /// must stop the bind, not be written over.
+    ///
+    /// `pairing_deny_conflict` already refused a deny it could see. It could
+    /// not see this one: the snapshot was taken before the competing write, so
+    /// the guard ran against stale state and the bind proceeded. Taking the
+    /// snapshot under the write lock is what makes the existing guard effective
+    /// against a concurrent writer.
+    #[tokio::test]
+    async fn a_competing_ignore_naming_the_paired_identity_blocks_the_bind() {
+        use zeroclaw_config::multi_agent::{PeerGroupConfig, PeerUsername};
+        use zeroclaw_config::providers::ChannelRef;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let mut config = config_with_whatsapp("admin");
+        config.config_path = config_path.clone();
+        config.save().await.expect("seed the config file");
+        let shared = Arc::new(parking_lot::RwLock::new(config));
+        let authority = LiveConfigAuthority::from_config(Arc::clone(&shared));
+
+        let guard = authority.config_write_lock().lock_owned().await;
+
+        let pairing = {
+            let authority = authority.clone();
+            zeroclaw_spawn::spawn!(async move {
+                persist_external_peer(Some(&authority), "whatsapp", "admin", "+15551234567", exact)
+                    .await
+            })
+        };
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        {
+            let mut cfg = shared.write();
+            cfg.peer_groups.insert(
+                "whatsapp_admin_denies".to_string(),
+                PeerGroupConfig {
+                    channel: ChannelRef::new("whatsapp.admin".to_string()),
+                    ignore: vec![PeerUsername::new("+15551234567".to_string())],
+                    ..Default::default()
+                },
+            );
+        }
+        // Bound before the await: a `parking_lot` read guard must not be held
+        // across one.
+        let competing = shared.read().clone();
+        competing.save().await.expect("the competing save lands");
+
+        drop(guard);
+        let err = pairing
+            .await
+            .expect("the pairing task joins")
+            .expect_err("a denied identity must not be bound");
+        assert!(
+            err.to_string().contains("denied by an `ignore` entry"),
+            "the operator is told what to edit: {err}"
+        );
+
+        let on_disk: Config = toml::from_str(
+            &std::fs::read_to_string(&config_path).expect("config.toml is readable"),
+        )
+        .expect("config.toml round-trips");
+        let peers = on_disk.channel_external_peers("whatsapp", "admin");
+        assert!(
+            !peers.iter().any(|p| p == "+15551234567"),
+            "no grant for the denied identity reached disk: {peers:?}"
+        );
+    }
+
+    /// The success path still publishes, so the fix cannot be "never write".
+    #[tokio::test]
+    async fn successful_save_publishes_the_grant_to_the_live_config() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut config = config_with_whatsapp("admin");
+        config.config_path = dir.path().join("config.toml");
+        let shared = Arc::new(parking_lot::RwLock::new(config));
+        let authority = LiveConfigAuthority::from_config(Arc::clone(&shared));
+
+        persist_external_peer(Some(&authority), "whatsapp", "admin", "+15551234567", exact)
+            .await
+            .expect("a writable path persists");
+
+        assert_eq!(
+            shared.read().channel_external_peers("whatsapp", "admin"),
+            vec!["+15551234567".to_string()],
+            "the live config carries the grant once the save succeeded"
+        );
+    }
+}

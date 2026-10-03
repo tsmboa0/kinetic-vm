@@ -1,0 +1,439 @@
+//! Trait abstraction for session persistence backends.
+
+use chrono::{DateTime, Utc};
+use zeroclaw_api::model_provider::ChatMessage;
+
+/// Metadata about a persisted session.
+#[derive(Debug, Clone)]
+pub struct SessionMetadata {
+    /// Session key (e.g. `telegram_user123`).
+    pub key: String,
+    /// Optional human-readable name (e.g. `eyrie-commander-briefing`).
+    pub name: Option<String>,
+    /// When the session was first created.
+    pub created_at: DateTime<Utc>,
+    /// When the last message was appended.
+    pub last_activity: DateTime<Utc>,
+    /// Total number of messages in the session.
+    pub message_count: usize,
+    /// Alias of the agent that owned this session (HashMap key in
+    /// `config.agents`). `None` for sessions persisted before per-agent
+    /// attribution landed, or for backends that don't track it.
+    pub agent_alias: Option<String>,
+    /// Dotted ChannelRef the session belongs to (`<type>.<alias>`,
+    /// e.g. `discord.clamps`). `None` for non-channel sessions (CLI,
+    /// internal cron runs) or backends without routing columns.
+    pub channel_id: Option<String>,
+    /// Platform-side room / thread identifier (Discord channel id,
+    /// Matrix room id, Slack thread ts, ...). `None` for direct messages
+    /// or backends that don't track it.
+    pub room_id: Option<String>,
+    /// Inbound sender id verbatim (Discord username, phone number, ...).
+    /// Not an FK — sessions can survive deletion of the upstream user.
+    pub sender_id: Option<String>,
+    /// Stable id of the authenticated principal that created the session
+    /// (RFC 7141). `None` for sessions persisted before principal-keying
+    /// landed, channel-originated sessions, or backends without the column.
+    pub principal_id: Option<String>,
+}
+
+/// Structured routing context recorded alongside a session. Mirrors the
+/// `ChannelMessage` fields the orchestrator uses to compose
+/// `conversation_history_key` so the session row can be queried by
+/// channel / room / sender without re-parsing the synthetic key.
+#[derive(Debug, Clone, Default)]
+pub struct SessionContext<'a> {
+    /// `<type>.<alias>` ChannelRef (`discord.clamps`).
+    pub channel_id: Option<&'a str>,
+    /// Platform-side room / thread id.
+    pub room_id: Option<&'a str>,
+    /// Inbound sender id (channel-native username, phone, ...).
+    pub sender_id: Option<&'a str>,
+}
+
+/// Query parameters for listing sessions.
+#[derive(Debug, Clone, Default)]
+pub struct SessionQuery {
+    /// Keyword to search in session messages (FTS5 if available).
+    pub keyword: Option<String>,
+    /// Maximum number of sessions to return.
+    pub limit: Option<usize>,
+}
+
+/// One persisted message with the optional `created_at` the backend
+/// stamped on it. JSONL / in-memory backends return `None`; SQLite
+/// returns the row's `created_at` column.
+#[derive(Debug, Clone)]
+pub struct TimestampedMessage {
+    pub message: ChatMessage,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// Trait for session persistence backends.
+/// Implementations must be `Send + Sync` for sharing across async tasks.
+pub trait SessionBackend: Send + Sync {
+    /// Load all messages for a session. Returns empty vec if session doesn't exist.
+    fn load(&self, session_key: &str) -> Vec<ChatMessage>;
+
+    /// Like `load`, but distinguishes an unreadable transcript from a genuinely
+    /// missing/empty session. `Ok(vec)` is the verified durable transcript
+    /// (empty means no session), `Err` means the transcript could not be read
+    /// or parsed and must not be treated as empty. The default impl
+    /// delegates to `load` and never errors; backends that can detect read
+    /// failures (JSONL) override this so callers can fail closed instead of
+    /// seeding a new-message-only cache over an existing transcript.
+    fn try_load(&self, session_key: &str) -> std::io::Result<Vec<ChatMessage>> {
+        Ok(self.load(session_key))
+    }
+
+    /// Same as `load`, but each row carries its persisted `created_at`
+    /// when the backend has one. Default impl falls back to `load`
+    /// without timestamps so non-SQLite backends keep working.
+    fn load_with_timestamps(&self, session_key: &str) -> Vec<TimestampedMessage> {
+        self.load(session_key)
+            .into_iter()
+            .map(|message| TimestampedMessage {
+                message,
+                created_at: None,
+            })
+            .collect()
+    }
+
+    /// Append a single message to a session.
+    fn append(&self, session_key: &str, message: &ChatMessage) -> std::io::Result<()>;
+
+    /// Remove the last message from a session. Returns `true` if a message was removed.
+    fn remove_last(&self, session_key: &str) -> std::io::Result<bool>;
+
+    /// Replace a session's entire durable transcript with `messages`. Used to
+    /// keep the canonical stored history in sync with a caller-owned buffer
+    /// that trimmed or rewrote turns in place (e.g. history-budget
+    /// enforcement), rather than appending on top of a now-stale transcript.
+    /// The default clears the session (`clear_messages`) and re-appends
+    /// every message through the required `append` primitive, so every
+    /// backend gets real replacement semantics — a backend that never
+    /// overrides this does not silently drop the caller's authoritative
+    /// trimmed history. It is O(n) calls and not atomic; backends with a
+    /// native batch/transactional rewrite (JSONL, SQLite) override this.
+    fn rewrite_messages(&self, session_key: &str, messages: &[ChatMessage]) -> std::io::Result<()> {
+        self.clear_messages(session_key)?;
+        for message in messages {
+            self.append(session_key, message)?;
+        }
+        Ok(())
+    }
+
+    fn update_last(&self, session_key: &str, message: &ChatMessage) -> std::io::Result<bool> {
+        if self.remove_last(session_key)? {
+            self.append(session_key, message)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// List all session keys.
+    fn list_sessions(&self) -> Vec<String>;
+
+    /// List sessions with metadata.
+    fn list_sessions_with_metadata(&self) -> Vec<SessionMetadata> {
+        // Default: construct metadata from messages (backends can override for efficiency)
+        self.list_sessions()
+            .into_iter()
+            .map(|key| {
+                let messages = self.load(&key);
+                SessionMetadata {
+                    key,
+                    name: None,
+                    created_at: Utc::now(),
+                    last_activity: Utc::now(),
+                    message_count: messages.len(),
+                    agent_alias: None,
+                    channel_id: None,
+                    room_id: None,
+                    sender_id: None,
+                    principal_id: None,
+                }
+            })
+            .collect()
+    }
+
+    /// Compact a session file (remove duplicates/corruption). No-op by default.
+    fn compact(&self, _session_key: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Remove sessions that haven't been active within the given TTL hours.
+    fn cleanup_stale(&self, _ttl_hours: u32) -> std::io::Result<usize> {
+        Ok(0)
+    }
+
+    /// Search sessions by keyword. Default returns empty (backends with FTS override).
+    fn search(&self, _query: &SessionQuery) -> Vec<SessionMetadata> {
+        Vec::new()
+    }
+
+    fn clear_messages(&self, session_key: &str) -> std::io::Result<usize> {
+        let mut count = 0;
+        while self.remove_last(session_key)? {
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    /// Delete all messages for a session. Returns `true` if the session existed.
+    fn delete_session(&self, _session_key: &str) -> std::io::Result<bool> {
+        Ok(false)
+    }
+
+    fn clear_agent_attribution(&self, _agent_alias: &str) -> std::io::Result<usize> {
+        Ok(0)
+    }
+
+    fn rename_agent_attribution(&self, _from: &str, _to: &str) -> std::io::Result<usize> {
+        Ok(0)
+    }
+
+    fn count_agent_attribution(&self, _agent_alias: &str) -> std::io::Result<usize> {
+        Ok(0)
+    }
+
+    fn session_exists(&self, session_key: &str) -> bool {
+        self.get_session_metadata(session_key).is_some()
+    }
+
+    /// Set or update the human-readable name for a session.
+    fn set_session_name(&self, _session_key: &str, _name: &str) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Get the human-readable name for a session (if set).
+    fn get_session_name(&self, _session_key: &str) -> std::io::Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Record the agent alias that owns a session. Called on WebSocket
+    /// handshake when the alias is known. No-op for backends that don't
+    /// track per-agent attribution.
+    fn set_session_agent_alias(
+        &self,
+        _session_key: &str,
+        _agent_alias: &str,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Get the agent alias associated with a session, if recorded.
+    fn get_session_agent_alias(&self, _session_key: &str) -> std::io::Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Record whether this session's persisted transcript currently starts
+    /// with the synthetic trim breadcrumb, as one canonical fact alongside
+    /// the transcript itself. Callers must not infer this from message text
+    /// on restore: a genuine first user turn that happens to equal the
+    /// localized breadcrumb string must keep its turn-boundary role, and a
+    /// crumb written under another locale must stay classified as synthetic.
+    /// No-op for backends that don't track it (the caller falls back to
+    /// treating the session as having no breadcrumb).
+    fn set_session_trim_breadcrumb(
+        &self,
+        _session_key: &str,
+        _present: bool,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Get the recorded breadcrumb provenance for a session. `None` means
+    /// the backend doesn't track it or no session-level state exists yet
+    /// (callers should assume `false`, not attempt text inference).
+    fn get_session_trim_breadcrumb(&self, _session_key: &str) -> std::io::Result<Option<bool>> {
+        Ok(None)
+    }
+
+    /// Replace a session's durable transcript and its breadcrumb provenance
+    /// with the agent's authoritative post-turn state. Callers that own a
+    /// trimmed in-memory history must use this instead of appending only the
+    /// turn's delta. The default implementation performs two separate writes
+    /// (`rewrite_messages` then `set_session_trim_breadcrumb`); they are
+    /// serialized under the caller's lock (channel per-sender lock or the
+    /// store's mutation guard) so concurrent turns cannot interleave, but the
+    /// pair is not crash-atomic. A crash between the two writes can leave
+    /// transcript and flag temporarily out of sync, recoverable on the next
+    /// trim. Both built-in backends override this with a stronger guarantee:
+    /// `SqliteSessionBackend` makes the pair atomic inside one transaction,
+    /// and the JSONL `SessionStore` rolls the transcript back to its
+    /// pre-replace content when the breadcrumb write fails, so an in-process
+    /// failure converges back to the last known-good pair instead of leaving
+    /// a new transcript paired with a stale flag (a process crash between the
+    /// two file writes can still split them, since JSONL uses two files).
+    /// Backends that can provide a transaction should follow SQLite's
+    /// example; ones limited to independent writes should follow JSONL's.
+    fn replace_conversation_state(
+        &self,
+        session_key: &str,
+        messages: &[ChatMessage],
+        breadcrumb_present: bool,
+    ) -> std::io::Result<()> {
+        self.rewrite_messages(session_key, messages)?;
+        self.set_session_trim_breadcrumb(session_key, breadcrumb_present)
+    }
+
+    /// Replace the durable transcript and breadcrumb flag only if the session
+    /// still exists. Returns `Ok(true)` when the replacement was written and
+    /// `Ok(false)` when the session was already deleted, in which case
+    /// nothing is written and, in particular, no fresh session row or file is
+    /// recreated for the deleted key.
+    ///
+    /// Post-turn persistence must use this instead of
+    /// [`replace_conversation_state`](Self::replace_conversation_state):
+    /// a bare existence check followed by a separate replace is a
+    /// check-then-act race — a `DELETE /api/sessions/{id}` (or any other
+    /// deleter) committing between the two recreates durable state the user
+    /// just wiped, since both the SQLite breadcrumb upsert and the JSONL
+    /// rewrite recreate their rows/files unconditionally.
+    ///
+    /// The default implementation is check-then-act and therefore only
+    /// best-effort. Backends with a serializing primitive close the race by
+    /// overriding it: `SqliteSessionBackend` performs the existence check and
+    /// both writes inside one transaction under the connection mutex (which
+    /// the deleter also holds), and the JSONL `SessionStore` holds its
+    /// mutation guard across the existence probe and both file writes (which
+    /// its deleter also holds).
+    fn replace_conversation_state_if_exists(
+        &self,
+        session_key: &str,
+        messages: &[ChatMessage],
+        breadcrumb_present: bool,
+    ) -> std::io::Result<bool> {
+        if !self.session_exists(session_key) {
+            return Ok(false);
+        }
+        self.replace_conversation_state(session_key, messages, breadcrumb_present)?;
+        Ok(true)
+    }
+
+    fn set_session_context(
+        &self,
+        _session_key: &str,
+        _context: SessionContext<'_>,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn get_session_metadata(&self, session_key: &str) -> Option<SessionMetadata> {
+        let messages = self.load(session_key);
+        if messages.is_empty() {
+            return None;
+        }
+        Some(SessionMetadata {
+            key: session_key.to_string(),
+            name: self.get_session_name(session_key).ok().flatten(),
+            created_at: Utc::now(),
+            last_activity: Utc::now(),
+            message_count: messages.len(),
+            agent_alias: None,
+            channel_id: None,
+            room_id: None,
+            sender_id: None,
+            principal_id: None,
+        })
+    }
+
+    /// Record the authenticated principal that owns a session (RFC 7141).
+    /// Called at `session/new` when the dispatcher has a real (non-sentinel)
+    /// principal bound. No-op for backends without the column.
+    fn set_session_principal(
+        &self,
+        _session_key: &str,
+        _principal_id: &str,
+    ) -> std::io::Result<()> {
+        // Fail closed: a backend that cannot record the owner cannot isolate
+        // the session after a restart. Callers that need isolation treat this
+        // as a failed creation rather than a silently ownerless row.
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this session backend does not record an owning principal",
+        ))
+    }
+
+    /// Delete a session ONLY if `owner_principal_id` matches the stored
+    /// owner: the ownership check and the destruction of the ownership row
+    /// are one SQL statement (the RFC 7141 atomic storage predicate), so a
+    /// concurrent re-stamp cannot race them apart. Backends without
+    /// ownership support fail closed: `Ok(false)`, nothing deleted.
+    fn delete_session_owned(
+        &self,
+        _session_key: &str,
+        _owner_principal_id: &str,
+    ) -> std::io::Result<bool> {
+        Ok(false)
+    }
+
+    /// Set the session state (e.g. "idle", "running", "error").
+    /// `turn_id` identifies the current turn (set when running, cleared on idle).
+    fn set_session_state(
+        &self,
+        _session_key: &str,
+        _state: &str,
+        _turn_id: Option<&str>,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Get the current session state. Returns `None` if the backend doesn't track state.
+    fn get_session_state(&self, _session_key: &str) -> std::io::Result<Option<SessionState>> {
+        Ok(None)
+    }
+
+    /// List sessions currently in "running" state.
+    fn list_running_sessions(&self) -> Vec<SessionMetadata> {
+        Vec::new()
+    }
+
+    /// List sessions stuck in "running" state longer than `threshold_secs`.
+    fn list_stuck_sessions(&self, _threshold_secs: u64) -> Vec<SessionMetadata> {
+        Vec::new()
+    }
+}
+
+/// Session state information.
+#[derive(Debug, Clone)]
+pub struct SessionState {
+    /// Current state: "idle", "running", or "error".
+    pub state: String,
+    /// Turn ID of the active or last turn.
+    pub turn_id: Option<String>,
+    /// When the current state was entered.
+    pub turn_started_at: Option<DateTime<Utc>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_metadata_is_constructible() {
+        let meta = SessionMetadata {
+            key: "test".into(),
+            name: None,
+            created_at: Utc::now(),
+            last_activity: Utc::now(),
+            message_count: 5,
+            agent_alias: None,
+            channel_id: None,
+            room_id: None,
+            sender_id: None,
+            principal_id: None,
+        };
+        assert_eq!(meta.key, "test");
+        assert_eq!(meta.message_count, 5);
+    }
+
+    #[test]
+    fn session_query_defaults() {
+        let q = SessionQuery::default();
+        assert!(q.keyword.is_none());
+        assert!(q.limit.is_none());
+    }
+}

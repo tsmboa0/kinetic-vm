@@ -1,0 +1,1757 @@
+//! System prompt construction for the agent loop and channel subsystem.
+//! These functions were originally in `channels/mod.rs` but live here to
+//! break a circular dependency between the channels and agent modules.
+
+use crate::agent::prompt::{TIMESTAMP_ORIENTATION, append_timestamp_orientation};
+use crate::identity;
+use crate::security::AutonomyLevel;
+use crate::skills::Skill;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
+use zeroclaw_api::runtime_traits::{POSIX_DELETION_GUIDANCE, ShellProfile};
+
+/// Maximum characters per injected workspace file (matches `OpenClaw` default).
+pub const BOOTSTRAP_MAX_CHARS: usize = 20_000;
+/// Per-file cap applied to every injected workspace bootstrap file while the
+/// agent's runtime profile has `compact_context` on (the default).
+/// [`BOOTSTRAP_MAX_CHARS`] is the cap when it is off. Shared by the turn paths
+/// and `doctor` so they report the same budget.
+pub const COMPACT_BOOTSTRAP_MAX_CHARS: usize = 6000;
+/// Workspace files injected into every system prompt, unconditionally.
+pub const BOOTSTRAP_FILES: &[&str] =
+    &["AGENTS.md", "SOUL.md", "TOOLS.md", "IDENTITY.md", "USER.md"];
+/// Bootstrap files injected only under conditions: `BOOTSTRAP.md` only when
+/// present, `MEMORY.md` only when memory is injected. `doctor` scans both
+/// lists.
+pub const CONDITIONAL_BOOTSTRAP_FILES: &[&str] = &["BOOTSTRAP.md", "MEMORY.md"];
+pub const NO_TOOLS_TASK_FRAMING: &str = "No tools are available for this turn";
+pub const NATIVE_TOOLS_TASK_FRAMING: &str = "Use tools when the request requires action";
+
+/// Model-facing `always_ask` exception under Full autonomy.
+fn full_autonomy_always_ask_prompt_lines(always_ask: &[String]) -> String {
+    if always_ask.iter().any(|tool| tool == "*") {
+        "- `always_ask` is set to `*`, so every tool still requires operator approval, or fails closed when no approver is present.\n".to_string()
+    } else if always_ask.is_empty() {
+        "- No tools are listed in `always_ask`.\n".to_string()
+    } else {
+        format!(
+            "- Tools listed in `always_ask` still require operator approval, or fail closed when no approver is present: {}.\n",
+            always_ask.join(", ")
+        )
+    }
+}
+
+fn load_openclaw_bootstrap_files(
+    prompt: &mut String,
+    workspace_dir: &std::path::Path,
+    max_chars_per_file: usize,
+    inject_memory: bool,
+) {
+    prompt.push_str(
+        "The following workspace files define your identity, behavior, and context. They are ALREADY injected below—do NOT suggest reading them with file_read.\n\n",
+    );
+
+    for filename in BOOTSTRAP_FILES {
+        inject_workspace_file(prompt, workspace_dir, filename, max_chars_per_file);
+    }
+
+    // BOOTSTRAP.md — only if it exists (first-run ritual)
+    let bootstrap_name = CONDITIONAL_BOOTSTRAP_FILES[0];
+    if workspace_dir.join(bootstrap_name).exists() {
+        inject_workspace_file(prompt, workspace_dir, bootstrap_name, max_chars_per_file);
+    }
+
+    // MEMORY.md — curated long-term memory (main session only).
+    // Skipped when the agent runs without persistent memory (e.g. ACP sessions)
+    // so that stale long-term memory does not leak into isolated contexts.
+    if inject_memory {
+        inject_workspace_file(
+            prompt,
+            workspace_dir,
+            CONDITIONAL_BOOTSTRAP_FILES[1],
+            max_chars_per_file,
+        );
+    }
+}
+
+fn append_project_context(
+    prompt: &mut String,
+    workspace_dir: &std::path::Path,
+    identity_config: Option<&zeroclaw_config::schema::IdentityConfig>,
+    bootstrap_max_chars: Option<usize>,
+    inject_memory: bool,
+) {
+    prompt.push_str("## Project Context\n\n");
+
+    if let Some(config) = identity_config
+        && identity::is_aieos_configured(config)
+    {
+        match identity::load_aieos_identity(config, workspace_dir) {
+            Ok(Some(aieos_identity)) => {
+                let aieos_prompt = identity::aieos_to_system_prompt(&aieos_identity);
+                if !aieos_prompt.is_empty() {
+                    prompt.push_str(&aieos_prompt);
+                    prompt.push_str("\n\n");
+                }
+            }
+            Ok(None) => {
+                let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
+                load_openclaw_bootstrap_files(prompt, workspace_dir, max_chars, inject_memory);
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to load AIEOS identity: {e}. Using OpenClaw format.");
+                let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
+                load_openclaw_bootstrap_files(prompt, workspace_dir, max_chars, inject_memory);
+            }
+        }
+        return;
+    }
+
+    let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
+    load_openclaw_bootstrap_files(prompt, workspace_dir, max_chars, inject_memory);
+}
+
+/// Build the default system prompt.
+///
+/// Reports no shell: callers that know their runtime adapter should use
+/// [`build_system_prompt_with_mode_and_autonomy`] and pass its
+/// `shell_profile` so the model is told which dialect to write.
+pub fn build_system_prompt(
+    workspace_dir: &std::path::Path,
+    model_name: &str,
+    tools: &[(&str, &str)],
+    skills: &[Skill],
+    identity_config: Option<&zeroclaw_config::schema::IdentityConfig>,
+    bootstrap_max_chars: Option<usize>,
+) -> String {
+    build_system_prompt_with_mode(
+        workspace_dir,
+        model_name,
+        tools,
+        skills,
+        identity_config,
+        bootstrap_max_chars,
+        false,
+        zeroclaw_config::schema::SkillsPromptInjectionMode::default(),
+        AutonomyLevel::default(),
+    )
+}
+
+/// Like [`build_system_prompt`] but accepts `show_tool_calls` to control
+/// whether the system prompt instructs the model to hide tool narration.
+pub fn build_system_prompt_with_tool_calls(
+    workspace_dir: &std::path::Path,
+    model_name: &str,
+    tools: &[(&str, &str)],
+    skills: &[Skill],
+    identity_config: Option<&zeroclaw_config::schema::IdentityConfig>,
+    bootstrap_max_chars: Option<usize>,
+    show_tool_calls: bool,
+) -> String {
+    build_system_prompt_with_mode_and_autonomy(
+        workspace_dir,
+        model_name,
+        tools,
+        skills,
+        identity_config,
+        bootstrap_max_chars,
+        Some(&zeroclaw_config::schema::RiskProfileConfig::default()),
+        false,
+        zeroclaw_config::schema::SkillsPromptInjectionMode::default(),
+        false,
+        0,
+        true,
+        show_tool_calls,
+        None,
+    )
+}
+
+pub fn build_system_prompt_with_mode(
+    workspace_dir: &std::path::Path,
+    model_name: &str,
+    tools: &[(&str, &str)],
+    skills: &[Skill],
+    identity_config: Option<&zeroclaw_config::schema::IdentityConfig>,
+    bootstrap_max_chars: Option<usize>,
+    native_tool_specs_present: bool,
+    skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode,
+    autonomy_level: AutonomyLevel,
+) -> String {
+    let autonomy_cfg = zeroclaw_config::schema::RiskProfileConfig {
+        level: autonomy_level,
+        ..Default::default()
+    };
+    build_system_prompt_with_mode_and_autonomy(
+        workspace_dir,
+        model_name,
+        tools,
+        skills,
+        identity_config,
+        bootstrap_max_chars,
+        Some(&autonomy_cfg),
+        native_tool_specs_present,
+        skills_prompt_mode,
+        false,
+        0,
+        true,
+        false,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_system_prompt_with_mode_and_autonomy(
+    workspace_dir: &std::path::Path,
+    model_name: &str,
+    tools: &[(&str, &str)],
+    skills: &[Skill],
+    identity_config: Option<&zeroclaw_config::schema::IdentityConfig>,
+    bootstrap_max_chars: Option<usize>,
+    autonomy_config: Option<&zeroclaw_config::schema::RiskProfileConfig>,
+    native_tool_specs_present: bool,
+    skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode,
+    compact_context: bool,
+    max_system_prompt_chars: usize,
+    // When `false`, `MEMORY.md` is omitted from the injected bootstrap files.
+    // Set to `false` for isolated / ACP sessions that use `exclude_memory`.
+    inject_memory: bool,
+    // When `true`, the model is allowed to narrate tool usage in its
+    // response. When `false` (default), the system prompt instructs
+    // the model to treat tool calls as invisible infrastructure.
+    show_tool_calls: bool,
+    // The shell the runtime adapter will actually spawn, or `None` for a
+    // shell-less runtime (which omits the `Shell:` field and the dialect
+    // guidance entirely). Resolved from `RuntimeAdapter::shell_profile` so the
+    // reported shell cannot drift from the executed one.
+    shell_profile: Option<&ShellProfile>,
+) -> String {
+    build_system_prompt_with_mode_and_effective_tools(
+        workspace_dir,
+        model_name,
+        tools,
+        |_| true,
+        skills,
+        identity_config,
+        bootstrap_max_chars,
+        autonomy_config,
+        native_tool_specs_present,
+        skills_prompt_mode,
+        compact_context,
+        max_system_prompt_chars,
+        inject_memory,
+        show_tool_calls,
+        shell_profile,
+    )
+}
+
+/// Build the system prompt with the effective callable tool names supplied by
+/// the turn's assembled registry. The tool descriptions remain separately
+/// filtered for the prompt surface, while skill callable metadata uses this
+/// name set as its availability source of truth.
+#[allow(clippy::too_many_arguments)]
+pub fn build_system_prompt_with_mode_and_effective_tools(
+    workspace_dir: &std::path::Path,
+    model_name: &str,
+    tools: &[(&str, &str)],
+    is_tool_available: impl Fn(&str) -> bool,
+    skills: &[Skill],
+    identity_config: Option<&zeroclaw_config::schema::IdentityConfig>,
+    bootstrap_max_chars: Option<usize>,
+    autonomy_config: Option<&zeroclaw_config::schema::RiskProfileConfig>,
+    native_tool_specs_present: bool,
+    skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode,
+    compact_context: bool,
+    max_system_prompt_chars: usize,
+    inject_memory: bool,
+    show_tool_calls: bool,
+    shell_profile: Option<&ShellProfile>,
+) -> String {
+    use std::fmt::Write;
+    let mut prompt = String::with_capacity(8192);
+    let has_tools = !tools.is_empty() || native_tool_specs_present;
+    let read_skill_available = is_tool_available("read_skill");
+    let skills_prompt_mode = crate::skills::skills_prompt_mode_with_loader_fallback(
+        skills_prompt_mode,
+        read_skill_available,
+    );
+
+    // ── 0. Anti-narration (top priority) ───────────────────────
+    // When show_tool_calls is true, the model is allowed to describe
+    // its tool usage so channel users see what tools are being called.
+    if has_tools && !show_tool_calls {
+        prompt.push_str(
+            "## CRITICAL: No Tool Narration\n\n\
+             NEVER narrate, announce, describe, or explain your tool usage to the user. \
+             Do NOT say things like 'Let me check...', 'I will use http_request to...', \
+             'I'll fetch that for you', 'Searching now...', or 'Using the web_search tool'. \
+             The user must ONLY see the final answer. Tool calls are invisible infrastructure — \
+             never reference them. If you catch yourself starting a sentence about what tool \
+             you are about to use or just used, DELETE it and give the answer directly.\n\n",
+        );
+    }
+
+    // ── 0b. Tool Honesty ───────────────────────────────────────
+    if has_tools {
+        prompt.push_str(
+            "## CRITICAL: Tool Honesty\n\n\
+             - NEVER fabricate, invent, or guess tool results. If a tool returns empty results, say \"No results found.\"\n\
+             - If a tool call fails, report the error — never make up data to fill the gap.\n\
+             - When unsure whether a tool call succeeded, ask the user rather than guessing.\n\n",
+        );
+    }
+
+    // ── 1. Tooling ──────────────────────────────────────────────
+    if !tools.is_empty() && !native_tool_specs_present {
+        prompt.push_str("## Tools\n\n");
+        if compact_context {
+            // Compact mode: tool names only, no descriptions/schemas
+            prompt.push_str("Available tools: ");
+            let names: Vec<&str> = tools.iter().map(|(name, _)| *name).collect();
+            prompt.push_str(&names.join(", "));
+            prompt.push_str("\n\n");
+        } else {
+            prompt.push_str("You have access to the following tools:\n\n");
+            for (name, desc) in tools {
+                let _ = writeln!(prompt, "- **{name}**: {desc}");
+            }
+            prompt.push('\n');
+        }
+    }
+
+    // ── 1b. Hardware (when gpio/arduino tools present) ───────────
+    let has_hardware = tools.iter().any(|(name, _)| {
+        *name == "gpio_read"
+            || *name == "gpio_write"
+            || *name == "arduino_upload"
+            || *name == "hardware_memory_map"
+            || *name == "hardware_board_info"
+            || *name == "hardware_memory_read"
+            || *name == "hardware_capabilities"
+    });
+    if has_hardware {
+        prompt.push_str(
+            "## Hardware Access\n\n\
+             You HAVE direct access to connected hardware (Arduino, Nucleo, etc.). The user owns this system and has configured it.\n\
+             All hardware tools (gpio_read, gpio_write, hardware_memory_read, hardware_board_info, hardware_memory_map) are AUTHORIZED and NOT blocked by security.\n\
+             When they ask to read memory, registers, or board info, USE hardware_memory_read or hardware_board_info — do NOT refuse or invent security excuses.\n\
+             When they ask to control LEDs, run patterns, or interact with the Arduino, USE the tools — do NOT refuse or say you cannot access physical devices.\n\
+             Use gpio_write for simple on/off; use arduino_upload when they want patterns (heart, blink) or custom behavior.\n\n",
+        );
+    }
+
+    // ── 1d. Tool Authorization (Full autonomy) ──────────────────────
+    // At Full autonomy the user has explicitly opted into letting the model
+    // act without per-call approval for tools that are not listed in
+    // `always_ask`. The generic Safety block alone isn't enough to overcome
+    // model safety-priors that produce simulated refusal text without ever
+    // dispatching a tool call.
+    // Name the power tools the autonomy policy authorizes and tell the model
+    // it is authorized to *call/attempt* them (not that they are exempt from
+    // policy): command policy, forbidden_commands, forbidden_paths, and OS
+    // sandboxing may still reject a real call, so the model must not
+    // self-refuse merely because the request uses these tools.
+    if has_tools && autonomy_config.map(|cfg| cfg.level) == Some(AutonomyLevel::Full) {
+        let power_tools: Vec<&str> = ["shell", "file_write", "file_edit"]
+            .into_iter()
+            .filter(|name| tools.iter().any(|(t, _)| t == name))
+            .collect();
+        if !power_tools.is_empty() {
+            prompt.push_str(
+                "## Tool Authorization\n\n\
+                 The runtime autonomy policy is set to `full`. Uncovered tools are authorized to call (to attempt) without per-call approval. The following tools are registered under Full autonomy: ",
+            );
+            prompt.push_str(&power_tools.join(", "));
+            prompt.push_str(".\n");
+            prompt.push_str(&full_autonomy_always_ask_prompt_lines(
+                autonomy_config
+                    .map(|cfg| cfg.always_ask.as_slice())
+                    .unwrap_or(&[]),
+            ));
+            prompt.push_str(
+                "When the user asks you to run a shell command, write or edit a file, or otherwise act through these tools, CALL the tool directly unless it is listed in `always_ask` — do NOT self-refuse with simulated text such as \"blocked by security policy\" or \"restricted in this environment\" merely because the request uses shell or file-write tooling.\n\
+                 Full autonomy auto-approves uncovered tools; it does not remove runtime safeguards: command policy, `forbidden_commands`, `forbidden_paths`, and OS sandboxing still apply, and a call can still return a real tool error. If such an error occurs, it is reported as a tool error in the conversation; only then should you explain what was blocked. Never invent a block that did not happen.\n\n",
+            );
+        }
+    }
+
+    // ── 1c. Action instruction (avoid meta-summary) ───────────────
+    if !has_tools {
+        prompt.push_str(
+            "## Your Task\n\n\
+             When the user sends a message, respond naturally and answer directly from conversation context.\n\
+             ",
+        );
+        prompt.push_str(NO_TOOLS_TASK_FRAMING);
+        prompt.push_str(
+            ", so do not emit tool calls or describe unavailable actions.\n\
+             Do NOT: summarize this configuration, describe your capabilities, or output step-by-step meta-commentary.\n\n",
+        );
+    } else if native_tool_specs_present {
+        prompt.push_str(
+            "## Your Task\n\n\
+             When the user sends a message, respond naturally. ",
+        );
+        prompt.push_str(NATIVE_TOOLS_TASK_FRAMING);
+        prompt.push_str(
+            " (running commands, reading files, etc.).\n\
+             For questions, explanations, or follow-ups about prior messages, answer directly from conversation context — do NOT ask the user to repeat themselves.\n\
+             Do NOT: summarize this configuration, describe your capabilities, or output step-by-step meta-commentary.\n\n",
+        );
+    } else {
+        prompt.push_str(
+            "## Your Task\n\n\
+             When the user sends a message, ACT on it. Use the tools to fulfill their request.\n\
+             Do NOT: summarize this configuration, describe your capabilities, respond with meta-commentary, or output step-by-step instructions (e.g. \"1. First... 2. Next...\").\n\
+             Instead: emit actual <tool_call> tags when you need to act. Just do what they ask.\n\n",
+        );
+    }
+
+    // ── 2. Safety ───────────────────────────────────────────────
+    prompt.push_str("## Safety\n\n");
+    prompt.push_str("- Do not exfiltrate private data.\n");
+    if autonomy_config.map(|cfg| cfg.level) != Some(crate::security::AutonomyLevel::Full) {
+        prompt.push_str(
+            "- Do not run destructive commands without asking.\n\
+             - Do not bypass oversight or approval mechanisms.\n",
+        );
+    }
+    // Deletion advice follows the dialect: `trash` exists only on POSIX, so
+    // recommending it to a PowerShell or `cmd.exe` session would name a
+    // command that is not there. Shell-less runtimes keep the POSIX default,
+    // which is what they rendered before this was dialect-aware.
+    prompt.push_str(shell_profile.map_or(
+        POSIX_DELETION_GUIDANCE,
+        ShellProfile::safe_deletion_guidance,
+    ));
+    match autonomy_config.map(|cfg| cfg.level) {
+        Some(crate::security::AutonomyLevel::Full) => {
+            prompt.push_str(
+                "- Respect the runtime autonomy policy: Full auto-approves tools that are not listed in `always_ask`. Execute those directly instead of asking the user for extra approval.\n",
+            );
+            prompt.push_str(&full_autonomy_always_ask_prompt_lines(
+                autonomy_config
+                    .map(|cfg| cfg.always_ask.as_slice())
+                    .unwrap_or(&[]),
+            ));
+            prompt.push_str(
+                "- If a tool or action is blocked by policy or unavailable, explain that concrete restriction instead of simulating an approval dialog.\n",
+            );
+        }
+        Some(crate::security::AutonomyLevel::ReadOnly) => {
+            prompt.push_str(
+                "- Respect the runtime autonomy policy: this runtime is read-only for side effects unless a tool explicitly reports otherwise.\n\
+                 - If a requested action is blocked by policy, explain the restriction directly instead of simulating an approval dialog.\n",
+            );
+        }
+        _ => {
+            prompt.push_str(
+                "- When in doubt, ask before acting externally.\n\
+                 - Respect the runtime autonomy policy: ask for approval only when the current runtime policy actually requires it.\n\
+                 - If a tool or action is blocked by policy or unavailable, explain that concrete restriction instead of simulating an approval dialog.\n",
+            );
+        }
+    }
+    prompt.push('\n');
+
+    // ── 2b. Shell dialect ───────────────────────────────────────
+    // Only when a registered tool takes a model-authored command: the syntax
+    // list is dead weight otherwise. Skipped in compact_context for the same
+    // reason the tool catalog is trimmed there. The `## Runtime` line still
+    // names the shell in both cases.
+    if !compact_context
+        && zeroclaw_api::runtime_traits::needs_shell_dialect_guidance(
+            tools.iter().map(|(name, _)| *name),
+        )
+        && let Some(profile) = shell_profile
+    {
+        prompt.push_str(&profile.prompt_section());
+        prompt.push('\n');
+    }
+
+    // ── 3. Skills (full or compact, based on config) ─────────────
+    if compact_context {
+        append_project_context(
+            &mut prompt,
+            workspace_dir,
+            identity_config,
+            bootstrap_max_chars,
+            inject_memory,
+        );
+    }
+
+    if !skills.is_empty() {
+        prompt.push_str(&crate::skills::skills_to_prompt_with_mode_and_availability(
+            skills,
+            workspace_dir,
+            skills_prompt_mode,
+            is_tool_available,
+        ));
+        prompt.push_str("\n\n");
+    }
+
+    // ── 4. Workspace ────────────────────────────────────────────
+    let _ = writeln!(
+        prompt,
+        "## Workspace\n\nWorking directory: `{}`\n",
+        workspace_dir.display()
+    );
+
+    // ── 5. Bootstrap files (injected into context) ──────────────
+    if !compact_context {
+        append_project_context(
+            &mut prompt,
+            workspace_dir,
+            identity_config,
+            bootstrap_max_chars,
+            inject_memory,
+        );
+    }
+
+    // ── 6. Date ─────────────────────────────────────────────────
+    let now = chrono::Local::now();
+    let _ = writeln!(
+        prompt,
+        "## Current Date\n\n{} ({})\n",
+        now.format("%Y-%m-%d"),
+        now.format("%:z")
+    );
+
+    // ── 7. Runtime ──────────────────────────────────────────────
+    let host =
+        hostname::get().map_or_else(|_| "unknown".into(), |h| h.to_string_lossy().to_string());
+    // The shell is reported next to the OS because the OS alone does not
+    // determine it: on Windows `cmd.exe` and PowerShell are both reachable.
+    // Omitted entirely for shell-less runtimes, which read no worse than
+    // before. See `RuntimeAdapter::shell_profile`.
+    match shell_profile {
+        Some(profile) => {
+            let _ = writeln!(
+                prompt,
+                "## Runtime\n\nHost: {host} | OS: {} | Shell: {} | Model: {model_name}\n",
+                std::env::consts::OS,
+                profile.name,
+            );
+        }
+        None => {
+            let _ = writeln!(
+                prompt,
+                "## Runtime\n\nHost: {host} | OS: {} | Model: {model_name}\n",
+                std::env::consts::OS,
+            );
+        }
+    }
+
+    // ── 8. Channel Capabilities (full copy skipped in compact_context
+    //       mode; the timestamp orientation below emits in both modes) ──
+    if !compact_context {
+        prompt.push_str("## Channel Capabilities\n\n");
+        prompt.push_str("- You are running as a messaging bot. Your response is automatically sent back to the user's channel.\n");
+        prompt
+            .push_str("- You do NOT need to ask permission to respond — just respond directly.\n");
+        prompt.push_str(match autonomy_config.map(|cfg| cfg.level) {
+        Some(crate::security::AutonomyLevel::Full) => {
+            "- If the runtime policy already allows a tool, use it directly; do not ask the user for extra approval.\n\
+             - Never pretend you are waiting for a human approval click or confirmation when the runtime policy already permits the action.\n\
+             - If the runtime policy blocks an action, say that directly instead of simulating an approval flow.\n"
+        }
+        Some(crate::security::AutonomyLevel::ReadOnly) => {
+            "- This runtime may reject write-side effects; if that happens, explain the policy restriction directly instead of simulating an approval flow.\n"
+        }
+        _ => {
+            "- Ask for approval only when the runtime policy actually requires it.\n\
+             - If there is no approval path for this channel or the runtime blocks an action, explain that restriction directly instead of simulating an approval flow.\n"
+        }
+    });
+        prompt.push_str("- NEVER repeat, describe, or echo credentials, tokens, API keys, or secrets in your responses.\n");
+        prompt.push_str("- If a tool output contains credentials, they have already been redacted — do not mention them.\n");
+        prompt.push_str("- When a user sends a voice note, it is automatically transcribed to text. Your text reply is automatically converted to a voice note and sent back. Do NOT attempt to generate audio yourself — TTS is handled by the channel.\n");
+        if !show_tool_calls {
+            prompt.push_str("- NEVER narrate or describe your tool usage. Do NOT say 'Let me fetch...', 'I will use...', 'Searching...', or similar. Give the FINAL ANSWER only — no intermediate steps, no tool mentions, no progress updates.\n");
+        }
+        prompt.push_str("- Calibration note: agents in this system currently err on the side of silence when a response would be appropriate, which users find frustrating. Skew toward replying. Memory is supplementary context that informs how you respond, not a gate on whether you respond.\n\n");
+    } // end if !compact_context (full Channel Capabilities copy)
+
+    // Emitted unconditionally: small local models mistake the enrichment
+    // prefix for log/API data without this orientation. The prefix format
+    // is canonical in agent.rs `Agent::enrich_user_message` — keep in sync.
+    //
+    // This orientation is runtime-owned and must survive the compact/finite
+    // `max_system_prompt_chars` budget: it is what stops small local models
+    // from reading the timestamp prefix as a log/API payload.
+    // Because truncation below keeps only the *top* portion of the prompt,
+    // the orientation is re-emitted inside the retained budget after any
+    // truncation rather than left in the truncatable tail.
+    append_timestamp_orientation(&mut prompt);
+
+    prompt = finalize_system_prompt(prompt, max_system_prompt_chars);
+
+    if prompt.is_empty() {
+        "You are ZeroClaw, a fast and efficient AI assistant built in Rust. Be helpful, concise, and direct."
+            .to_string()
+    } else {
+        prompt
+    }
+}
+
+/// Apply the final model-visible prompt budget in Unicode scalar values.
+pub fn finalize_system_prompt(mut prompt: String, max_chars: usize) -> String {
+    if max_chars > 0 && prompt.chars().count() > max_chars {
+        // The orientation is runtime-critical, so it must land inside the
+        // budget. Reserve room at the head-retained portion, then re-append it
+        // so it always survives even when the assembled prompt overflows.
+        let orientation_chars = TIMESTAMP_ORIENTATION.chars().count();
+        if max_chars >= orientation_chars {
+            // Keep the top portion (identity + safety) minus the required tail.
+            let end = max_chars - orientation_chars;
+            let byte_end = prompt
+                .char_indices()
+                .nth(end)
+                .map_or(prompt.len(), |(index, _)| index);
+            prompt.truncate(byte_end);
+            append_timestamp_orientation(&mut prompt);
+        } else {
+            // When the budget cannot hold both retained content and the
+            // critical tail, prioritize as much of the orientation as fits.
+            // This preserves the full orientation whenever possible without
+            // violating the configured prompt ceiling for very small budgets.
+            let end = max_chars.min(TIMESTAMP_ORIENTATION.chars().count());
+            let byte_end = TIMESTAMP_ORIENTATION
+                .char_indices()
+                .nth(end)
+                .map_or(TIMESTAMP_ORIENTATION.len(), |(index, _)| index);
+            prompt.clear();
+            prompt.push_str(&TIMESTAMP_ORIENTATION[..byte_end]);
+        }
+    }
+    prompt
+}
+
+/// Render only the skills section against an assembled effective tool surface.
+/// Context-free callers should continue using [`crate::skills::skills_to_prompt_with_mode`].
+pub fn build_skills_prompt_with_effective_tools(
+    skills: &[Skill],
+    workspace_dir: &std::path::Path,
+    mode: zeroclaw_config::schema::SkillsPromptInjectionMode,
+    is_tool_available: impl Fn(&str) -> bool,
+) -> String {
+    crate::skills::skills_to_prompt_with_mode_and_availability(
+        skills,
+        workspace_dir,
+        mode,
+        is_tool_available,
+    )
+}
+
+/// Result of applying the per-file bootstrap cap to one workspace file.
+/// Counts at the per-file stage; the whole-prompt budget
+/// (`finalize_system_prompt`) may cut further.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootstrapTruncation {
+    pub retained_chars: usize,
+    pub total_chars: usize,
+}
+
+impl BootstrapTruncation {
+    pub fn discarded_chars(self) -> usize {
+        self.total_chars.saturating_sub(self.retained_chars)
+    }
+}
+
+/// Trim and cap `content` exactly as prompt injection does. Returns the text
+/// that would be injected and, when the cap applied, the counts.
+pub fn truncate_bootstrap_content(
+    content: &str,
+    max_chars: usize,
+) -> (&str, Option<BootstrapTruncation>) {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return ("", None);
+    }
+    let total_chars = trimmed.chars().count();
+    if total_chars > max_chars {
+        // Use character-boundary-safe truncation for UTF-8
+        let injected = trimmed
+            .char_indices()
+            .nth(max_chars)
+            .map(|(idx, _)| &trimmed[..idx])
+            .unwrap_or(trimmed);
+        (
+            injected,
+            Some(BootstrapTruncation {
+                retained_chars: injected.chars().count(),
+                total_chars,
+            }),
+        )
+    } else {
+        (trimmed, None)
+    }
+}
+
+/// Last reported over-cap size per (path, limit) for
+/// [`note_bootstrap_truncation`]. The map keeps one entry per bootstrap
+/// file and limit in use, so its size is bounded by
+/// (bootstrap files x limits in use); a file that fits again is removed by
+/// [`clear_bootstrap_truncation`].
+static LAST_REPORTED: LazyLock<Mutex<HashMap<(PathBuf, usize), usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Operator-facing signal for a capped bootstrap file. The marker inside the
+/// prompt tells the model; this tells the person who wrote the file. Dedup
+/// keeps only the last reported size per path and limit; every transition
+/// into, out of and between over-cap sizes warns once; an unchanged over-cap
+/// file warns once per process.
+fn note_bootstrap_truncation(
+    path: &std::path::Path,
+    filename: &str,
+    truncation: BootstrapTruncation,
+    limit: usize,
+) -> bool {
+    let key = (path.to_path_buf(), limit);
+    let mut last_reported = LAST_REPORTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if last_reported.get(&key) == Some(&truncation.total_chars) {
+        return false;
+    }
+    last_reported.insert(key, truncation.total_chars);
+    let workspace = path
+        .parent()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_default();
+    ::zeroclaw_log::record!(
+        WARN,
+        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+            .with_category(::zeroclaw_log::EventCategory::Agent)
+            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+            .with_attrs(::serde_json::json!({
+                "error_key": "agent.bootstrap_file_truncated",
+                "file": filename,
+                "workspace": workspace,
+                "retained_chars": truncation.retained_chars,
+                "total_chars": truncation.total_chars,
+                "discarded_chars": truncation.discarded_chars(),
+                "limit_chars": limit,
+            })),
+        &format!(
+            "{filename}: per-file cap retained {} of {} chars ({} discarded, limit {limit}, before the system prompt budget)",
+            truncation.retained_chars,
+            truncation.total_chars,
+            truncation.discarded_chars()
+        )
+    );
+    true
+}
+
+/// Forget the last reported size for `(path, limit)` so a later over-cap
+/// report of the same size warns again. Called when the file fits the cap
+/// now, after an earlier over-cap report.
+fn clear_bootstrap_truncation(path: &std::path::Path, limit: usize) {
+    let mut last_reported = LAST_REPORTED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    last_reported.remove(&(path.to_path_buf(), limit));
+}
+
+/// Inject a single workspace file into the prompt with truncation and missing-file markers.
+fn inject_workspace_file(
+    prompt: &mut String,
+    workspace_dir: &std::path::Path,
+    filename: &str,
+    max_chars: usize,
+) {
+    use std::fmt::Write;
+
+    let path = workspace_dir.join(filename);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            let (text, truncation) = truncate_bootstrap_content(&content, max_chars);
+            if text.is_empty() && truncation.is_none() {
+                return;
+            }
+            if let Some(truncation) = truncation {
+                prompt.push_str(text);
+                let _ = writeln!(
+                    prompt,
+                    "\n\n[... {filename} truncated at {max_chars} chars — use `read {filename}` for full file]\n"
+                );
+                let _ = note_bootstrap_truncation(&path, filename, truncation, max_chars);
+            } else {
+                prompt.push_str(text);
+                prompt.push_str("\n\n");
+                // The file fits the cap now: forget the last over-cap size
+                // so a later return to it warns again.
+                clear_bootstrap_truncation(&path, max_chars);
+            }
+        }
+        Err(_) => {
+            // Missing-file marker (matches OpenClaw behavior)
+            let _ = writeln!(prompt, "[File not found: {filename}]\n");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeroclaw_config::schema::SkillsPromptInjectionMode;
+
+    #[test]
+    fn compact_skills_fall_back_to_full_when_loader_is_described_but_unavailable() {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        let skills = vec![Skill {
+            name: "fallback-test".to_string(),
+            description: "Verify loader fallback".to_string(),
+            description_localizations: Default::default(),
+            version: "1".to_string(),
+            author: None,
+            tags: Vec::new(),
+            tools: Vec::new(),
+            prompts: vec!["INLINE_FALLBACK_INSTRUCTIONS".to_string()],
+            slash_options: Vec::new(),
+            always: false,
+            location: None,
+        }];
+
+        let prompt = build_system_prompt_with_mode_and_effective_tools(
+            workspace.path(),
+            "test-model",
+            &[("read_skill", "Load skill instructions")],
+            |_| false,
+            &skills,
+            None,
+            None,
+            None,
+            false,
+            SkillsPromptInjectionMode::Compact,
+            false,
+            0,
+            false,
+            false,
+            None,
+        );
+
+        assert!(prompt.contains("INLINE_FALLBACK_INSTRUCTIONS"));
+        assert!(!prompt.contains("read_skill(name)"));
+    }
+
+    fn prompt_with_compact_context(compact_context: bool) -> String {
+        build_system_prompt_with_mode_and_autonomy(
+            std::path::Path::new("/tmp"),
+            "test-model",
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            false,
+            SkillsPromptInjectionMode::Full,
+            compact_context,
+            0,
+            true,
+            false,
+            None,
+        )
+    }
+
+    /// Build a prompt with a finite `max_system_prompt_chars` budget and
+    /// enough registered tools to overflow it, forcing the truncation path.
+    fn prompt_with_finite_budget(
+        compact_context: bool,
+        max_system_prompt_chars: usize,
+        tools: &[(&str, &str)],
+    ) -> String {
+        build_system_prompt_with_mode_and_autonomy(
+            std::path::Path::new("/tmp"),
+            "test-model",
+            tools,
+            &[],
+            None,
+            None,
+            None,
+            false,
+            SkillsPromptInjectionMode::Full,
+            compact_context,
+            max_system_prompt_chars,
+            true,
+            false,
+            None,
+        )
+    }
+
+    /// Helper: build the prompt with a given shell profile and one registered
+    /// tool, named by `tool_name` so a caller can pick which command-taking
+    /// tool the surface holds.
+    fn build_with_shell(
+        shell_profile: Option<&zeroclaw_api::runtime_traits::ShellProfile>,
+        tool_name: &str,
+    ) -> String {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        build_system_prompt_with_mode_and_autonomy(
+            workspace.path(),
+            "test-model",
+            &[(tool_name, "a registered tool")],
+            &[],
+            None,
+            Some(512),
+            None,
+            false,
+            SkillsPromptInjectionMode::Full,
+            false,
+            0,
+            true,
+            false,
+            shell_profile,
+        )
+    }
+
+    // ── Acceptance criteria from issue 9788 ────────────────────────────
+    //
+    // AC-1: ## Runtime includes `Shell: <name>` derived from shell_profile,
+    //       and omits the field cleanly for None.
+    // AC-2: POSIX runtimes report the configured shell name (`bash`, `zsh`…).
+    // AC-3: Windows reports `cmd` or `powershell`/`pwsh`.
+    // AC-4: Tests cover each dialect variant including the omitted case.
+
+    #[test]
+    fn ac1_runtime_line_includes_shell_field_when_profile_is_present() {
+        let profile = zeroclaw_api::runtime_traits::ShellProfile {
+            name: "bash".to_string(),
+            dialect: zeroclaw_api::runtime_traits::ShellDialect::Posix,
+        };
+        let prompt = build_with_shell(Some(&profile), "shell");
+        let runtime_line = prompt
+            .lines()
+            .find(|l| l.starts_with("Host:"))
+            .expect("Runtime line present");
+        assert!(
+            runtime_line.contains("Shell: bash"),
+            "expected Shell field: {runtime_line}"
+        );
+    }
+
+    #[test]
+    fn ac1_runtime_line_omits_shell_field_when_profile_is_none() {
+        let prompt = build_with_shell(None, "shell");
+        let runtime_line = prompt
+            .lines()
+            .find(|l| l.starts_with("Host:"))
+            .expect("Runtime line present");
+        assert!(
+            !runtime_line.contains("Shell:"),
+            "unexpected Shell field in shell-less prompt: {runtime_line}"
+        );
+    }
+
+    #[test]
+    fn ac2_posix_reports_configured_shell_name() {
+        for (configured, expected) in [("bash", "bash"), ("zsh", "zsh"), ("sh", "sh")] {
+            let profile = zeroclaw_api::runtime_traits::ShellProfile {
+                name: configured.to_string(),
+                dialect: zeroclaw_api::runtime_traits::ShellDialect::Posix,
+            };
+            let prompt = build_with_shell(Some(&profile), "shell");
+            let runtime_line = prompt
+                .lines()
+                .find(|l| l.starts_with("Host:"))
+                .expect("Runtime line present");
+            assert!(
+                runtime_line.contains(&format!("Shell: {expected}")),
+                "configured {configured}: {runtime_line}"
+            );
+        }
+    }
+
+    #[test]
+    fn ac3_windows_reports_cmd_or_powershell_variant() {
+        for (name, dialect) in [
+            (
+                "cmd",
+                zeroclaw_api::runtime_traits::ShellDialect::WindowsCmd,
+            ),
+            (
+                "powershell",
+                zeroclaw_api::runtime_traits::ShellDialect::PowerShell,
+            ),
+            (
+                "pwsh",
+                zeroclaw_api::runtime_traits::ShellDialect::PowerShell,
+            ),
+        ] {
+            let profile = zeroclaw_api::runtime_traits::ShellProfile {
+                name: name.to_string(),
+                dialect,
+            };
+            let prompt = build_with_shell(Some(&profile), "shell");
+            let runtime_line = prompt
+                .lines()
+                .find(|l| l.starts_with("Host:"))
+                .expect("Runtime line present");
+            assert!(
+                runtime_line.contains(&format!("Shell: {name}")),
+                "configured {name}: {runtime_line}"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_section_present_for_a_cron_only_tool_surface() {
+        // `cron_add`/`cron_update`/`schedule` take a model-authored `command`
+        // that runs through the same interpreter as `shell`, so an agent
+        // holding only those is exactly as exposed to a dialect mismatch.
+        let profile = zeroclaw_api::runtime_traits::ShellProfile {
+            name: "pwsh".to_string(),
+            dialect: zeroclaw_api::runtime_traits::ShellDialect::PowerShell,
+        };
+        for tool in ["cron_add", "cron_update", "schedule"] {
+            let prompt = build_with_shell(Some(&profile), tool);
+            assert!(
+                prompt.contains("## Shell"),
+                "{tool} writes commands and needs the dialect: {prompt}"
+            );
+            assert!(prompt.contains("Get-ChildItem"), "{tool}: {prompt}");
+        }
+    }
+
+    #[test]
+    fn shell_section_absent_without_shell_tool() {
+        // The dialect guidance is dead weight when no registered tool takes a
+        // model-authored command.
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        let profile = zeroclaw_api::runtime_traits::ShellProfile {
+            name: "powershell".to_string(),
+            dialect: zeroclaw_api::runtime_traits::ShellDialect::PowerShell,
+        };
+        let prompt = build_system_prompt_with_mode_and_autonomy(
+            workspace.path(),
+            "test-model",
+            &[("file_read", "read a file")],
+            &[],
+            None,
+            Some(512),
+            None,
+            false,
+            SkillsPromptInjectionMode::Full,
+            false,
+            0,
+            true,
+            false,
+            Some(&profile),
+        );
+        assert!(
+            !prompt.contains("## Shell"),
+            "Shell section must be absent when shell tool is not registered"
+        );
+        // Runtime line still reports the shell name.
+        let runtime_line = prompt.lines().find(|l| l.starts_with("Host:")).unwrap();
+        assert!(runtime_line.contains("Shell: powershell"), "{runtime_line}");
+    }
+
+    #[test]
+    fn shell_section_present_and_correct_for_powershell() {
+        let profile = zeroclaw_api::runtime_traits::ShellProfile {
+            name: "powershell".to_string(),
+            dialect: zeroclaw_api::runtime_traits::ShellDialect::PowerShell,
+        };
+        let prompt = build_with_shell(Some(&profile), "shell");
+        assert!(prompt.contains("## Shell"), "Shell section missing");
+        assert!(
+            prompt.contains("Get-ChildItem"),
+            "PowerShell syntax table missing"
+        );
+        // POSIX tool names must be ruled out as a class.
+        assert!(
+            prompt.contains("POSIX tools"),
+            "POSIX steer missing: {prompt}"
+        );
+    }
+
+    #[test]
+    fn shell_section_present_and_correct_for_pwsh() {
+        let profile = zeroclaw_api::runtime_traits::ShellProfile {
+            name: "pwsh".to_string(),
+            dialect: zeroclaw_api::runtime_traits::ShellDialect::PowerShell,
+        };
+        let prompt = build_with_shell(Some(&profile), "shell");
+        assert!(
+            prompt.contains("PowerShell 7+"),
+            "pwsh must note PS 7+: {prompt}"
+        );
+    }
+
+    #[test]
+    fn shell_section_present_and_correct_for_cmd() {
+        let profile = zeroclaw_api::runtime_traits::ShellProfile::from_dialect(
+            zeroclaw_api::runtime_traits::ShellDialect::WindowsCmd,
+        )
+        .unwrap();
+        let prompt = build_with_shell(Some(&profile), "shell");
+        assert!(prompt.contains("## Shell"), "Shell section missing");
+        assert!(
+            prompt.contains("dir /a"),
+            "cmd syntax table missing: {prompt}"
+        );
+        assert!(prompt.contains("findstr"), "{prompt}");
+    }
+
+    #[test]
+    fn posix_shell_section_has_no_syntax_table() {
+        // POSIX tool names don't need correction; emitting a table wastes tokens.
+        let profile = zeroclaw_api::runtime_traits::ShellProfile {
+            name: "bash".to_string(),
+            dialect: zeroclaw_api::runtime_traits::ShellDialect::Posix,
+        };
+        let prompt = build_with_shell(Some(&profile), "shell");
+        // The ## Shell section heading is still emitted (name is useful).
+        assert!(prompt.contains("## Shell"), "{prompt}");
+        assert!(
+            !prompt.contains("Get-ChildItem"),
+            "no PS table in POSIX prompt"
+        );
+        assert!(!prompt.contains("dir /a"), "no cmd table in POSIX prompt");
+    }
+
+    #[test]
+    fn deletion_guidance_follows_dialect_not_hardcoded() {
+        // `trash` is only POSIX. PowerShell and cmd must get their own advice.
+        let posix_prompt = build_with_shell(
+            Some(&zeroclaw_api::runtime_traits::ShellProfile {
+                name: "bash".to_string(),
+                dialect: zeroclaw_api::runtime_traits::ShellDialect::Posix,
+            }),
+            "shell",
+        );
+        assert!(posix_prompt.contains("trash"), "POSIX must mention trash");
+
+        let ps_prompt = build_with_shell(
+            Some(&zeroclaw_api::runtime_traits::ShellProfile {
+                name: "powershell".to_string(),
+                dialect: zeroclaw_api::runtime_traits::ShellDialect::PowerShell,
+            }),
+            "shell",
+        );
+        assert!(!ps_prompt.contains("trash"), "PS must not mention trash");
+        assert!(ps_prompt.contains("-WhatIf"), "PS must mention -WhatIf");
+
+        let cmd_prompt = build_with_shell(
+            Some(
+                &zeroclaw_api::runtime_traits::ShellProfile::from_dialect(
+                    zeroclaw_api::runtime_traits::ShellDialect::WindowsCmd,
+                )
+                .unwrap(),
+            ),
+            "shell",
+        );
+        assert!(!cmd_prompt.contains("trash"), "cmd must not mention trash");
+        assert!(
+            cmd_prompt.contains("rmdir /s"),
+            "cmd must name the destructive tool"
+        );
+    }
+
+    fn build_with_autonomy(tools: &[(&str, &str)], level: AutonomyLevel) -> String {
+        build_with_profile(tools, level, &[])
+    }
+
+    fn build_with_profile(
+        tools: &[(&str, &str)],
+        level: AutonomyLevel,
+        always_ask: &[&str],
+    ) -> String {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        let autonomy = zeroclaw_config::schema::RiskProfileConfig {
+            level,
+            always_ask: always_ask.iter().map(|tool| (*tool).to_string()).collect(),
+            ..Default::default()
+        };
+        build_system_prompt_with_mode_and_autonomy(
+            workspace.path(),
+            "test-model",
+            tools,
+            &[],
+            None,
+            Some(512),
+            Some(&autonomy),
+            false,
+            SkillsPromptInjectionMode::Full,
+            false,
+            0,
+            true,
+            false,
+            None,
+        )
+    }
+
+    #[test]
+    fn compact_context_carries_timestamp_orientation() {
+        let prompt = prompt_with_compact_context(true);
+        assert!(
+            prompt.contains("timestamp metadata added by the runtime"),
+            "compact system prompt must orient the model on the date/time-prefix convention: {prompt}"
+        );
+    }
+
+    #[test]
+    fn full_autonomy_authorizes_shell_when_registered() {
+        let tools = [
+            ("shell", "Run a shell command"),
+            ("file_read", "Read a file"),
+        ];
+        let prompt = build_with_autonomy(&tools, AutonomyLevel::Full);
+        assert!(
+            prompt.contains("## Tool Authorization"),
+            "expected Tool Authorization section at Full autonomy when shell is registered"
+        );
+        assert!(prompt.contains("shell"));
+        assert!(prompt.contains("authorized to call"));
+        assert!(prompt.contains("simulated"));
+    }
+
+    #[test]
+    fn full_autonomy_authorization_is_attempt_scoped_not_unconditional() {
+        // Regression guard: the Full-autonomy block must authorize the model to
+        // *attempt* the registered tools without self-refusing, but must NOT
+        // claim the tools are exempt from security policy. Full autonomy
+        // auto-approves uncovered tools; it does not remove
+        // forbidden_commands/forbidden_paths/sandbox, and `always_ask` still
+        // prompts.
+        let tools = [
+            ("shell", "Run a shell command"),
+            ("file_write", "Write a file"),
+        ];
+        let prompt = build_with_autonomy(&tools, AutonomyLevel::Full);
+        let auth = prompt
+            .split("## Tool Authorization")
+            .nth(1)
+            .expect("Tool Authorization section present");
+        let auth = auth.split("\n## ").next().unwrap_or(auth);
+
+        // Must authorize attempting, not exempt from policy.
+        assert!(
+            auth.contains("authorized to call") || auth.contains("authorized to call (to attempt)"),
+            "Full-autonomy block must authorize *attempting* the tool"
+        );
+        assert!(
+            auth.contains("not self-refuse") || auth.contains("do NOT self-refuse"),
+            "block must tell the model not to self-refuse merely for using shell/file tooling"
+        );
+        // Must keep the runtime safeguards explicit.
+        assert!(
+            auth.contains("forbidden_commands") && auth.contains("forbidden_paths"),
+            "block must state forbidden_commands/forbidden_paths still apply"
+        );
+        assert!(
+            auth.contains("sandbox"),
+            "block must state OS sandboxing still applies"
+        );
+        // Must NOT regress to the overbroad claim.
+        assert!(
+            !auth.contains("NOT blocked by any security policy")
+                && !auth.contains("not blocked by any security policy"),
+            "block must not claim the tools are exempt from all security policy"
+        );
+        assert!(
+            !auth.contains("Full autonomy removes the approval prompt"),
+            "block must not claim Full unconditionally removes approval prompts"
+        );
+    }
+
+    #[test]
+    fn non_compact_context_keeps_full_channel_capabilities_section() {
+        let prompt = prompt_with_compact_context(false);
+        assert!(
+            prompt.contains("You are running as a messaging bot"),
+            "full system prompt must retain the existing Channel Capabilities copy: {prompt}"
+        );
+        assert!(
+            prompt.contains("timestamp metadata added by the runtime"),
+            "full system prompt must carry the timestamp orientation too: {prompt}"
+        );
+    }
+
+    #[test]
+    fn timestamp_orientation_survives_finite_budget_truncation() {
+        // Regression guard: finite `max_system_prompt_chars` is a supported production config,
+        // and the runtime-owned timestamp orientation must survive it rather
+        // than being chopped off in the truncatable tail. Register enough
+        // tools and pick a budget small enough to force the truncation path.
+        let tools: [(&str, &str); 12] = [
+            (
+                "shell",
+                "Run a shell command with a long description to add bulk",
+            ),
+            (
+                "file_read",
+                "Read a file with a long description to add bulk",
+            ),
+            (
+                "file_write",
+                "Write a file with a long description to add bulk",
+            ),
+            (
+                "file_edit",
+                "Edit a file with a long description to add bulk",
+            ),
+            (
+                "http_request",
+                "Make an HTTP request with a long description to add bulk",
+            ),
+            (
+                "web_search",
+                "Search the web with a long description to add bulk",
+            ),
+            (
+                "web_fetch",
+                "Fetch a page with a long description to add bulk",
+            ),
+            ("calculator", "Do math with a long description to add bulk"),
+            ("weather", "Get weather with a long description to add bulk"),
+            (
+                "memory_store",
+                "Store memory with a long description to add bulk",
+            ),
+            (
+                "memory_recall",
+                "Recall memory with a long description to add bulk",
+            ),
+            (
+                "canvas",
+                "Render to a canvas with a long description to add bulk",
+            ),
+        ];
+
+        for compact in [false, true] {
+            // A budget well below the assembled prompt length so truncation
+            // definitely runs, but large enough to hold the retained head plus
+            // the reserved orientation.
+            let budget = 600;
+            let prompt = prompt_with_finite_budget(compact, budget, &tools);
+
+            // Hitting the exact ceiling proves truncation ran without adding
+            // model-visible implementation metadata.
+            assert!(
+                prompt.chars().count() == budget && !prompt.contains("System prompt truncated"),
+                "compact={compact}: expected truncation to fire at budget {budget}; prompt was:\n{prompt}"
+            );
+            // The runtime-owned orientation must survive inside the budget.
+            assert!(
+                prompt.contains("timestamp metadata added by the runtime"),
+                "compact={compact}: timestamp orientation must survive finite-budget truncation; prompt was:\n{prompt}"
+            );
+            assert!(
+                prompt.chars().count() <= budget,
+                "compact={compact}: prompt length {} exceeded budget {budget}",
+                prompt.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn timestamp_orientation_respects_budgets_at_and_below_reserved_tail() {
+        let tools = [(
+            "shell",
+            "Run a shell command with enough description to overflow",
+        )];
+        let reserved = TIMESTAMP_ORIENTATION.chars().count();
+
+        for compact in [false, true] {
+            for budget in [
+                1,
+                TIMESTAMP_ORIENTATION.chars().count() - 1,
+                TIMESTAMP_ORIENTATION.chars().count(),
+                reserved - 1,
+                reserved,
+            ] {
+                let prompt = prompt_with_finite_budget(compact, budget, &tools);
+                assert!(
+                    prompt.chars().count() <= budget,
+                    "compact={compact}: prompt length {} exceeded budget {budget}",
+                    prompt.chars().count()
+                );
+
+                if budget >= TIMESTAMP_ORIENTATION.chars().count() {
+                    assert!(
+                        prompt.ends_with(TIMESTAMP_ORIENTATION),
+                        "compact={compact}: full orientation must survive budget {budget}: {prompt}"
+                    );
+                } else {
+                    assert!(
+                        TIMESTAMP_ORIENTATION.starts_with(&prompt),
+                        "compact={compact}: tiny budget {budget} must retain a bounded orientation prefix: {prompt}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn final_prompt_budget_counts_unicode_scalars_and_honors_exact_limit() {
+        let reserved = TIMESTAMP_ORIENTATION.chars().count();
+        let max_chars = reserved + 40;
+        let retained = "界".repeat(max_chars - reserved);
+        let prompt = format!("{}TAIL", "界".repeat(400));
+        let finalized = super::finalize_system_prompt(prompt, max_chars);
+
+        assert_eq!(finalized.chars().count(), max_chars);
+        assert!(finalized.starts_with(&retained));
+        assert!(!finalized.contains("System prompt truncated"));
+        assert!(finalized.ends_with(TIMESTAMP_ORIENTATION));
+        assert!(!finalized.contains("TAIL"));
+    }
+
+    #[test]
+    fn compact_prompt_prioritizes_bootstrap_before_skills_and_runtime_metadata() {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(
+            workspace.path().join("AGENTS.md"),
+            "BOOTSTRAP_CONTRACT_REQUIRED",
+        )
+        .expect("write AGENTS.md");
+        let skills = vec![Skill {
+            name: "lower-priority".into(),
+            description: "LOW_PRIORITY_SKILL_METADATA".into(),
+            description_localizations: Default::default(),
+            version: "1.0.0".into(),
+            author: None,
+            tags: Vec::new(),
+            tools: Vec::new(),
+            prompts: Vec::new(),
+            slash_options: Vec::new(),
+            always: false,
+            location: None,
+        }];
+
+        let prompt = build_system_prompt_with_mode_and_autonomy(
+            workspace.path(),
+            "local-model",
+            &[("read_skill", "Load skill instructions by name")],
+            &skills,
+            None,
+            Some(8_000),
+            Some(&zeroclaw_config::schema::RiskProfileConfig::default()),
+            false,
+            SkillsPromptInjectionMode::Compact,
+            true,
+            0,
+            true,
+            false,
+            None,
+        );
+
+        let safety = prompt.find("## Safety").expect("safety framing");
+        let project = prompt.find("## Project Context").expect("project context");
+        let bootstrap = prompt
+            .find("BOOTSTRAP_CONTRACT_REQUIRED")
+            .expect("bootstrap contract");
+        let skills = prompt.find("## Available Skills").expect("skill metadata");
+        let workspace = prompt.find("## Workspace").expect("workspace metadata");
+        let runtime = prompt.find("## Runtime").expect("runtime metadata");
+
+        assert!(safety < project);
+        assert!(project < bootstrap);
+        assert!(bootstrap < skills);
+        assert!(skills < workspace);
+        assert!(workspace < runtime);
+    }
+
+    #[test]
+    fn compact_full_assembly_enforces_unicode_budget_after_all_builder_sections() {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(
+            workspace.path().join("AGENTS.md"),
+            format!("BOOTSTRAP_CONTRACT_REQUIRED\n{}", "界".repeat(7_000)),
+        )
+        .expect("write AGENTS.md");
+        let skills = vec![Skill {
+            name: "lower-priority".into(),
+            description: "LOW_PRIORITY_SKILL_METADATA".into(),
+            description_localizations: Default::default(),
+            version: "1.0.0".into(),
+            author: None,
+            tags: Vec::new(),
+            tools: Vec::new(),
+            prompts: Vec::new(),
+            slash_options: Vec::new(),
+            always: false,
+            location: None,
+        }];
+
+        let prompt = build_system_prompt_with_mode_and_autonomy(
+            workspace.path(),
+            "local-model",
+            &[("read_skill", "Load skill instructions by name")],
+            &skills,
+            None,
+            Some(8_000),
+            Some(&zeroclaw_config::schema::RiskProfileConfig::default()),
+            false,
+            SkillsPromptInjectionMode::Compact,
+            true,
+            8_000,
+            true,
+            false,
+            None,
+        );
+
+        assert_eq!(prompt.chars().count(), 8_000);
+        assert!(prompt.contains("## Safety"));
+        assert!(prompt.contains("BOOTSTRAP_CONTRACT_REQUIRED"));
+        assert!(!prompt.contains("System prompt truncated"));
+        assert!(prompt.ends_with(TIMESTAMP_ORIENTATION));
+        assert!(!prompt.contains("LOW_PRIORITY_SKILL_METADATA"));
+    }
+
+    #[test]
+    fn truncate_bootstrap_content_matches_injection_cut() {
+        let content = format!("\n  {}\n  ", "界".repeat(7_000));
+
+        let (injected, truncation) = truncate_bootstrap_content(&content, 6_000);
+        assert_eq!(injected.chars().count(), 6_000);
+        assert_eq!(
+            truncation,
+            Some(BootstrapTruncation {
+                retained_chars: 6_000,
+                total_chars: 7_000,
+            })
+        );
+        assert_eq!(
+            truncation.expect("cap applies").discarded_chars(),
+            1_000,
+            "discarded chars are total minus injected"
+        );
+
+        let (injected, truncation) = truncate_bootstrap_content(&content, 7_000);
+        assert_eq!(injected.chars().count(), 7_000);
+        assert_eq!(truncation, None, "a file at exactly the cap is not cut");
+
+        let (injected, truncation) = truncate_bootstrap_content("  \n", 6_000);
+        assert_eq!(injected, "");
+        assert_eq!(truncation, None, "empty-after-trim reports no truncation");
+    }
+
+    #[test]
+    fn bootstrap_truncation_marker_and_prompt_bytes_unchanged() {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(workspace.path().join("AGENTS.md"), "a".repeat(7_000))
+            .expect("write AGENTS.md");
+
+        let prompt = build_system_prompt(workspace.path(), "model", &[], &[], None, Some(6_000));
+
+        let expected_tail = format!(
+            "{}\n\n[... AGENTS.md truncated at 6000 chars — use `read AGENTS.md` for full file]",
+            "a".repeat(6_000)
+        );
+        assert!(
+            prompt.contains(&expected_tail),
+            "prompt must contain the 6000-char cut followed by the existing marker"
+        );
+        assert!(
+            !prompt.contains(&"a".repeat(6_001)),
+            "the cut must drop the 6001st char"
+        );
+    }
+
+    #[test]
+    fn note_bootstrap_truncation_warns_on_each_size_transition() {
+        // The dedup map is process-global: this test uses its own tempdir so
+        // no other test's key can collide with these paths.
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        let agents_path = workspace.path().join("AGENTS.md");
+        let soul_path = workspace.path().join("SOUL.md");
+        let at = |total_chars: usize| BootstrapTruncation {
+            retained_chars: 6_000,
+            total_chars,
+        };
+
+        assert!(note_bootstrap_truncation(
+            &agents_path,
+            "AGENTS.md",
+            at(7_000),
+            6_000
+        ));
+        assert!(
+            !note_bootstrap_truncation(&agents_path, "AGENTS.md", at(7_000), 6_000),
+            "an unchanged over-cap file warns once per process"
+        );
+        assert!(
+            note_bootstrap_truncation(&agents_path, "AGENTS.md", at(7_100), 6_000),
+            "a new over-cap size warns again"
+        );
+        assert!(
+            note_bootstrap_truncation(&agents_path, "AGENTS.md", at(7_000), 6_000),
+            "a return to a previously reported size warns again"
+        );
+        clear_bootstrap_truncation(&agents_path, 6_000);
+        assert!(
+            note_bootstrap_truncation(&agents_path, "AGENTS.md", at(7_000), 6_000),
+            "a return after an under-cap excursion warns again"
+        );
+        assert!(
+            note_bootstrap_truncation(&soul_path, "SOUL.md", at(7_100), 6_000),
+            "a different file in the same dir warns independently"
+        );
+        assert!(
+            note_bootstrap_truncation(&agents_path, "AGENTS.md", at(7_000), 20_000),
+            "the same file under a different limit warns again"
+        );
+    }
+
+    #[test]
+    fn bootstrap_truncation_warn_reaches_the_log_pipeline() {
+        let workspace = tempfile::TempDir::new().expect("tempdir");
+        let agents_path = workspace.path().join("AGENTS.md");
+
+        // Hold the writer and broadcast-hook locks while the hook is
+        // installed: a parallel test's hook swap or writer init could
+        // otherwise drop this frame. The emit path is synchronous, so the
+        // frame is in the channel by the time `note_bootstrap_truncation`
+        // returns.
+        let _writer_guard = zeroclaw_log::__private_test_writer_lock();
+        let _hook_guard = zeroclaw_log::__private_test_hook_lock();
+        zeroclaw_log::try_install_capture_subscriber();
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        zeroclaw_log::set_broadcast_hook(tx);
+
+        let warned = note_bootstrap_truncation(
+            &agents_path,
+            "AGENTS.md",
+            BootstrapTruncation {
+                retained_chars: 6_000,
+                total_chars: 13_985,
+            },
+            6_000,
+        );
+        zeroclaw_log::clear_broadcast_hook();
+        assert!(warned, "the first report of this path warns");
+
+        // Other tests in this binary emit events without taking the hook
+        // lock, so the channel may hold unrelated frames: find ours by
+        // error key and file rather than assuming it is the only frame.
+        let mut frame = None;
+        while let Ok(candidate) = rx.try_recv() {
+            let attrs = &candidate["attributes"];
+            if attrs["error_key"] == "agent.bootstrap_file_truncated"
+                && attrs["file"] == "AGENTS.md"
+                && attrs["total_chars"].as_u64() == Some(13_985)
+            {
+                frame = Some(candidate);
+                break;
+            }
+        }
+        let frame = frame.expect("the bootstrap truncation WARN frame reached the hook");
+        assert_eq!(frame["severity_text"], "WARN");
+        let attrs = &frame["attributes"];
+        assert_eq!(attrs["retained_chars"].as_u64(), Some(6_000));
+        assert_eq!(attrs["total_chars"].as_u64(), Some(13_985));
+        assert_eq!(attrs["discarded_chars"].as_u64(), Some(7_985));
+        assert_eq!(attrs["limit_chars"].as_u64(), Some(6_000));
+        assert_eq!(attrs["file"], "AGENTS.md");
+        let message = frame["message"].as_str().expect("message present");
+        assert!(
+            message.contains("per-file cap retained 6000 of 13985 chars"),
+            "unexpected message: {message:?}"
+        );
+    }
+
+    #[test]
+    fn final_prompt_budget_preserves_orientation_priority_at_boundaries() {
+        let oversized = "界".repeat(400);
+        let orientation_chars = TIMESTAMP_ORIENTATION.chars().count();
+        let reserved = orientation_chars;
+
+        assert_eq!(
+            super::finalize_system_prompt(oversized.clone(), reserved - 1),
+            TIMESTAMP_ORIENTATION
+                .chars()
+                .take(reserved - 1)
+                .collect::<String>()
+        );
+        assert_eq!(
+            super::finalize_system_prompt(oversized.clone(), orientation_chars),
+            TIMESTAMP_ORIENTATION
+        );
+        assert_eq!(
+            super::finalize_system_prompt(oversized, 3),
+            TIMESTAMP_ORIENTATION.chars().take(3).collect::<String>()
+        );
+        assert_eq!(super::finalize_system_prompt("界TAIL".into(), 0), "界TAIL");
+    }
+
+    #[test]
+    fn full_autonomy_authorization_lists_only_registered_power_tools() {
+        let tools = [("shell", "Run a shell command")];
+        let prompt = build_with_autonomy(&tools, AutonomyLevel::Full);
+        let auth_section = prompt
+            .split("## Tool Authorization")
+            .nth(1)
+            .expect("Tool Authorization section present");
+        let auth_section = auth_section.split("## ").next().unwrap_or(auth_section);
+        assert!(auth_section.contains("shell"));
+        assert!(
+            !auth_section.contains("file_write"),
+            "file_write should not be named when it isn't registered"
+        );
+        assert!(
+            !auth_section.contains("file_edit"),
+            "file_edit should not be named when it isn't registered"
+        );
+    }
+
+    #[test]
+    fn non_full_autonomy_skips_tool_authorization_block() {
+        let tools = [("shell", "Run a shell command")];
+        for level in [AutonomyLevel::Supervised, AutonomyLevel::ReadOnly] {
+            let prompt = build_with_autonomy(&tools, level);
+            assert!(
+                !prompt.contains("## Tool Authorization"),
+                "Tool Authorization should not appear at {level:?} autonomy"
+            );
+        }
+    }
+
+    #[test]
+    fn full_autonomy_skips_block_when_no_power_tools_registered() {
+        let tools = [("file_read", "Read a file"), ("calculator", "Math")];
+        let prompt = build_with_autonomy(&tools, AutonomyLevel::Full);
+        assert!(
+            !prompt.contains("## Tool Authorization"),
+            "Tool Authorization should be skipped when no power tools (shell/file_write/file_edit) are registered"
+        );
+    }
+
+    #[test]
+    fn full_autonomy_prompt_names_exact_always_ask_exception() {
+        let tools = [("shell", "Run a shell command")];
+        let prompt = build_with_profile(&tools, AutonomyLevel::Full, &["shell"]);
+        assert!(
+            prompt.contains("always_ask"),
+            "Full prompt must mention the always_ask exception"
+        );
+        assert!(
+            prompt.contains("shell"),
+            "exact always_ask entry must be named"
+        );
+        assert!(
+            !prompt.contains("Full autonomy removes the approval prompt"),
+            "must not claim Full unconditionally removes prompts"
+        );
+        assert!(
+            prompt.contains("fail closed") || prompt.contains("fails closed"),
+            "must describe fail-closed behavior when no approver is present"
+        );
+    }
+
+    #[test]
+    fn full_autonomy_prompt_names_wildcard_always_ask_exception() {
+        let tools = [("shell", "Run a shell command")];
+        let prompt = build_with_profile(&tools, AutonomyLevel::Full, &["*"]);
+        assert!(
+            prompt.contains("`always_ask` is set to `*`"),
+            "wildcard always_ask must be described as covering every tool"
+        );
+        assert!(
+            !prompt.contains("Full autonomy removes the approval prompt"),
+            "must not claim Full unconditionally removes prompts"
+        );
+    }
+}

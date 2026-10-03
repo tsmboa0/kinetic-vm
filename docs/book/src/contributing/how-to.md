@@ -1,0 +1,149 @@
+# How to Contribute
+
+We accept code, docs, bug reports, and feedback from anyone willing to file them clearly. This page covers the mechanics: how to get a change in, what we look for in review, and what to expect after you open a PR.
+
+See [Communication](./communication.md) for non-code contributions (reporting issues, feedback, getting help).
+
+See [RFC process](./rfcs.md) for larger changes that need design discussion before implementation.
+
+## Before you start
+
+For anything larger than a typo fix:
+
+1. **Check the issue tracker.** Someone may already be working on it or have filed a related discussion.
+2. **Read `AGENTS.md`.** The repo root contains the compact, always-loaded contract. Use [Coding agent guidelines](./agent-guidelines.md) for detailed risk, stability, source-of-truth, and skill-discovery references.
+3. **Use the [Architecture and contribution map](./architecture-map.md)** for anything that touches architecture, config, security, workflow, governance, CI, release behavior, or AI-assisted contribution policy.
+4. **Pick a branch.** PRs target `master`. Fork the repo and branch from there; there's no develop/integration branch to go through.
+
+## The flow
+
+```
+fork → branch → commit → push → open PR → review → merge (squash)
+```
+
+The key checkpoints:
+
+- **PR template**: `.github/pull_request_template.md`. Fill it out. The summary, testing evidence, and compatibility sections are non-negotiable.
+- **CI**: runs on every PR. `ci.yml` is the composite gate; all legs must pass.
+- **Labels**: maintainers use labels to route review depth. You do not need to know every label family before opening a PR. If labels look obviously wrong and you cannot edit them, flag the mismatch in a comment; maintainers or reviewers with label permissions can correct obvious mismatches directly.
+- **Review routing**: make the scope, linked issues, validation, and risk/rollback context clear enough that reviewers can choose the right review path quickly.
+- **Review**: maintainers review. Findings use the PR review taxonomy: 🔴 blocking, 🟡 warning, 🔵 suggestion, 🟢 praise, and ✅ resolved. Address blockers; warnings should get a response; suggestions are optional.
+
+## Code style
+
+- `cargo fmt` clean (checked in CI)
+- `cargo clippy -D warnings` clean (checked in CI)
+- No unused production code: delete it, wire it into behavior, or track a follow-up issue. Do not silence it with underscore prefixes or `#[allow(dead_code)]`; reserve underscore names for required but intentionally unused API, trait, or callback parameters.
+- Error handling: `anyhow::Result` at binary boundaries, typed errors in library crates. No `unwrap()` / `expect()` in production code paths: propagate with `?` or document the invariant that makes panic impossible.
+- Minimal dependencies: every dep adds to binary size; weigh the trade before adding one
+- Trait-first: define the trait in `zeroclaw-api`, then implement in the right edge crate
+- Security by default: allowlists, not blocklists. New external surface defaults closed
+- Inline unit tests: `#[cfg(test)] mod tests {}` at the bottom of the file or a sibling `tests.rs`
+- Don't commit secrets, personal data, or real-user identities: the [Privacy & PII discipline](./privacy.md) page is the merge gate
+
+### Comments and drift
+
+Comments should explain durable intent, invariants, hazards, or source ownership. Do not add comments that restate nearby control flow, duplicate schema or config field lists, mirror enum variants, or describe runtime behavior that the code and tests do not enforce. Those comments become drift surfaces: future contributors and tools may trust the prose after the source has changed.
+
+If a comment needs to mention behavior owned elsewhere, point to the owner instead of copying it. Prefer comments that say why a branch is safe, which contract owns a rule, or which source must change first.
+
+Prefer:
+
+- `The config schema owns accepted aliases; keep this resolver generic.`
+- `This panic is unreachable because the parser rejects empty tool names earlier.`
+
+Avoid:
+
+- `Supported variants are A, B, and C.`
+- `This flag always enables vector search.`
+
+If the statement can only stay true by manually editing the comment whenever code, config, WIT, schema, or tests change, make the source clearer or add a source pointer instead.
+
+## Testing
+
+- Unit tests co-located with the code (`mod tests`)
+- Integration tests in `tests/` and crate-local unit tests: run via `cargo nextest run --locked --workspace --exclude zeroclaw-desktop`
+- Feature-gated code needs feature-gated tests
+- Don't mock the database for tests that exercise schema or SQL: integration tests must hit a real SQLite
+
+For the full five-level taxonomy (unit / component / integration / system / live), shared mock infrastructure, and JSON trace fixture format, see [Testing](./testing.md).
+
+## Docs changes
+
+- Prose changes go in `docs/book/src/**/*.md` (this mdBook)
+- Rustdoc (`///`) changes update the API reference automatically on deploy
+- Reference pages (`docs/book/src/reference/cli.md`, `config.md`) are ignored generated outputs; don't hand-edit or commit them. Run `cargo mdbook refs` to preview changes from the owning CLI/config source.
+- Localisation: English markdown is the source of truth. Routine English docs PRs may omit broad generated `.po` churn; use the standard PR-body note in [Building the docs locally](../developing/building-docs.md).
+- Translation-cache PRs, release translation passes, and new locales should run `cargo mdbook sync`, commit the resulting `.po` files, and validate them with `cargo mdbook check`
+
+## Publishing blog or website metadata
+
+When you publish a blog post or otherwise update the public blog metadata, update the hand-maintained feed timestamps in the same PR:
+
+- `web/public/blog/rss.xml`: set `<lastBuildDate>` to the latest post publish time in RFC 2822 / GMT format
+- `web/public/blog/atom.xml`: set `<updated>` to the latest post publish time in ISO 8601 UTC format
+- `web/public/sitemap.xml`: set the `/blog` entry's `<lastmod>` to the latest publish date
+
+Keep feed discovery environment-local:
+
+- `web/index.html` should keep `/blog/rss.xml`, `/blog/atom.xml`, and `/sitemap.xml` as root-relative links
+- `web/public/sitemap.xml` should list the human-facing `/blog` page, not the XML feed files
+
+## Commit messages
+
+Conventional Commits:
+
+```
+feat(providers): add support for DeepSeek reasoning mode
+fix(channels/matrix): prevent duplicate device sessions after verify
+docs(getting-started): add YOLO-mode quick-start
+refactor(runtime): split agent loop into steps
+chore: bump tokio to 1.43
+```
+
+AI-assisted collaboration is welcome, but do not add bot/AI attribution trailers or generated tool footers to PR bodies or commit-message tails. Human `Co-authored-by:` trailers remain appropriate for incorporated contributor work when they follow the superseding and privacy rules. See FND-005 (Contribution Culture) for the full norm.
+
+## Pull requests
+
+Title mirrors the squash commit:
+
+```
+feat(scope): short description
+```
+
+Body uses the PR template. **The testing section is required**: explain how the change was checked, and paste the checks that match the change. The reviewer-run A/B recipe under `How you can test` is only needed when manual verification adds useful signal; mark it `N/A` for docs-only, pure-refactor, or trivial changes without a meaningful reviewer test path. For docs-only PRs, use `scripts/ci/docs_quality_gate.sh` and `scripts/ci/docs_links_gate.sh` or explain why link checking had no added links to inspect. For Rust/code PRs, use the evidence that matches the changed surface: required CI checks, focused crate or regression tests, manual smoke, or full workspace checks when broad coverage proves something narrower evidence would miss. Fresh required CI is enough when it covers the changed surface; extra local Cargo is not required just to duplicate the same head, target, and feature set.
+
+<!-- >>> generated:review-ci-evidence-how-to by `cargo generate review-docs` - do not edit <<< -->
+Add more evidence when the PR depends on a known CI coverage gap: platform-specific tests, cross-platform lint, desktop app coverage, release target builds, stale CI beyond the [base-drift-only review case](./pr-review-protocol.md#ci-freshness-and-base-drift), or unavailable CI. "It works on my machine" is not evidence.
+<!-- >>> end generated:review-ci-evidence-how-to <<< -->
+
+Risk labels describe the actual change and consequence, not its broad path. Follow the [maintainer label guide](../maintainers/labels.md#risk-labels): `risk:low` is documentation, fixtures, or mechanical metadata with no production, compatibility, build, release, or governance effect; `risk:medium` is ordinary behavioral work; and `risk:high` is a concrete trust, credential, compatibility, governance, or release-authority boundary. `domain:security` is independent from `risk:*` and identifies an effective security boundary.
+
+A PR carrying either `risk:high` or `domain:security` needs deep review, a rollback plan matched to the change, and two independent Core Team approvals by default. After the required second Core review remains unanswered through the qualifying five-business-date window, a maintainer may evaluate the narrow [expedited second-review lane](../maintainers/pr-workflow.md#expedited-second-review-lane); its canonical page owns every eligibility and accountability condition. Use `risk:manual` when a maintainer needs to freeze future automatic risk replacement; the label does not itself lower the review requirement.
+
+## After the PR
+
+**Merge strategy:** squash-merge with the full commit history preserved in the body. See `.claude/skills/squash-merge/SKILL.md` for the exact format: TL;DR: PR title + `(#number)` as the subject, bullet list of original commits as the body.
+
+**Release:** changes land on `master`; `master` does not auto-release. A maintainer bumps the version and tags `vX.Y.Z` when a release ships. You'll see your PR in the CHANGELOG.
+
+## Areas that want help
+
+| Area | Where to start |
+|---|---|
+| New channel | `crates/zeroclaw-channels/`: copy an existing channel of similar shape |
+| New provider | `crates/zeroclaw-providers/`: `compatible.rs` covers most OpenAI-like ones |
+| Docs | `docs/book/src/`: anything marked outdated or missing |
+| Translations | `cargo fluent fill --locale <code>`: see [Maintainers → Docs & Translations](../maintainers/docs-and-translations.md) |
+| Hardware | `crates/zeroclaw-hardware/`: new board support, new sensor drivers |
+
+## Code of conduct
+
+Don't be a jerk. Disagree on ideas; not people. Accept that maintainers will close things they don't want to own, usually with an explanation, occasionally without. If a close feels unjustified, ask; if the ask goes nowhere, move on.
+
+## See also
+
+- [RFC process](./rfcs.md): for anything bigger than a patch
+- [Architecture and contribution map](./architecture-map.md): which architecture, foundation, and workflow docs to read first
+- [Communication](./communication.md): how to reach the team
+- [Maintainers → Overview](../maintainers/index.md): what maintainers do day-to-day

@@ -1,0 +1,81 @@
+# Canonical container base-image pins for the generated container surfaces
+# (Dockerfile, Dockerfile.debian, Dockerfile.alpine). Edit
+# registry/repo/image_ref/tag here; `tag`
+# records the intended policy and `digest` is rewritten live by `cargo generate
+# installers`. A row with discover=true refreshes the digest for its declared
+# tag from the registry; Node discover rows must use a plain
+# <major>-bookworm-slim tag. StageX pins in the Containerfile are excluded on
+# purpose: digest-only, reproducible-build intent, no tag to follow.
+
+[[image]]
+zone = "base-arg-node"
+arg = "ZEROCLAW_BASE_NODE"
+registry = "dockerhub"
+repo = "library/node"
+image_ref = "node"
+discover = true
+tag = "24-bookworm-slim"
+digest = "sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e"
+
+[[image]]
+zone = "base-arg-rust-slim"
+arg = "ZEROCLAW_BASE_RUST_SLIM"
+registry = "dockerhub"
+repo = "library/rust"
+image_ref = "rust"
+tag = "1.98-slim"
+digest = "sha256:17d1ba895198f9934c6314ec5346a0d5115372f3243390c3d731e242f35c2f27"
+
+[[image]]
+zone = "base-arg-rust-bookworm"
+arg = "ZEROCLAW_BASE_RUST_BOOKWORM"
+registry = "dockerhub"
+repo = "library/rust"
+image_ref = "rust"
+tag = "1.98-bookworm"
+digest = "sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922"
+
+[[image]]
+zone = "base-arg-debian"
+arg = "ZEROCLAW_BASE_DEBIAN"
+registry = "dockerhub"
+repo = "library/debian"
+image_ref = "debian"
+tag = "trixie-slim"
+digest = "sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132"
+
+[[image]]
+zone = "base-arg-distroless"
+arg = "ZEROCLAW_BASE_DISTROLESS"
+registry = "gcr"
+repo = "distroless/cc-debian13"
+image_ref = "gcr.io/distroless/cc-debian13"
+tag = "nonroot"
+digest = "sha256:c31ff9abcb1910f3ab25c7957bdaf0bfe12a01eb546e8df2282f1c8f682b606c"
+
+[[image]]
+zone = "base-arg-node-alpine"
+arg = "ZEROCLAW_BASE_NODE_ALPINE"
+registry = "dockerhub"
+repo = "library/node"
+image_ref = "node"
+tag = "24-alpine3.23"
+digest = "sha256:0388af2af070cd4736a1567cfed02469ba117848845b4165d87a333edb53d2ca"
+
+[[image]]
+zone = "base-arg-rust-alpine"
+arg = "ZEROCLAW_BASE_RUST_ALPINE"
+registry = "dockerhub"
+repo = "library/rust"
+image_ref = "rust"
+tag = "1.98-alpine3.23"
+digest = "sha256:4743b6231029d726d7a0f81d730a7c9f4eff23225a4499c01e275efb5e260235"
+
+[[image]]
+zone = "base-arg-alpine"
+arg = "ZEROCLAW_BASE_ALPINE"
+registry = "dockerhub"
+repo = "library/alpine"
+image_ref = "alpine"
+tag = "3.23"
+digest = "sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40"
