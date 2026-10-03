@@ -18,7 +18,6 @@ mod degraded_config_remediation;
 #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
 mod desktop_cli_linux;
 mod direct_cli_terminal_completion;
-mod dockerignore_test;
 mod gateway;
 mod gemini_capabilities;
 mod hardware_probe_feature_graph;
