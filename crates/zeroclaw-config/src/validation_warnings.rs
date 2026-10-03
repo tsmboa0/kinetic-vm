@@ -41,10 +41,6 @@ pub const SECURITY_AUDIT_DISABLED_DROPS_CERTIFICATE_RECORD: &str =
 /// - `server_fallback_model_duplicates_primary`: `server_fallback_models` contains
 ///   the primary model name, which duplicates the requested model and is dropped
 ///   before the request is sent.
-/// - `codex_cli_extra_args_security_boundary`: `codex_cli.extra_args` contains
-///   a known Codex CLI argument that can change sandbox, approval, policy,
-///   workspace, feature, trust, or executable-integration boundaries. The
-///   argument remains allowed.
 /// - `memory_semantic_search_without_embedder`: `memory.search_mode` requests
 ///   vector search on sqlite memory, but no effective embedder is configured.
 /// - `cron_job_contested_claim`: a cron job id is listed in the `cron_jobs` of

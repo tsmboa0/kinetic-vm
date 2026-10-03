@@ -10,10 +10,9 @@ pub mod traits;
 
 pub use schema::{
     AliasedAgentConfig, AssemblyAiSttConfig, AuditConfig, BackupConfig, BrowserComputerUseConfig,
-    BrowserConfig, BuiltinHooksConfig, ChannelsConfig, ClassificationRule, ClaudeCodeConfig,
-    ClaudeCodeRunnerConfig, CodexCliConfig, Config,
+    BrowserConfig, BuiltinHooksConfig, ChannelsConfig, ClassificationRule, Config,
     ConversationalAiConfig, CostConfig, CronJobDecl, CronScheduleDecl, DataRetentionConfig, DeepgramSttConfig, DelegateToolConfig, DiscordConfig, DockerRuntimeConfig,
-    EmbeddingRouteConfig, EstopConfig, GatewayConfig, GeminiCliConfig, GoogleSttConfig,
+    EmbeddingRouteConfig, EstopConfig, GatewayConfig, GoogleSttConfig,
     HardwareConfig, HardwareTransport,
     HeartbeatConfig, HooksConfig, HttpRequestConfig, IMessageConfig, IdentityConfig,
     KnowledgeConfig, LarkConfig, LinkEnricherConfig,
@@ -21,7 +20,7 @@ pub use schema::{
     McpConfig, McpServerConfig, McpTransport, MediaPipelineConfig, MemoryConfig,
     MemoryPolicyConfig, ModelRouteConfig, MqttConfig, MultimodalConfig,
     NextcloudTalkConfig, NodesConfig, ObservabilityConfig, OpenAiSttConfig,
-    OpenCodeCliConfig, OpenVpnTunnelConfig, OtpConfig, OtpMethod, PacingConfig,
+    OpenVpnTunnelConfig, OtpConfig, OtpMethod, PacingConfig,
     PeripheralBoardConfig, PeripheralsConfig, PipelineConfig, PluginsConfig, PostgresStorageConfig,
     ProxyConfig, ProxyScope, QdrantStorageConfig, QueryClassificationConfig,
     ReliabilityConfig, RiskProfileConfig, RuntimeConfig, SandboxBackend, SandboxConfig,

@@ -34,15 +34,6 @@ pub trait Sandbox: Send + Sync {
     /// the active security posture.
     fn description(&self) -> &str;
 
-    /// Return a reason when this sandbox cannot preserve coding CLI semantics.
-    ///
-    /// Coding CLI tools need a writable validated working directory and selected
-    /// environment values to reach the actual CLI process. Container-style or
-    /// replacing wrappers that cannot preserve those semantics must fail closed
-    /// instead of spawning a misleading partial sandbox.
-    fn coding_cli_unsupported_reason(&self) -> Option<&'static str> {
-        None
-    }
 }
 
 #[derive(Debug, Clone, Default)]

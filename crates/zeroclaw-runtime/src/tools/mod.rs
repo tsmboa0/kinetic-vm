@@ -1,7 +1,6 @@
 //! Tool subsystem for agent-callable capabilities.
 
 pub mod attribution;
-pub(crate) mod coding_cli_executor;
 pub mod cron_add;
 pub(crate) mod cron_common;
 pub mod cron_list;
@@ -49,10 +48,7 @@ pub use zeroclaw_tools::calculator::CalculatorTool;
 pub use zeroclaw_tools::canvas::{ALLOWED_CONTENT_TYPES, MAX_CONTENT_SIZE};
 pub use zeroclaw_tools::canvas::{CanvasStore, CanvasTool};
 pub use zeroclaw_tools::channel_room::ChannelRoomTool;
-pub use zeroclaw_tools::claude_code::ClaudeCodeTool;
-pub use zeroclaw_tools::claude_code_runner::ClaudeCodeRunnerTool;
 pub use zeroclaw_tools::cli_discovery::{DiscoveredCli, discover_cli_tools};
-pub use zeroclaw_tools::codex_cli::CodexCliTool;
 pub use zeroclaw_tools::content_search::ContentSearchTool;
 pub use zeroclaw_tools::data_management::DataManagementTool;
 pub use zeroclaw_tools::email_read::EmailReadTool;
@@ -63,7 +59,6 @@ pub use zeroclaw_tools::file_edit::FileEditTool;
 pub use zeroclaw_tools::file_upload::FileUploadTool;
 pub use zeroclaw_tools::file_upload_bundle::FileUploadBundleTool;
 pub use zeroclaw_tools::file_write::FileWriteTool;
-pub use zeroclaw_tools::gemini_cli::GeminiCliTool;
 pub use zeroclaw_tools::glob_search::GlobSearchTool;
 pub use zeroclaw_tools::hardware_board_info::HardwareBoardInfoTool;
 pub use zeroclaw_tools::hardware_memory_map::HardwareMemoryMapTool;
@@ -87,7 +82,6 @@ pub use zeroclaw_tools::memory_purge::MemoryPurgeTool;
 pub use zeroclaw_tools::memory_recall::MemoryRecallTool;
 pub use zeroclaw_tools::memory_store::MemoryStoreTool;
 pub use zeroclaw_tools::model_routing_config::ModelRoutingConfigTool;
-pub use zeroclaw_tools::opencode_cli::OpenCodeCliTool;
 pub use zeroclaw_tools::pipeline::PipelineTool;
 pub use zeroclaw_tools::poll::PollTool;
 pub use zeroclaw_tools::proxy_config::ProxyConfigTool;
@@ -149,7 +143,7 @@ pub use verifiable_intent::VerifiableIntentTool;
 pub const REENTRANT_AGENT_TOOLS: &[&str] = &[SpawnSubagentTool::NAME, DelegateTool::NAME];
 
 use crate::platform::{NativeRuntime, RuntimeAdapter};
-use crate::security::{Sandbox, SecurityPolicy, create_sandbox};
+use crate::security::{SecurityPolicy, create_sandbox};
 use crate::sop::audit::SopAuditLogger;
 use crate::sop::engine::SopEngine;
 use async_trait::async_trait;
@@ -225,13 +219,6 @@ fn serply_api_key_override(root_config: &Config) -> Option<Option<String>> {
     root_config
         .prop_is_env_overridden("web_search.serply_api_key")
         .then(|| root_config.web_search.serply_api_key.clone())
-}
-
-fn any_coding_cli_tool_enabled(root_config: &Config) -> bool {
-    root_config.claude_code.enabled
-        || root_config.codex_cli.enabled
-        || root_config.gemini_cli.enabled
-        || root_config.opencode_cli.enabled
 }
 
 #[derive(Clone)]
@@ -678,7 +665,6 @@ fn filter_agent_peer_groups(
 
 struct RuntimeShellAssembly {
     shell_tool: ShellTool,
-    sandbox: Arc<dyn Sandbox>,
 }
 
 /// Pair the canonical runtime kind with one shared sandbox instance for every
@@ -701,11 +687,8 @@ fn runtime_shell_assembly(
         Some(&security.workspace_dir),
         &sandbox_extra_roots,
     );
-    let shell_tool = ShellTool::new_with_sandbox(security, runtime, sandbox.clone());
-    RuntimeShellAssembly {
-        shell_tool,
-        sandbox,
-    }
+    let shell_tool = ShellTool::new_with_sandbox(security, runtime, sandbox);
+    RuntimeShellAssembly { shell_tool }
 }
 
 /// Assemble a shell tool through the same runtime/sandbox ownership seam used
@@ -1249,16 +1232,7 @@ fn all_tools_with_runtime_on_thread(
 ) -> AllToolsResult {
     let has_shell_access = runtime.has_shell_access();
     let persistent_writes = runtime.has_filesystem_access();
-    let register_coding_cli_tools = has_shell_access && persistent_writes;
-    let RuntimeShellAssembly {
-        shell_tool,
-        sandbox,
-    } = runtime_shell_assembly(security.clone(), runtime.clone(), risk_profile, root_config);
-    let coding_cli_executor = coding_cli_executor::RuntimeCodingCliExecutor::shared(
-        runtime.clone(),
-        sandbox.clone(),
-        root_config.runtime.kind == zeroclaw_config::schema::RuntimeKind::Native,
-    );
+    let RuntimeShellAssembly { shell_tool } = runtime_shell_assembly(security.clone(), runtime.clone(), risk_profile, root_config);
     // Keep a shared runtime adapter available after constructing ShellTool.
     // Independent agentic delegates use it later to build the target-owned tool
     // registry; bounded delegates continue to use the parent `tool_arcs`
@@ -1733,79 +1707,6 @@ fn all_tools_with_runtime_on_thread(
                 security.clone(),
             ),
         ));
-    }
-
-    if any_coding_cli_tool_enabled(root_config) && !register_coding_cli_tools {
-        ::zeroclaw_log::record!(
-            WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-            "coding_cli: skipped registration because runtime shell or filesystem access is unavailable"
-        );
-    }
-
-    // Claude Code delegation tool
-    if register_coding_cli_tools && root_config.claude_code.enabled {
-        tool_arcs.push(Arc::new(RateLimitedTool::new(
-            ClaudeCodeTool::new_with_executor(
-                security.clone(),
-                root_config.claude_code.clone(),
-                coding_cli_executor.clone(),
-            ),
-            security.clone(),
-        )));
-    }
-
-    // Claude Code task runner with Slack progress and SSH handoff
-    if root_config.claude_code_runner.enabled {
-        let gateway_url = format!(
-            "http://{}:{}",
-            root_config.gateway.host, root_config.gateway.port
-        );
-        tool_arcs.push(Arc::new(RateLimitedTool::new(
-            ClaudeCodeRunnerTool::new(
-                security.clone(),
-                root_config.claude_code_runner.clone(),
-                gateway_url,
-            ),
-            security.clone(),
-        )));
-    }
-
-    // Codex CLI delegation tool
-    if register_coding_cli_tools && root_config.codex_cli.enabled {
-        tool_arcs.push(Arc::new(RateLimitedTool::new(
-            CodexCliTool::new_with_executor(
-                security.clone(),
-                root_config.codex_cli.clone(),
-                coding_cli_executor.clone(),
-            ),
-            security.clone(),
-        )));
-    }
-
-    // Gemini CLI delegation tool
-    if register_coding_cli_tools && root_config.gemini_cli.enabled {
-        tool_arcs.push(Arc::new(RateLimitedTool::new(
-            GeminiCliTool::new_with_executor(
-                security.clone(),
-                root_config.gemini_cli.clone(),
-                coding_cli_executor.clone(),
-            ),
-            security.clone(),
-        )));
-    }
-
-    // OpenCode CLI delegation tool
-    if register_coding_cli_tools && root_config.opencode_cli.enabled {
-        tool_arcs.push(Arc::new(RateLimitedTool::new(
-            OpenCodeCliTool::new_with_executor(
-                security.clone(),
-                root_config.opencode_cli.clone(),
-                coding_cli_executor.clone(),
-            ),
-            security.clone(),
-        )));
     }
 
     // Vision tools are always available
@@ -3386,233 +3287,6 @@ permissions = ["http_client"]
         assert!(
             !names.contains(&"sop_workshop"),
             "sop_workshop must stay opt-in while procedural memory is disabled"
-        );
-    }
-
-    struct CapturingRuntime {
-        seen_command: Arc<Mutex<Option<String>>>,
-        filesystem_access: bool,
-    }
-
-    impl RuntimeAdapter for CapturingRuntime {
-        fn name(&self) -> &str {
-            "capturing-test"
-        }
-        fn has_filesystem_access(&self) -> bool {
-            self.filesystem_access
-        }
-        fn storage_path(&self) -> std::path::PathBuf {
-            std::env::temp_dir()
-        }
-        fn supports_long_running(&self) -> bool {
-            false
-        }
-        fn shell_dialect(&self) -> crate::platform::ShellDialect {
-            crate::platform::ShellDialect::Posix
-        }
-        fn build_shell_command(
-            &self,
-            command: &str,
-            workspace_dir: &std::path::Path,
-        ) -> anyhow::Result<tokio::process::Command> {
-            *self.seen_command.lock().unwrap() = Some(command.to_string());
-            #[cfg(windows)]
-            let mut process = {
-                let mut process = tokio::process::Command::new("cmd.exe");
-                process.args(["/D", "/S", "/C", "echo zc-runtime"]);
-                process
-            };
-            #[cfg(not(windows))]
-            let mut process = tokio::process::Command::new("/bin/sh");
-            #[cfg(not(windows))]
-            process
-                .args(["-c", "printf '%s' \"$0\"", "zc-runtime"])
-                .current_dir(workspace_dir);
-            #[cfg(windows)]
-            process.current_dir(workspace_dir);
-            Ok(process)
-        }
-    }
-
-    #[tokio::test]
-    async fn registered_coding_cli_tools_use_configured_runtime_executor() {
-        type EnableCodingCli = fn(&mut Config);
-
-        let cases: [(&str, &str, EnableCodingCli); 4] = [
-            ("claude_code", "claude -p", |cfg: &mut Config| {
-                cfg.claude_code.enabled = true;
-                cfg.claude_code.timeout_secs = 5;
-            }),
-            ("codex_cli", "codex exec", |cfg: &mut Config| {
-                cfg.codex_cli.enabled = true;
-                cfg.codex_cli.timeout_secs = 5;
-            }),
-            ("gemini_cli", "gemini -p", |cfg: &mut Config| {
-                cfg.gemini_cli.enabled = true;
-                cfg.gemini_cli.timeout_secs = 5;
-            }),
-            ("opencode_cli", "opencode run", |cfg: &mut Config| {
-                cfg.opencode_cli.enabled = true;
-                cfg.opencode_cli.timeout_secs = 5;
-            }),
-        ];
-
-        for (tool_name, expected_fragment, enable) in cases {
-            let tmp = TempDir::new().unwrap();
-            let security = Arc::new(SecurityPolicy {
-                autonomy: crate::security::AutonomyLevel::Full,
-                workspace_dir: tmp.path().to_path_buf(),
-                ..SecurityPolicy::default()
-            });
-            let mem_cfg = MemoryConfig {
-                backend: "markdown".into(),
-                ..MemoryConfig::default()
-            };
-            let mem: Arc<dyn Memory> =
-                Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-            let browser = BrowserConfig {
-                enabled: false,
-                ..BrowserConfig::default()
-            };
-            let mut cfg = test_config(&tmp);
-            cfg.runtime.kind = zeroclaw_config::schema::RuntimeKind::Docker;
-            cfg.claude_code.enabled = false;
-            cfg.codex_cli.enabled = false;
-            cfg.gemini_cli.enabled = false;
-            cfg.opencode_cli.enabled = false;
-            enable(&mut cfg);
-            let risk = zeroclaw_config::schema::RiskProfileConfig {
-                sandbox_enabled: Some(false),
-                sandbox_backend: Some("none".to_string()),
-                ..zeroclaw_config::schema::RiskProfileConfig::default()
-            };
-            let seen_command = Arc::new(Mutex::new(None));
-
-            let tools = all_tools_with_runtime(
-                Arc::new(cfg.clone()),
-                &security,
-                &risk,
-                "test-agent",
-                Arc::new(CapturingRuntime {
-                    seen_command: Arc::clone(&seen_command),
-                    filesystem_access: true,
-                }),
-                mem,
-                &browser,
-                &zeroclaw_config::schema::HttpRequestConfig::default(),
-                &zeroclaw_config::schema::WebFetchConfig::default(),
-                tmp.path(),
-                &HashMap::new(),
-                None,
-                &cfg,
-                None,
-                false,
-                None,
-                None,
-                None,
-                None,
-            )
-            .expect("tool registry builds")
-            .tools;
-            let tool = tools
-                .iter()
-                .find(|tool| tool.name() == tool_name)
-                .unwrap_or_else(|| panic!("{tool_name} should register"));
-
-            let result = tool
-                .execute(serde_json::json!({"prompt": "route through runtime"}))
-                .await
-                .unwrap_or_else(|error| panic!("{tool_name} should return a tool result: {error}"));
-
-            assert!(
-                result.success,
-                "{tool_name} unexpected error: {:?}",
-                result.error
-            );
-            assert_eq!(result.output.trim(), "zc-runtime");
-            let command = seen_command
-                .lock()
-                .unwrap()
-                .clone()
-                .unwrap_or_else(|| panic!("registry-wired {tool_name} should call runtime"));
-            assert!(
-                command.contains(expected_fragment),
-                "{tool_name} command was {command:?}"
-            );
-            assert!(
-                command.contains("route through runtime"),
-                "{tool_name} command was {command:?}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn docker_without_workspace_mount_does_not_register_coding_cli_tools() {
-        let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy {
-            autonomy: crate::security::AutonomyLevel::Full,
-            workspace_dir: tmp.path().to_path_buf(),
-            ..SecurityPolicy::default()
-        });
-        let mem_cfg = MemoryConfig {
-            backend: "markdown".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-        let browser = BrowserConfig {
-            enabled: false,
-            ..BrowserConfig::default()
-        };
-        let mut cfg = test_config(&tmp);
-        cfg.runtime.kind = zeroclaw_config::schema::RuntimeKind::Docker;
-        cfg.runtime.docker.mount_workspace = false;
-        cfg.claude_code.enabled = true;
-        cfg.codex_cli.enabled = true;
-        cfg.gemini_cli.enabled = true;
-        cfg.opencode_cli.enabled = true;
-        let risk = zeroclaw_config::schema::RiskProfileConfig {
-            sandbox_enabled: Some(false),
-            sandbox_backend: Some("none".to_string()),
-            ..zeroclaw_config::schema::RiskProfileConfig::default()
-        };
-
-        let tools = all_tools_with_runtime(
-            Arc::new(cfg.clone()),
-            &security,
-            &risk,
-            "test-agent",
-            Arc::new(zeroclaw_config::platform::DockerRuntime::new(
-                cfg.runtime.docker.clone(),
-            )),
-            mem,
-            &browser,
-            &zeroclaw_config::schema::HttpRequestConfig::default(),
-            &zeroclaw_config::schema::WebFetchConfig::default(),
-            tmp.path(),
-            &HashMap::new(),
-            None,
-            &cfg,
-            None,
-            false,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("tool registry builds")
-        .tools;
-        let names: Vec<&str> = tools.iter().map(|tool| tool.name()).collect();
-
-        for tool_name in ["claude_code", "codex_cli", "gemini_cli", "opencode_cli"] {
-            assert!(
-                !names.contains(&tool_name),
-                "{tool_name} must not register without runtime filesystem access"
-            );
-        }
-        assert!(
-            names.contains(&"shell"),
-            "positive control: ordinary tools should still register"
         );
     }
 

@@ -108,8 +108,7 @@ fn dns_failure() -> ErrorCode {
 /// Wrap `value` as one POSIX single-quoted shell word. An apostrophe inside
 /// closes the quoted run, contributes a backslash-escaped apostrophe outside
 /// it, and reopens the run, so the word stays one argument with the original
-/// bytes. This is the quoting `shell_escape` in `zeroclaw-runtime`'s
-/// `coding_cli_executor` applies to generated commands.
+/// bytes.
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }

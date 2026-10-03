@@ -14,11 +14,7 @@ pub mod browser_open;
 pub mod calculator;
 pub mod canvas;
 pub mod channel_room;
-pub mod claude_code;
-pub mod claude_code_runner;
 pub mod cli_discovery;
-pub mod codex_cli;
-pub mod coding_cli;
 pub mod content_search;
 pub mod data_management;
 pub mod email_imap;
@@ -31,7 +27,6 @@ pub mod file_edit;
 pub mod file_upload;
 pub mod file_upload_bundle;
 pub mod file_write;
-pub mod gemini_cli;
 pub mod glob_search;
 pub mod hardware_board_info;
 pub mod hardware_memory_map;
@@ -58,7 +53,6 @@ pub mod memory_recall;
 pub mod memory_store;
 pub mod model_routing_config;
 pub mod node_capabilities;
-pub mod opencode_cli;
 pub mod pipeline;
 pub mod poll;
 pub mod proxy_config;
@@ -72,9 +66,6 @@ pub mod web_fetch;
 pub mod web_search_provider_routing;
 pub mod web_search_tool;
 pub mod wrappers;
-
-#[cfg(all(test, unix))]
-mod coding_agent_budget_tests;
 
 pub const MEMORY_TOOL_NAMES: &[&str] = &[
     "memory_store",

@@ -185,11 +185,6 @@ impl Sandbox for DockerSandbox {
         "Docker container isolation (requires docker)"
     }
 
-    fn coding_cli_unsupported_reason(&self) -> Option<&'static str> {
-        Some(
-            "docker sandbox mounts the workspace read-only, fixes the inner workdir at the workspace root, and cannot forward selected coding CLI environment names",
-        )
-    }
 }
 
 #[cfg(test)]
@@ -502,15 +497,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn docker_sandbox_rejects_coding_cli_execution() {
-        let sandbox = DockerSandbox::default();
-        let reason = sandbox
-            .coding_cli_unsupported_reason()
-            .expect("docker sandbox must fail closed for coding CLIs");
-
-        assert!(reason.contains("read-only"));
-        assert!(reason.contains("workdir"));
-        assert!(reason.contains("environment"));
-    }
 }
