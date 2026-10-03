@@ -4,10 +4,6 @@ pub mod anthropic_token {
     #[allow(unused_imports)]
     pub use zeroclaw_providers::auth::anthropic_token::*;
 }
-pub mod email_oauth2 {
-    #[allow(unused_imports)]
-    pub use zeroclaw_providers::auth::email_oauth2::*;
-}
 pub mod gemini_oauth {
     #[allow(unused_imports)]
     pub use zeroclaw_providers::auth::gemini_oauth::*;

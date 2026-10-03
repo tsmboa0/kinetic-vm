@@ -477,24 +477,6 @@ fn default_max_attachment_bytes() -> usize {
     25 * 1024 * 1024
 }
 
-/// OAuth2 settings for IMAP email authentication (XOAUTH2 / RFC 8628).
-/// Populate these to use OAuth2 bearer tokens instead of plain-password LOGIN.
-/// All major providers (Microsoft, Google) support this flow via device code.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-pub struct EmailOAuth2Config {
-    /// OAuth2 application client ID (public client; no secret required for device flow).
-    pub client_id: String,
-    /// Token endpoint for refresh and device-code polling
-    /// (e.g. `https://login.microsoftonline.com/consumers/oauth2/v2.0/token`).
-    pub token_url: String,
-    /// Device-code initiation endpoint
-    /// (e.g. `https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode`).
-    pub device_code_url: String,
-    /// OAuth2 scopes to request (must include `offline_access` for refresh tokens).
-    pub scopes: Vec<String>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, zeroclaw_macros::Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "channels.email"]
@@ -543,11 +525,6 @@ pub struct EmailConfig {
     /// Set to `false` to send plain-text emails instead.
     #[serde(default = "default_true")]
     pub html_body: bool,
-    /// OAuth2 settings for IMAP authentication. When present, IMAP uses
-    /// XOAUTH2 instead of plain LOGIN. Required for providers like
-    /// Outlook/Hotmail that have deprecated password auth.
-    #[serde(default)]
-    pub oauth2: Option<EmailOAuth2Config>,
     /// When true, the daemon observes new mail but never modifies any IMAP flag.
     #[serde(default)]
     pub observer_mode: bool,
@@ -583,7 +560,6 @@ impl Default for EmailConfig {
             max_attachment_bytes: default_max_attachment_bytes(),
             excluded_tools: Vec::new(),
             html_body: true,
-            oauth2: None,
             observer_mode: false,
         }
     }

@@ -1,5 +1,4 @@
 pub mod anthropic_token;
-pub mod email_oauth2;
 pub mod gemini_oauth;
 pub mod oauth_common;
 pub mod openai_oauth;
@@ -372,120 +371,6 @@ impl AuthService {
     ) -> Result<Option<AuthProfile>> {
         self.get_profile(GEMINI_PROVIDER, profile_override).await
     }
-
-    // ── Generic email OAuth2 ──────────────────────────────────────────────────
-
-    /// Store an OAuth2 token set for an email channel (keyed by channel alias,
-    /// e.g. `"email.hotmail"`). The alias is used as the profile's
-    /// `model_provider` field so profiles are namespaced per channel instance.
-    pub async fn store_email_oauth2_tokens(
-        &self,
-        channel_alias: &str,
-        profile_name: &str,
-        token_set: TokenSet,
-    ) -> Result<AuthProfile> {
-        let profile = AuthProfile::new_oauth(channel_alias, profile_name, token_set);
-        self.store.upsert_profile(profile.clone(), true).await?;
-        Ok(profile)
-    }
-
-    pub async fn get_valid_email_oauth2_token(
-        &self,
-        channel_alias: &str,
-        profile_override: Option<&str>,
-        token_url: &str,
-        client_id: &str,
-        scopes: &[String],
-    ) -> Result<Option<String>> {
-        const SKEW_SECS: u64 = 90;
-
-        let data = self.store.load().await?;
-        let Some(profile_id) = select_profile_id(&data, channel_alias, profile_override) else {
-            return Ok(None);
-        };
-
-        let Some(profile) = data.profiles.get(&profile_id) else {
-            return Ok(None);
-        };
-
-        let Some(token_set) = profile.token_set.as_ref() else {
-            anyhow::bail!("Email OAuth2 profile is not OAuth-based: {profile_id}");
-        };
-
-        if !token_set.is_expiring_within(Duration::from_secs(SKEW_SECS)) {
-            return Ok(Some(token_set.access_token.clone()));
-        }
-
-        let Some(refresh_token) = token_set.refresh_token.clone() else {
-            // No refresh token; return the (possibly expired) access token and
-            // let the IMAP auth failure surface as a log event.
-            return Ok(Some(token_set.access_token.clone()));
-        };
-
-        let refresh_lock = refresh_lock_for_profile(&profile_id);
-        let _guard = refresh_lock.lock().await;
-
-        // Re-load after acquiring lock to avoid duplicate refreshes.
-        let data = self.store.load().await?;
-        let Some(latest_profile) = data.profiles.get(&profile_id) else {
-            return Ok(None);
-        };
-        let Some(latest_tokens) = latest_profile.token_set.as_ref() else {
-            anyhow::bail!("Email OAuth2 profile is missing token set: {profile_id}");
-        };
-        if !latest_tokens.is_expiring_within(Duration::from_secs(SKEW_SECS)) {
-            return Ok(Some(latest_tokens.access_token.clone()));
-        }
-
-        let refresh_token = latest_tokens.refresh_token.clone().unwrap_or(refresh_token);
-
-        if let Some(remaining) = refresh_backoff_remaining(&profile_id) {
-            anyhow::bail!(
-                "Email OAuth2 token refresh is in backoff for {remaining}s due to previous failures"
-            );
-        }
-
-        let mut refreshed = match refresh_email_access_token_with_retries(
-            &self.client,
-            token_url,
-            client_id,
-            &refresh_token,
-            scopes,
-        )
-        .await
-        {
-            Ok(tokens) => {
-                clear_refresh_backoff(&profile_id);
-                tokens
-            }
-            Err(err) => {
-                if !is_non_retryable_oauth_refresh_error(&err) {
-                    set_refresh_backoff(
-                        &profile_id,
-                        Duration::from_secs(OPENAI_REFRESH_FAILURE_BACKOFF_SECS),
-                    );
-                }
-                return Err(err);
-            }
-        };
-
-        if refreshed.refresh_token.is_none() {
-            refreshed
-                .refresh_token
-                .clone_from(&latest_tokens.refresh_token);
-        }
-
-        let updated = self
-            .store
-            .update_profile(&profile_id, |profile| {
-                profile.kind = AuthProfileKind::OAuth;
-                profile.token_set = Some(refreshed.clone());
-                Ok(())
-            })
-            .await?;
-
-        Ok(updated.token_set.map(|t| t.access_token))
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -601,7 +486,7 @@ async fn refresh_openai_access_token_with_retries(
     refresh_oauth_access_token_with_retries(
         || refresh_access_token(client, refresh_token),
         |failure| {
-            ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"attempt": failure.attempt, "max_attempts": failure.max_attempts, "retry": failure.should_retry, "error": format!("{}", failure.error)})), "OpenAI token refresh failed");
+            ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"attempt": failure.attempt, "max_attempts": failure.max_attempts, "retry": failure.should_retry, "non_retryable": failure.non_retryable, "error": format!("{}", failure.error)})), "OpenAI token refresh failed");
         },
     )
     .await
@@ -618,31 +503,7 @@ async fn refresh_gemini_access_token_with_retries(
             gemini_oauth::refresh_access_token(client, client_id, client_secret, refresh_token)
         },
         |failure| {
-            ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"attempt": failure.attempt, "max_attempts": failure.max_attempts, "retry": failure.should_retry, "error": format!("{}", failure.error)})), "Gemini token refresh failed");
-        },
-    )
-    .await
-}
-
-async fn refresh_email_access_token_with_retries(
-    client: &reqwest::Client,
-    token_url: &str,
-    client_id: &str,
-    refresh_token: &str,
-    scopes: &[String],
-) -> Result<TokenSet> {
-    refresh_oauth_access_token_with_retries(
-        || {
-            email_oauth2::refresh_access_token(
-                client,
-                token_url,
-                client_id,
-                refresh_token,
-                scopes,
-            )
-        },
-        |failure| {
-            ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"attempt": failure.attempt, "max_attempts": failure.max_attempts, "retry": failure.should_retry, "non_retryable": failure.non_retryable, "error": format!("{}", failure.error)})), "Email OAuth2 token refresh failed");
+            ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"attempt": failure.attempt, "max_attempts": failure.max_attempts, "retry": failure.should_retry, "non_retryable": failure.non_retryable, "error": format!("{}", failure.error)})), "Gemini token refresh failed");
         },
     )
     .await
@@ -1475,11 +1336,6 @@ impl AuthProviderFlow for AnthropicFlow {}
 mod tests {
     use super::*;
     use crate::auth::profiles::{AuthProfile, AuthProfileKind};
-    use axum::extract::State;
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
-    use axum::routing::post;
-    use axum::{Json, Router};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -1539,120 +1395,6 @@ mod tests {
             select_profile_id(&data, "openai-codex", None),
             Some(id_active)
         );
-    }
-
-    #[tokio::test]
-    async fn email_oauth_refresh_retries_transient_failure() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let app = Router::new().route(
-            "/token",
-            post({
-                let attempts = Arc::clone(&attempts);
-                move || {
-                    let attempts = Arc::clone(&attempts);
-                    async move {
-                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
-                        if attempt == 0 {
-                            return (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                "temporary provider failure",
-                            )
-                                .into_response();
-                        }
-
-                        Json(serde_json::json!({
-                            "access_token": "fresh-email-token",
-                            "expires_in": 3600,
-                            "token_type": "Bearer"
-                        }))
-                        .into_response()
-                    }
-                }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind token server");
-        let addr = listener.local_addr().expect("token server addr");
-        let server = zeroclaw_spawn::spawn!(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve token server");
-        });
-
-        let temp = tempfile::tempdir().expect("temp auth dir");
-        let auth = AuthService::new(temp.path(), false);
-        auth.store_email_oauth2_tokens(
-            "email.test",
-            DEFAULT_PROFILE_NAME,
-            expired_email_tokens("stale-email-token", "refresh-email-token"),
-        )
-        .await
-        .expect("store email tokens");
-
-        let token = auth
-            .get_valid_email_oauth2_token(
-                "email.test",
-                None,
-                &format!("http://{addr}/token"),
-                "email-client",
-                &["offline_access".to_string()],
-            )
-            .await
-            .expect("refresh should recover after retry");
-
-        assert_eq!(token.as_deref(), Some("fresh-email-token"));
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn email_oauth_refresh_does_not_retry_permanent_failure() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let app = Router::new().route(
-            "/token",
-            post(email_oauth_permanent_failure_handler).with_state(Arc::clone(&attempts)),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind token server");
-        let addr = listener.local_addr().expect("token server addr");
-        let server = zeroclaw_spawn::spawn!(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve token server");
-        });
-
-        let temp = tempfile::tempdir().expect("temp auth dir");
-        let auth = AuthService::new(temp.path(), false);
-        auth.store_email_oauth2_tokens(
-            "email.test",
-            DEFAULT_PROFILE_NAME,
-            expired_email_tokens("stale-email-token", "invalid-refresh-token"),
-        )
-        .await
-        .expect("store email tokens");
-
-        let err = auth
-            .get_valid_email_oauth2_token(
-                "email.test",
-                None,
-                &format!("http://{addr}/token"),
-                "email-client",
-                &["offline_access".to_string()],
-            )
-            .await
-            .expect_err("invalid refresh token should fail explicitly");
-
-        assert_eq!(attempts.load(Ordering::SeqCst), 1);
-        let message = err.to_string();
-        assert!(
-            message.contains("400 Bad Request") || message.contains("invalid_grant"),
-            "unexpected error: {message}"
-        );
-
-        server.abort();
     }
 
     #[test]
@@ -1775,27 +1517,4 @@ mod tests {
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
-    async fn email_oauth_permanent_failure_handler(
-        State(attempts): State<Arc<AtomicUsize>>,
-    ) -> impl IntoResponse {
-        attempts.fetch_add(1, Ordering::SeqCst);
-        (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "invalid_grant",
-                "error_description": "refresh token is invalid"
-            })),
-        )
-    }
-
-    fn expired_email_tokens(access_token: &str, refresh_token: &str) -> TokenSet {
-        TokenSet {
-            access_token: access_token.to_string(),
-            refresh_token: Some(refresh_token.to_string()),
-            id_token: None,
-            expires_at: Some(chrono::Utc::now() - chrono::Duration::minutes(5)),
-            token_type: Some("Bearer".to_string()),
-            scope: Some("offline_access".to_string()),
-        }
-    }
 }
