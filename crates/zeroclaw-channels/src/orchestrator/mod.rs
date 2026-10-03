@@ -8066,7 +8066,6 @@ const MATRIX_REQUIRED_SAFE_TOOL_ARGUMENTS: &[(&[&str], &[&str])] = &[
             "max_results",
         ],
     ),
-    (&["git_operations"], &["action", "path", "branch"]),
     (&["cron_add"], &["name", "job_type"]),
     (&["cron_remove", "cron_run", "cron_update"], &[]),
     (&["cron_runs"], &["limit"]),
@@ -8110,8 +8109,6 @@ const MATRIX_REQUIRED_SAFE_TOOL_ARGUMENTS: &[(&[&str], &[&str])] = &[
             "spawn_subagent",
             "sessions_current",
             "web_fetch",
-            "weather",
-            "pushover",
             "calculator",
         ],
         &[],
@@ -8141,30 +8138,7 @@ const MATRIX_OPTIONAL_SAFE_TOOL_ARGUMENTS: &[(&[&str], &[&str])] = &[
         &["file_upload", "file_upload_bundle", "file_download"],
         &["path"],
     ),
-    (&["security_ops"], &["action"]),
     (&["data_management"], &[]),
-    (&["image_gen"], &["model", "size", "quality"]),
-    (
-        &[
-            "cloud_ops",
-            "cloud_patterns",
-            "project_intel",
-            "report_template",
-        ],
-        &["action", "provider", "path", "name", "format"],
-    ),
-    (
-        &[
-            "notion",
-            "jira",
-            "microsoft365",
-            "google_workspace",
-            "linkedin",
-            "composio",
-        ],
-        &["action"],
-    ),
-    (&["discord_search"], &["limit"]),
     (&["hardware_board_info"], &["board"]),
     (
         &["hardware_memory_map", "hardware_memory_read"],
@@ -14479,10 +14453,6 @@ pub async fn start_channels_with_authority_and_plugin_webhooks(
             "Manage scheduled tasks (create/list/get/cancel/pause/resume). Supports recurring cron and one-shot delays.",
         ));
         tool_descs.push((
-            "pushover",
-            "Send a Pushover notification to your device. Requires PUSHOVER_TOKEN and PUSHOVER_USER_KEY in .env file.",
-        ));
-        tool_descs.push((
             "channel_room",
             "Create channel rooms and invite users through active channels. Use with Matrix channel keys such as matrix.default.",
         ));
@@ -17356,23 +17326,33 @@ pub(crate) mod tests {
 
         let arguments = serde_json::json!({"action": "navigate"});
         assert_eq!(
-            matrix_tool_argument_hint("browser", &arguments, Some(ToolProvenance::Extension), &[],),
+            matrix_tool_argument_hint(
+                "proxy_config",
+                &arguments,
+                Some(ToolProvenance::Extension),
+                &[],
+            ),
             None,
             "an extension named like a standard tool stays name-only in safe mode"
         );
         assert_eq!(
-            matrix_tool_argument_hint("browser", &arguments, Some(ToolProvenance::Native), &[],)
-                .as_deref(),
+            matrix_tool_argument_hint(
+                "proxy_config",
+                &arguments,
+                Some(ToolProvenance::Native),
+                &[],
+            )
+            .as_deref(),
             Some("action=navigate"),
             "the canonical standard tool keeps its reviewed safe field"
         );
         assert_eq!(
-            matrix_tool_argument_hint("browser", &arguments, None, &[]),
+            matrix_tool_argument_hint("proxy_config", &arguments, None, &[]),
             None,
             "an unresolved tool named like a standard tool stays name-only"
         );
         let explicit_policy = [Entry::Tool {
-            tool: "browser".to_string(),
+            tool: "proxy_config".to_string(),
             base: Some(Base::None),
             include: vec!["action".to_string()],
             exclude: Vec::new(),
@@ -17380,7 +17360,7 @@ pub(crate) mod tests {
         }];
         assert_eq!(
             matrix_tool_argument_hint(
-                "browser",
+                "proxy_config",
                 &arguments,
                 Some(ToolProvenance::Extension),
                 &explicit_policy,

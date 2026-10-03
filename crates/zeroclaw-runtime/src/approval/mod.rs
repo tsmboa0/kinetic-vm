@@ -1146,24 +1146,24 @@ mod tests {
     }
 
     #[test]
-    fn non_interactive_weather_is_auto_approved() {
+    fn non_interactive_calculator_is_auto_approved() {
         let config = RiskProfileConfig::default();
         let mgr = ApprovalManager::for_non_interactive(&config);
         assert!(
-            !mgr.needs_approval("weather"),
-            "weather tool must not need approval — it is in the default auto_approve list"
+            !mgr.needs_approval("calculator"),
+            "calculator tool must not need approval — it is in the default auto_approve list"
         );
     }
 
     #[test]
     fn always_ask_overrides_auto_approve() {
         let config = RiskProfileConfig {
-            always_ask: vec!["weather".into()],
+            always_ask: vec!["calculator".into()],
             ..RiskProfileConfig::default()
         };
         let mgr = ApprovalManager::for_non_interactive(&config);
         assert!(
-            mgr.needs_approval("weather"),
+            mgr.needs_approval("calculator"),
             "always_ask must override auto_approve"
         );
     }

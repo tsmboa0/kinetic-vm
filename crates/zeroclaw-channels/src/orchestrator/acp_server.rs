@@ -3376,42 +3376,33 @@ fn map_tool_kind(name: &str) -> &'static str {
         | "llm_task" | "schedule" | "shell" | "sop_advance" | "sop_approve" | "sop_execute" => {
             "execute"
         }
-        "backup" | "cloud_ops" | "file_edit" | "file_write" | "memory_export" | "memory_store"
-        | "report_template" => "edit",
+        "backup" | "file_edit" | "file_write" | "memory_export" | "memory_store" => "edit",
         "cron_add" | "poll" | "reaction" => "edit",
         "memory_forget" | "memory_purge" => "delete",
         // ACP clients often treat `read`/`search`/`fetch` calls as noisy
         // background context gathering and keep their content collapsed. These
         // ZeroClaw tools return user-visible text, so use `other` to keep the
         // result content surfaced consistently across clients.
-        "content_search" | "discord_search" | "glob_search" | "knowledge" | "search"
-        | "tool_search" | "web_search_tool" => "other",
-        "cloud_patterns"
-        | "data_management"
+        "content_search" | "glob_search" | "knowledge" | "search" | "tool_search"
+        | "web_search_tool" => "other",
+        "data_management"
         | "deliver_file"
         | "file_read"
-        | "git_operations"
-        | "google_workspace"
         | "hardware_board_info"
         | "hardware_memory_map"
         | "hardware_memory_read"
         | "image_info"
-        | "linkedin"
-        | "microsoft365"
         | "model_routing_config"
         | "model_switch"
-        | "project_intel"
         | "proxy_config"
         | "read_skill"
         | "sessions_history"
         | "sessions_list"
         | "sop_list"
         | "sop_status"
-        | "weather"
         | "workspace" => "other",
         "cron_list" | "cron_runs" | "memory_recall" => "other",
         "http_request" | "web_fetch" => "other",
-        "image_gen" => "other",
         "cron_remove" => "delete",
         "cron_run" => "execute",
         "sessions_send" => "execute",

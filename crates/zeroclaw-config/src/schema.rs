@@ -9865,14 +9865,7 @@ pub fn default_auto_approve() -> Vec<String> {
         "glob_search".into(),
         "content_search".into(),
         "image_info".into(),
-        "weather".into(),
         "tool_search".into(),
-        // `browser_open` only hands a URL to the system browser — no
-        // scraping, no page interaction — so it stays auto-approved. The
-        // full `browser` automation tool is deliberately absent: it drives a
-        // possibly logged-in Chrome/Chromium session, which is not a
-        // decision to make on the operator's behalf.
-        "browser_open".into(),
     ]
 }
 
@@ -15746,8 +15739,6 @@ fn default_otp_gated_actions() -> Vec<String> {
     vec![
         "shell".to_string(),
         "file_write".to_string(),
-        "browser_open".to_string(),
-        "browser".to_string(),
         "memory_forget".to_string(),
     ]
 }
@@ -25796,13 +25787,7 @@ untrusted_outbound_redact = false
 
     fn parse_test_config(raw: &str) -> Config {
         let mut merged = raw.trim().to_string();
-        for table in [
-            "data_retention",
-            "cloud_ops",
-            "conversational_ai",
-            "security",
-            "security_ops",
-        ] {
+        for table in ["data_retention", "conversational_ai", "security"] {
             if has_test_table(&merged, table) {
                 continue;
             }
@@ -28356,13 +28341,7 @@ auto_approve = ["my_custom_tool", "another_tool"]
         let profile = parsed.risk_profiles.get("default").unwrap();
         assert!(profile.auto_approve.contains(&"my_custom_tool".to_string()));
         assert!(profile.auto_approve.contains(&"another_tool".to_string()));
-        for default_tool in &[
-            "file_read",
-            "memory_recall",
-            "weather",
-            "calculator",
-            "web_fetch",
-        ] {
+        for default_tool in &["file_read", "memory_recall", "calculator", "web_fetch"] {
             assert!(
                 profile.auto_approve.contains(&String::from(*default_tool)),
                 "default tool '{default_tool}' must be present"
@@ -28374,47 +28353,6 @@ auto_approve = ["my_custom_tool", "another_tool"]
     async fn default_auto_approve_includes_tool_search() {
         let defaults = default_auto_approve();
         assert!(defaults.contains(&"tool_search".to_string()));
-    }
-
-    /// Security guard: the full `browser` automation tool drives a real
-    /// Chrome/Chromium session that may already be logged in, so it must
-    /// never be silently auto-approved — a prompt-injected message would
-    /// otherwise act as the operator with no approval prompt.
-    /// `browser_open` (hand a URL to the system browser, no scraping or
-    /// interaction) stays on the list.
-    #[test]
-    async fn default_auto_approve_excludes_browser_automation() {
-        let defaults = default_auto_approve();
-        assert!(
-            !defaults.contains(&"browser".to_string()),
-            "full browser automation must not be auto-approved by default"
-        );
-        assert!(
-            defaults.contains(&"browser_open".to_string()),
-            "browser_open must stay auto-approved"
-        );
-    }
-
-    /// The forced merge in `ensure_default_auto_approve` must not put
-    /// `browser` back on an operator's list at load time.
-    #[test]
-    async fn ensure_default_auto_approve_does_not_add_browser_automation() {
-        let raw = r#"
-default_temperature = 0.7
-
-[risk_profiles.default]
-auto_approve = []
-"#;
-        let parsed = parse_test_config(raw);
-        let profile = parsed.risk_profiles.get("default").unwrap();
-        assert!(
-            !profile.auto_approve.contains(&"browser".to_string()),
-            "loading a config must not merge `browser` into auto_approve"
-        );
-        assert!(
-            profile.auto_approve.contains(&"browser_open".to_string()),
-            "browser_open must still be merged in"
-        );
     }
 
     /// Regression test: empty auto_approve still gets defaults merged.

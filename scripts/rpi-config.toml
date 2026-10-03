@@ -99,7 +99,6 @@ non_cli_excluded_tools = [
     "web_access_config",
     "model_routing_config",
     "channel_ack_config",
-    "composio",
     "delegate",
     "image_info",
 ]
@@ -429,10 +428,6 @@ webhook_secret = "mytoken123"
 [gateway.node_control]
 enabled = false
 allowed_node_ids = []
-
-[composio]
-enabled = false
-entity_id = "default"
 
 [secrets]
 encrypt = true

@@ -861,7 +861,6 @@ mod tests {
         const UNGROUPED: &[&str] = &[
             "escalation",
             "locale",
-            "microsoft365",
             "file_upload",
             "file_upload_bundle",
             "file_download",

@@ -1871,10 +1871,6 @@ pub async fn run(
         ));
         tool_descs.push(("cron_runs", "Show recent run history for a cron job."));
         tool_descs.push((
-        "screenshot",
-        "Capture a screenshot of the current screen. Returns the saved file path. Use when: visual verification, UI inspection, debugging displays.",
-    ));
-        tool_descs.push((
         "image_info",
         "Read image file metadata (format, dimensions, size) and optionally base64-encode it. Use when: inspecting images, preparing visual data for analysis.",
     ));
@@ -3675,7 +3671,6 @@ async fn process_message_inner(
                 "model_routing_config",
                 "Configure default model, scenario routing, and delegate agents.",
             ),
-            ("screenshot", "Capture a screenshot."),
             ("image_info", "Read image metadata."),
         ];
         if matches!(
