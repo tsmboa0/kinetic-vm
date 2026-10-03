@@ -220,7 +220,6 @@ pub struct Config {
     #[group = "Operations"]
     pub data_retention: DataRetentionConfig,
 
-
     /// Conversational AI agent builder configuration (`[conversational_ai]`).
     ///
     /// Experimental / future feature — not yet wired into the agent runtime.
@@ -231,7 +230,6 @@ pub struct Config {
     #[nested]
     #[group = "Operations"]
     pub conversational_ai: ConversationalAiConfig,
-
 
     /// Runtime adapter configuration (`[runtime]`). Controls native vs Docker execution.
     #[serde(default)]
@@ -359,15 +357,11 @@ pub struct Config {
     #[group = "Network"]
     pub enroll: EnrollConfig,
 
-
-
     /// Secrets encryption configuration (`[secrets]`).
     #[serde(default)]
     #[nested]
     #[group = "Storage"]
     pub secrets: SecretsConfig,
-
-
 
     /// HTTP request tool configuration (`[http_request]`).
     #[serde(default)]
@@ -399,14 +393,11 @@ pub struct Config {
     #[group = "Tools"]
     pub link_enricher: LinkEnricherConfig,
 
-
     /// Web search tool configuration (`[web_search]`).
     #[serde(default)]
     #[nested]
     #[group = "Tools"]
     pub web_search: WebSearchConfig,
-
-
 
     /// Proxy configuration for outbound HTTP/HTTPS/SOCKS5 traffic (`[proxy]`).
     #[serde(default)]
@@ -549,15 +540,11 @@ pub struct Config {
     #[nested]
     pub onboard_state: OnboardStateConfig,
 
-
-
     /// Knowledge graph configuration (`[knowledge]`).
     #[serde(default)]
     #[nested]
     #[group = "Tools"]
     pub knowledge: KnowledgeConfig,
-
-
 
     /// Standalone file upload tool configuration (`[file_upload]`).
     #[serde(default)]
@@ -591,12 +578,6 @@ pub struct Config {
     /// system's locale (defaulting to `"en"` if that can't be determined).
     #[serde(default)]
     pub locale: Option<String>,
-
-
-
-
-
-
 
     /// Standard Operating Procedures engine configuration (`[sop]`).
     #[serde(default)]
@@ -18148,14 +18129,12 @@ impl Config {
         // no enable toggle, so it gets a hand-crafted descriptor whose
         // `active` reflects whether any job is configured. Display copy lives next to
         // the field so the registry never branches on a category name.
-        vec![
-            crate::config::IntegrationDescriptor {
-                display_name: "Cron",
-                description: "Scheduled tasks",
-                category: "ToolsAutomation",
-                active: !self.cron.is_empty(),
-            },
-        ]
+        vec![crate::config::IntegrationDescriptor {
+            display_name: "Cron",
+            description: "Scheduled tasks",
+            category: "ToolsAutomation",
+            active: !self.cron.is_empty(),
+        }]
     }
 
     /// Return top-level TOML keys in `raw_toml` that Config does not recognise.

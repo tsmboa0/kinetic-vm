@@ -72,6 +72,9 @@ pub mod observability;
 pub mod peripherals;
 #[cfg(feature = "agent-runtime")]
 pub mod platform;
+#[cfg(feature = "agent-runtime")]
+#[cfg(feature = "plugins-wasm")]
+pub mod plugins;
 pub mod providers;
 #[cfg(feature = "agent-runtime")]
 pub mod rag;
@@ -87,10 +90,6 @@ pub mod tools;
 pub(crate) mod trust;
 #[cfg(feature = "agent-runtime")]
 pub(crate) mod tunnel;
-#[cfg(feature = "agent-runtime")]
-
-#[cfg(feature = "plugins-wasm")]
-pub mod plugins;
 
 pub use config::Config;
 

@@ -184,7 +184,6 @@ impl Sandbox for DockerSandbox {
     fn description(&self) -> &str {
         "Docker container isolation (requires docker)"
     }
-
 }
 
 #[cfg(test)]
@@ -496,5 +495,4 @@ mod tests {
             "must not emit -v when workspace_dir is None"
         );
     }
-
 }

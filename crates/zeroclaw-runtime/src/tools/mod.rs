@@ -1198,7 +1198,8 @@ fn all_tools_with_runtime_on_thread(
     acp_sessions: Option<AcpSessionReadView>,
 ) -> AllToolsResult {
     let persistent_writes = runtime.has_filesystem_access();
-    let RuntimeShellAssembly { shell_tool } = runtime_shell_assembly(security.clone(), runtime.clone(), risk_profile, root_config);
+    let RuntimeShellAssembly { shell_tool } =
+        runtime_shell_assembly(security.clone(), runtime.clone(), risk_profile, root_config);
     // Keep a shared runtime adapter available after constructing ShellTool.
     // Independent agentic delegates use it later to build the target-owned tool
     // registry; bounded delegates continue to use the parent `tool_arcs`
@@ -1812,7 +1813,6 @@ fn all_tools_with_runtime_on_thread(
         Some(parent_tools)
     };
 
-
     // ── WASM plugin tools (requires plugins-wasm feature) ──
     #[cfg(feature = "plugins-wasm")]
     {
@@ -2046,8 +2046,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
     use zeroclaw_config::schema::{
-        ApprovalGroupConfig, ApprovalPolicyConfig, Config, FileDownloadConfig,
-        MemoryConfig, SopApprovalConfig,
+        ApprovalGroupConfig, ApprovalPolicyConfig, Config, FileDownloadConfig, MemoryConfig,
+        SopApprovalConfig,
     };
 
     #[tokio::test]
@@ -4504,8 +4504,8 @@ permissions = ["http_client"]
     #[tokio::test]
     async fn llm_task_uses_alias_aware_provider_for_alias_config() {
         use zeroclaw_config::schema::{
-            AliasedAgentConfig, Config, HttpRequestConfig, MemoryConfig,
-            ModelProviderConfig, OpenAIModelProviderConfig, RiskProfileConfig, WebFetchConfig,
+            AliasedAgentConfig, Config, HttpRequestConfig, MemoryConfig, ModelProviderConfig,
+            OpenAIModelProviderConfig, RiskProfileConfig, WebFetchConfig,
         };
 
         let tmp = TempDir::new().unwrap();

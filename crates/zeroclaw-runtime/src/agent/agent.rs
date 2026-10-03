@@ -2724,7 +2724,6 @@ impl Agent {
         )
         .await?;
 
-
         // SOP loading is gated on `runtime_enabled()`: `sops_dir` is unset (or
         // empty) by default, so SOP runtime behavior is off until an operator
         // opts in by setting a directory.

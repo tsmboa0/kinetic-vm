@@ -213,7 +213,6 @@ impl Sandbox for BubblewrapSandbox {
     fn description(&self) -> &str {
         "User namespace sandbox (requires bwrap)"
     }
-
 }
 
 #[cfg(test)]

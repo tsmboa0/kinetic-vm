@@ -1132,7 +1132,6 @@ pub async fn run_gateway_with_plugin_webhooks(
     ));
     let agent_alias_opt = default_agent_alias(&config);
 
-
     let agent_setup: Option<(
         zeroclaw_config::schema::RiskProfileConfig,
         Arc<SecurityPolicy>,

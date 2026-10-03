@@ -1516,5 +1516,4 @@ mod tests {
         assert!(error.to_string().contains("access_token is empty"));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
-
 }

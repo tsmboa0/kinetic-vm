@@ -962,7 +962,6 @@ mod tunnel;
 #[cfg(feature = "agent-runtime")]
 mod util;
 #[cfg(feature = "agent-runtime")]
-
 use config::Config;
 
 // Re-export so binary modules can use crate::<CommandEnum> while keeping a single source of truth.
@@ -7228,7 +7227,6 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
             zeroclaw_runtime::agent::loop_::register_approval_channel_map_fn(Box::new(|_| {
                 zeroclaw_channels::orchestrator::live_channel_map()
             }));
-
 
             // Capture the launch command now, before any in-app upgrade can
             // swap the binary on disk (after which `current_exe()` resolves to a

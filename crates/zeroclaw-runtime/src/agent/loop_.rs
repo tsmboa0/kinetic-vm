@@ -1583,7 +1583,6 @@ pub async fn run(
             );
         }
 
-
         // Build SOP engine when sops_dir is configured so SOP tools are
         // available on this path (CLI agent run). No channel map is wired on this
         // path, so the approval route adapter is the no-op (log-only); the daemon
@@ -3502,7 +3501,6 @@ async fn process_message_inner(
                 .and_then(|e| e.api_key.as_deref()),
         )
         .await?;
-
 
         // Build SOP engine when sops_dir is configured so SOP tools are
         // available on this path (process_message CLI agent). No channel map is

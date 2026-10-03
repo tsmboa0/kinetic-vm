@@ -8171,14 +8171,7 @@ const MATRIX_OPTIONAL_SAFE_TOOL_ARGUMENTS: &[(&[&str], &[&str])] = &[
         &["board", "address", "length"],
     ),
     (&["mcp_resources", "mcp_prompts"], &["action"]),
-    (
-        &[
-            "execute_pipeline",
-            "knowledge",
-            "llm_task",
-        ],
-        &[],
-    ),
+    (&["execute_pipeline", "knowledge", "llm_task"], &[]),
 ];
 
 fn matrix_safe_tool_arguments(tool: &str) -> Option<&'static [&'static str]> {
@@ -14165,14 +14158,7 @@ pub async fn start_channels(
     sop_driver_sink: Option<zeroclaw_runtime::sop::SopDriverSink>,
 ) -> Result<()> {
     let authority = zeroclaw_runtime::LiveConfigAuthority::new_owned(config)?;
-    start_channels_with_authority(
-        authority,
-        cancel,
-        sop_engine,
-        sop_audit,
-        sop_driver_sink,
-    )
-    .await
+    start_channels_with_authority(authority, cancel, sop_engine, sop_audit, sop_driver_sink).await
 }
 
 /// Start all configured channels with the live config authority owned by the

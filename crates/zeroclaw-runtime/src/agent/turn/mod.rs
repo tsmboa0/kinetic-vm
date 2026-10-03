@@ -2971,7 +2971,6 @@ pub(crate) async fn assemble_owned_execution_with_admission(
     let runtime: Arc<dyn crate::platform::RuntimeAdapter> =
         Arc::from(crate::platform::create_runtime(&config.runtime)?);
 
-
     let built = crate::tools::all_tools_with_runtime_and_execution_capability(
         Arc::new(config.clone()),
         &security,

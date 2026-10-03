@@ -33,7 +33,6 @@ pub trait Sandbox: Send + Sync {
     /// Displayed in status output and health checks so operators can verify
     /// the active security posture.
     fn description(&self) -> &str;
-
 }
 
 #[derive(Debug, Clone, Default)]
