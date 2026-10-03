@@ -57,27 +57,6 @@ fn root_feature_reachable<'a>(features: &'a toml::Table, seeds: &[&'a str]) -> B
     reachable
 }
 
-fn distribution_inputs(root: &toml::Value) -> Vec<&str> {
-    let extra_features = root
-        .get("package")
-        .and_then(toml::Value::as_table)
-        .and_then(|package| package.get("metadata"))
-        .and_then(toml::Value::as_table)
-        .and_then(|metadata| metadata.get("zeroclaw"))
-        .and_then(toml::Value::as_table)
-        .and_then(|zeroclaw| zeroclaw.get("dist_extra_features"))
-        .and_then(toml::Value::as_array)
-        .expect("root manifest must define dist_extra_features");
-
-    let mut inputs = vec!["default"];
-    inputs.extend(extra_features.iter().map(|feature| {
-        feature
-            .as_str()
-            .expect("dist_extra_features must contain only strings")
-    }));
-    inputs
-}
-
 fn dependency_feature(reference: &str) -> Option<(&str, &str, bool)> {
     let (dependency, feature) = reference.split_once('/')?;
     let (dependency, weak) = match dependency.strip_suffix('?') {
@@ -150,7 +129,7 @@ fn probe_boundary_applies_weak_dependency_feature_semantics() {
 }
 
 #[test]
-fn probe_feature_graph_preserves_forwarding_and_distribution_boundaries() {
+fn probe_feature_graph_preserves_forwarding_and_default_boundary() {
     let root = parse_manifest(include_str!("../../Cargo.toml"), "root Cargo.toml");
     let hardware = parse_manifest(
         include_str!("../../crates/zeroclaw-hardware/Cargo.toml"),
@@ -197,7 +176,4 @@ fn probe_feature_graph_preserves_forwarding_and_distribution_boundaries() {
 
     let default_reachable = root_feature_reachable(root_features, &["default"]);
     assert_probe_boundary("root default", &default_reachable);
-
-    let distribution_reachable = root_feature_reachable(root_features, &distribution_inputs(&root));
-    assert_probe_boundary("standard distribution", &distribution_reachable);
 }

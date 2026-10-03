@@ -1644,9 +1644,7 @@ impl AcpSessionStore {
                     projected_increment += tool_calls.len() as i64;
                     // Zero-entry batch: nothing to persist, keeps the counter
                     // and the reloaded projection equal.
-                    if tool_calls.is_empty()
-                        && !text.as_deref().is_some_and(|text| !text.is_empty())
-                    {
+                    if tool_calls.is_empty() && text.as_deref().is_none_or(|text| text.is_empty()) {
                         continue;
                     }
                     tx.execute(

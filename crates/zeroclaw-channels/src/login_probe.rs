@@ -43,55 +43,11 @@ pub fn persisted_login(channel: QrPairingChannel, config: &Config, alias: &str) 
     // Read at use-time in the feature-gated arms below; the binding keeps
     // the signature stable when no QR-pairing channel feature is compiled.
     let (_config, _alias) = (config, alias);
-    match channel {
-        #[cfg(feature = "channel-wechat")]
-        QrPairingChannel::WeChat => {
-            let state_dir = crate::wechat::WeChatChannel::resolve_state_dir(
-                _config
-                    .channels
-                    .wechat
-                    .get(_alias)
-                    .and_then(|wechat| wechat.state_dir.as_deref()),
-            );
-            if crate::wechat::WeChatChannel::has_persisted_login(&state_dir) {
-                PersistedLogin::Present
-            } else {
-                PersistedLogin::Absent
-            }
-        }
-        #[cfg(feature = "whatsapp-web")]
-        QrPairingChannel::WhatsAppWeb => {
-            match _config
-                .channels
-                .whatsapp
-                .get(_alias)
-                .and_then(|whatsapp| whatsapp.session_path.as_deref())
-            {
-                Some(session_path) => {
-                    if crate::whatsapp_web::WhatsAppWebChannel::has_persisted_session(session_path)
-                    {
-                        PersistedLogin::Present
-                    } else {
-                        PersistedLogin::Absent
-                    }
-                }
-                // The WhatsApp Web key is only resolved for aliases whose
-                // config carries a `session_path`; without one there is
-                // nothing on disk to resume.
-                None => PersistedLogin::Absent,
-            }
-        }
-    }
+    match channel {}
 }
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(feature = "channel-wechat", feature = "whatsapp-web"))]
-    use super::{PersistedLogin, persisted_login};
-    #[cfg(any(feature = "channel-wechat", feature = "whatsapp-web"))]
-    use crate::listing::QrPairingChannel;
-    #[cfg(any(feature = "channel-wechat", feature = "whatsapp-web"))]
-    use zeroclaw_config::schema::Config;
 
     #[test]
     fn channels_without_a_probe_resolve_to_no_qr_pairing_key() {
@@ -102,82 +58,6 @@ mod tests {
             crate::listing::qr_pairing_channel("whatsapp"),
             None,
             "the Cloud API backend has no on-disk session to probe"
-        );
-    }
-
-    #[cfg(feature = "channel-wechat")]
-    #[test]
-    fn wechat_probe_tracks_account_json_in_configured_state_dir() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
-        config.channels.wechat.insert(
-            "admin".to_string(),
-            zeroclaw_config::schema::WeChatConfig {
-                enabled: true,
-                state_dir: Some(temp.path().to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-
-        assert_eq!(
-            persisted_login(QrPairingChannel::WeChat, &config, "admin"),
-            PersistedLogin::Absent
-        );
-
-        std::fs::write(
-            temp.path().join("account.json"),
-            r#"{"token": "tok_persisted", "account_id": "acct_1"}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            persisted_login(QrPairingChannel::WeChat, &config, "admin"),
-            PersistedLogin::Present
-        );
-    }
-
-    #[cfg(feature = "whatsapp-web")]
-    #[tokio::test]
-    async fn whatsapp_web_probe_tracks_registered_device() {
-        use wacore::store::Device as CoreDevice;
-        use wacore::store::traits::DeviceStore as DeviceStoreTrait;
-
-        let temp = tempfile::tempdir().unwrap();
-        let session_path = temp.path().join("session.db");
-        let mut config = Config::default();
-        config.channels.whatsapp.insert(
-            "admin".to_string(),
-            zeroclaw_config::schema::WhatsAppConfig {
-                enabled: true,
-                session_path: Some(session_path.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-
-        assert_eq!(
-            persisted_login(QrPairingChannel::WhatsAppWeb, &config, "admin"),
-            PersistedLogin::Absent
-        );
-        assert!(
-            !session_path.exists(),
-            "probing an unpaired channel must not create the session database"
-        );
-
-        let store = crate::whatsapp_storage::RusqliteStore::new(&session_path).unwrap();
-        DeviceStoreTrait::save(&store, &CoreDevice::new())
-            .await
-            .unwrap();
-        assert_eq!(
-            persisted_login(QrPairingChannel::WhatsAppWeb, &config, "admin"),
-            PersistedLogin::Absent,
-            "a persisted but unlinked device (pre-pairing) is not a login"
-        );
-
-        let mut device = CoreDevice::new();
-        device.pn = Some(wacore_binary::jid::Jid::pn("15551234567"));
-        DeviceStoreTrait::save(&store, &device).await.unwrap();
-        assert_eq!(
-            persisted_login(QrPairingChannel::WhatsAppWeb, &config, "admin"),
-            PersistedLogin::Present
         );
     }
 }

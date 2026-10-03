@@ -108,13 +108,6 @@ plugins-wasm = ["dep:zeroclaw-plugins"]
 webauthn = ["zeroclaw-runtime/webauthn"]
 observability-prometheus = ["zeroclaw-runtime/observability-prometheus"]
 channel-acp-server = ["zeroclaw-channels/channel-acp-server"]
-channel-email = ["zeroclaw-channels/channel-email"]
-channel-linq = ["zeroclaw-channels/channel-linq"]
-channel-nextcloud = ["zeroclaw-channels/channel-nextcloud"]
-channel-nostr = ["zeroclaw-channels/channel-nostr"]
-channel-wechat = ["zeroclaw-channels/channel-wechat"]
-channel-whatsapp-cloud = ["zeroclaw-channels/channel-whatsapp-cloud"]
-whatsapp-web = ["zeroclaw-channels/whatsapp-web"]
 gateway-voice-duplex = []
 # Enables OPTIONS /api/config* responses with the schemars-generated
 # JSON Schema body and the serde-side schemars derives transitively. Defaults

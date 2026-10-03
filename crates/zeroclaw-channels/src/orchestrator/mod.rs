@@ -8,87 +8,22 @@ pub mod media_pipeline;
 #[cfg(feature = "channel-mqtt")]
 pub mod mqtt;
 
-// Channel types imported directly from source crates (no shim files)
-#[cfg(feature = "channel-amqp")]
-pub use crate::amqp::AmqpChannel;
-#[cfg(feature = "channel-bluesky")]
-pub use crate::bluesky::BlueskyChannel;
-#[cfg(feature = "channel-clawdtalk")]
-pub use crate::clawdtalk::ClawdTalkChannel;
-#[cfg(feature = "channel-dingtalk")]
-pub use crate::dingtalk::DingTalkChannel;
-#[cfg(feature = "channel-discord")]
-pub use crate::discord::DiscordChannel;
-#[cfg(feature = "channel-email")]
-pub use crate::email_channel::EmailChannel;
 #[cfg(feature = "channel-filesystem")]
 pub use crate::filesystem::FilesystemChannel;
-#[cfg(feature = "channel-git")]
-pub use crate::git::GitChannel;
-#[cfg(feature = "channel-email")]
-pub use crate::gmail_push::GmailPushChannel;
-#[cfg(feature = "channel-imessage")]
-pub use crate::imessage::IMessageChannel;
-#[cfg(feature = "channel-irc")]
-pub use crate::irc::IrcChannel;
-#[cfg(feature = "channel-lark")]
-pub use crate::lark::LarkChannel;
-#[cfg(feature = "channel-line")]
-pub use crate::line::LineChannel;
-#[cfg(feature = "channel-linq")]
-pub use crate::linq::LinqChannel;
-#[cfg(feature = "channel-mattermost")]
-pub use crate::mattermost::MattermostChannel;
-#[cfg(feature = "channel-mochat")]
-pub use crate::mochat::MochatChannel;
-#[cfg(feature = "channel-nextcloud")]
-pub use crate::nextcloud_talk::NextcloudTalkChannel;
-#[cfg(feature = "channel-nostr")]
-pub use crate::nostr::NostrChannel;
-#[cfg(feature = "channel-notion")]
-pub use crate::notion::NotionChannel;
-#[cfg(feature = "channel-qq")]
-pub use crate::qq::QQChannel;
-#[cfg(feature = "channel-reddit")]
-pub use crate::reddit::RedditChannel;
-#[cfg(feature = "channel-signal")]
-pub use crate::signal::SignalChannel;
-#[cfg(feature = "channel-slack")]
-pub use crate::slack::SlackChannel;
 pub use crate::transcription;
 pub use crate::tts::{TtsManager, TtsProvider};
-#[cfg(feature = "channel-twitch")]
-pub use crate::twitch::TwitchChannel;
-#[cfg(feature = "channel-twitter")]
-pub use crate::twitter::TwitterChannel;
-#[cfg(feature = "channel-voice-call")]
-pub use crate::voice_call::VoiceCallChannel;
 #[cfg(feature = "voice-wake")]
 pub use crate::voice_wake::VoiceWakeChannel;
 #[cfg(feature = "channel-webhook")]
 pub use crate::webhook::WebhookChannel;
-#[cfg(feature = "channel-wechat")]
-pub use crate::wechat::WeChatChannel;
-#[cfg(feature = "channel-wecom")]
-pub use crate::wecom::WeComChannel;
-#[cfg(feature = "channel-wecom-ws")]
-pub use crate::wecom_ws::WeComWsChannel;
-#[cfg(feature = "channel-wecom-ws")]
-use crate::wecom_ws::WeComWsRuntimePolicy;
-#[cfg(feature = "channel-whatsapp-cloud")]
-pub use crate::whatsapp::WhatsAppChannel;
 pub use zeroclaw_api::channel::{
     Channel, ChannelMessage, DraftProgress, DraftProgressKind, ListenerHealth, SendMessage,
 };
 // Local channel types (in misc, not zeroclaw-channels)
 pub use crate::cli::CliChannel;
 pub use crate::link_enricher;
-#[cfg(feature = "channel-matrix")]
-pub use crate::matrix::MatrixChannel;
 #[cfg(feature = "channel-telegram")]
 pub use crate::telegram::TelegramChannel;
-#[cfg(feature = "whatsapp-web")]
-pub use crate::whatsapp_web::WhatsAppWebChannel;
 pub use zeroclaw_infra::debounce::MessageDebouncer;
 pub use zeroclaw_infra::session_backend::SessionBackend;
 pub use zeroclaw_infra::session_sqlite::SqliteSessionBackend;
@@ -5969,7 +5904,7 @@ fn confirmed_canonical_prefix(sent_prefix: &str, delivered_response: &str) -> us
 /// offset unchanged. The result always lies on a UTF-8 char boundary of
 /// `frame`: it is either `confirmed_prefix.len()` (a byte-verified prefix of
 /// `frame`) or ends immediately after an ASCII `\n\n`.
-#[cfg(any(test, feature = "channel-discord", feature = "channel-matrix"))]
+#[cfg(test)]
 pub(crate) fn remap_confirmed_offset(confirmed_prefix: &str, frame: &str) -> usize {
     if frame.as_bytes().starts_with(confirmed_prefix.as_bytes()) {
         return confirmed_prefix.len();
@@ -7413,13 +7348,6 @@ fn spawn_supervised_listener_with_health_interval(
 fn is_non_retryable_channel_listener_error(channel_name: &str, error: &anyhow::Error) -> bool {
     match channel_name {
         name if name == "discord" || name.starts_with("discord-") => {
-            #[cfg(feature = "channel-discord")]
-            if error
-                .downcast_ref::<crate::discord::DiscordListenerFatalError>()
-                .is_some()
-            {
-                return true;
-            }
             zeroclaw_providers::reliable::is_non_retryable(error)
         }
         _ => false,
@@ -12548,36 +12476,9 @@ fn maybe_restart_managed_daemon_service() -> Result<bool> {
     Ok(false)
 }
 
-#[cfg(any(
-    test,
-    feature = "channel-discord",
-    feature = "channel-lark",
-    feature = "channel-matrix",
-    feature = "channel-slack",
-    feature = "channel-telegram",
-    feature = "channel-wechat",
-    feature = "whatsapp-web",
-))]
+#[cfg(any(test, feature = "channel-telegram"))]
 fn one_shot_channel_workspace_dir(config: &Config, channel_type: &str, alias: &str) -> PathBuf {
     config.channel_workspace_dir(&format!("{channel_type}.{alias}"))
-}
-
-#[cfg(feature = "channel-slack")]
-fn slack_thread_context_max_messages_resolver(
-    config_arc: &Arc<RwLock<Config>>,
-    alias: &str,
-) -> Arc<dyn Fn() -> usize + Send + Sync> {
-    let cfg_arc = Arc::clone(config_arc);
-    let alias = alias.to_string();
-    Arc::new(move || {
-        cfg_arc
-            .read()
-            .channels
-            .slack
-            .get(&alias)
-            .map(zeroclaw_config::schema::SlackConfig::effective_thread_context_max_messages)
-            .unwrap_or(zeroclaw_config::schema::DEFAULT_SLACK_THREAD_CONTEXT_MAX_MESSAGES)
-    })
 }
 
 /// Returned by [`build_channel_by_id`] when no arm claims `channel_id`.
@@ -12657,415 +12558,36 @@ fn build_channel_by_id(
         "telegram" => {
             anyhow::bail!("Telegram channel requires the `channel-telegram` feature");
         }
-        #[cfg(feature = "channel-discord")]
-        "discord" => {
-            let dc = config
-                .channels
-                .discord
-                .get("default")
-                .context("Discord channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("discord", &alias))
-            };
-            let workspace_dir = one_shot_channel_workspace_dir(&config, "discord", &alias);
-            Ok(Arc::new(
-                DiscordChannel::new(
-                    dc.bot_token.clone(),
-                    dc.guild_ids.clone(),
-                    alias.clone(),
-                    peer_resolver,
-                    dc.listen_to_bots,
-                    dc.mention_only,
-                )
-                .with_channel_ids(dc.channel_ids.clone())
-                .with_workspace_dir(workspace_dir)
-                .with_streaming(
-                    dc.stream_mode,
-                    dc.draft_update_interval_ms,
-                    dc.multi_message_delay_ms,
-                )
-                .with_transcription_manager(
-                    config.transcription.clone(),
-                    resolved_transcription_manager(&config, &format!("discord.{alias}")),
-                )
-                .with_stall_timeout(dc.stall_timeout_secs)
-                .with_approval_timeout_secs(dc.approval_timeout_secs)
-                .with_intents_mask(dc.intents_mask)
-                .with_reaction_notifications(dc.reaction_notifications),
-            ))
-        }
-        #[cfg(not(feature = "channel-discord"))]
         "discord" => {
             anyhow::bail!("Discord channel requires the `channel-discord` feature");
         }
-        #[cfg(feature = "channel-slack")]
-        "slack" => {
-            let sl = config
-                .channels
-                .slack
-                .get("default")
-                .context("Slack channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("slack", &alias))
-            };
-            let thread_context_max_messages_resolver =
-                slack_thread_context_max_messages_resolver(config_arc, &alias);
-            let workspace_dir = one_shot_channel_workspace_dir(&config, "slack", &alias);
-            let bot_token = sl.resolved_bot_token().with_context(|| {
-                format!(
-                    "Slack channel '{alias}': bot_token is not set. Provide it in config \
-                     (channels.slack.{alias}.bot_token) or via the \
-                     ZEROCLAW_SLACK_BOT_TOKEN / SLACK_BOT_TOKEN environment variable."
-                )
-            })?;
-            Ok(Arc::new(
-                SlackChannel::new(
-                    bot_token,
-                    sl.resolved_app_token(),
-                    sl.channel_ids.clone(),
-                    alias.clone(),
-                    peer_resolver,
-                )
-                .with_thread_context_max_messages_resolver(thread_context_max_messages_resolver)
-                .with_workspace_dir(workspace_dir)
-                .with_markdown_blocks(sl.use_markdown_blocks)
-                .with_transcription_manager(
-                    config.transcription.clone(),
-                    resolved_transcription_manager(&config, &format!("slack.{alias}")),
-                )
-                .with_streaming(sl.stream_drafts, sl.draft_update_interval_ms)
-                .with_cancel_reaction(sl.cancel_reaction.clone())
-                .with_approval_timeout_secs(sl.approval_timeout_secs),
-            ))
-        }
-        #[cfg(not(feature = "channel-slack"))]
         "slack" => {
             anyhow::bail!("Slack channel requires the `channel-slack` feature");
         }
-        #[cfg(feature = "channel-mattermost")]
-        "mattermost" => {
-            let mm = config
-                .channels
-                .mattermost
-                .get("default")
-                .context("Mattermost channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("mattermost", &alias))
-            };
-            Ok(Arc::new(
-                MattermostChannel::new(
-                    mm.url.clone(),
-                    mm.bot_token.clone(),
-                    mm.login_id.clone(),
-                    mm.password.clone(),
-                    mm.channel_ids.clone(),
-                    alias,
-                    peer_resolver,
-                    mm.thread_replies.unwrap_or(true),
-                    mm.mention_only.unwrap_or(false),
-                )
-                .with_team_ids(mm.team_ids.clone())
-                .with_discover_dms(mm.discover_dms.unwrap_or(true))
-                .with_listen_mode(mm.listen_mode)
-                .with_approval_timeout_secs(mm.approval_timeout_secs)
-                .with_purpose_as_instructions(mm.purpose_as_instructions),
-            ))
-        }
-        #[cfg(not(feature = "channel-mattermost"))]
         "mattermost" => {
             anyhow::bail!("Mattermost channel requires the `channel-mattermost` feature");
         }
-        #[cfg(feature = "channel-signal")]
-        "signal" => {
-            let sg = config
-                .channels
-                .signal
-                .get("default")
-                .context("Signal channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("signal", &alias))
-            };
-            Ok(Arc::new(
-                SignalChannel::new(
-                    sg.http_url.clone(),
-                    sg.account.clone(),
-                    sg.group_ids.clone(),
-                    sg.dm_only,
-                    alias,
-                    peer_resolver,
-                    sg.ignore_attachments,
-                    sg.ignore_stories,
-                )
-                .with_approval_timeout_secs(sg.approval_timeout_secs),
-            ))
-        }
-        #[cfg(not(feature = "channel-signal"))]
         "signal" => {
             anyhow::bail!("Signal channel requires the `channel-signal` feature");
         }
         "matrix" => {
-            #[cfg(feature = "channel-matrix")]
-            {
-                let mx = config
-                    .channels
-                    .matrix
-                    .get("default")
-                    .context("Matrix channel is not configured")?;
-                let alias = "default".to_string();
-                let state_dir = matrix_state_dir(&config.config_path, &alias);
-                let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                    let cfg_arc = config_arc.clone();
-                    let alias = alias.clone();
-                    Arc::new(move || cfg_arc.read().channel_external_peers("matrix", &alias))
-                };
-                let ack = mx.ack_reactions.unwrap_or(config.channels.ack_reactions);
-                let workspace_dir = one_shot_channel_workspace_dir(&config, "matrix", &alias);
-                let transcription_config_arc = Arc::clone(config_arc);
-                let transcription_channel_key = format!("matrix.{alias}");
-                let tts_config_arc = Arc::clone(config_arc);
-                let tts_channel_key = format!("matrix.{alias}");
-                let voice_peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                    let cfg_arc = config_arc.clone();
-                    let alias = alias.clone();
-                    Arc::new(move || cfg_arc.read().channel_voice_peers("matrix", &alias))
-                };
-                Ok(Arc::new(
-                    MatrixChannel::new(mx.clone(), alias, peer_resolver, state_dir)?
-                        .with_transcription_manager_factory(move || {
-                            let config = transcription_config_arc.read();
-                            if !config.transcription.enabled {
-                                return None;
-                            }
-                            let provider = resolve_agent_transcription_provider(
-                                &config,
-                                &transcription_channel_key,
-                            );
-                            Some(crate::matrix::build_transcription_manager(
-                                &config, &provider,
-                            ))
-                        })
-                        .with_tts_manager_factory(move || {
-                            let config = tts_config_arc.read();
-                            if !config.tts.enabled {
-                                return None;
-                            }
-                            let owner = resolve_agent_tts_owner(&config, &tts_channel_key);
-                            Some(crate::tts::TtsManager::from_config_for_agent(
-                                &config,
-                                owner.as_deref(),
-                            ))
-                        })
-                        .with_voice_peer_resolver(voice_peer_resolver)
-                        .with_workspace_dir(workspace_dir)
-                        .with_ack_reactions(ack),
-                ))
-            }
-            #[cfg(not(feature = "channel-matrix"))]
-            {
-                anyhow::bail!("Matrix channel requires the `channel-matrix` feature");
-            }
+            anyhow::bail!("Matrix channel requires the `channel-matrix` feature");
         }
         "whatsapp" | "whatsapp-web" | "whatsapp_web" => {
-            #[cfg(feature = "whatsapp-web")]
-            {
-                let wa = config
-                    .channels
-                    .whatsapp
-                    .get("default")
-                    .context("WhatsApp channel is not configured")?;
-                if !wa.is_web_config() {
-                    anyhow::bail!(
-                        "WhatsApp channel send requires Web mode (set session_path, pair_phone, or mode = personal)"
-                    );
-                }
-                let alias = "default".to_string();
-                let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                    let cfg_arc = config_arc.clone();
-                    let alias = alias.clone();
-                    Arc::new(move || cfg_arc.read().channel_external_peers("whatsapp", &alias))
-                };
-                let allowed_groups_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                    let cfg_arc = config_arc.clone();
-                    let alias = alias.clone();
-                    Arc::new(move || {
-                        cfg_arc
-                            .read()
-                            .channels
-                            .whatsapp
-                            .get(&alias)
-                            .map(|wa| wa.allowed_groups.clone())
-                            .unwrap_or_default()
-                    })
-                };
-                let workspace_dir = one_shot_channel_workspace_dir(&config, "whatsapp", &alias);
-                Ok(Arc::new(
-                    WhatsAppWebChannel::new(wa, alias, peer_resolver, allowed_groups_resolver)
-                        .with_persistence(config_arc.clone())
-                        .with_workspace_dir(workspace_dir),
-                ))
-            }
-            #[cfg(not(feature = "whatsapp-web"))]
-            {
-                anyhow::bail!("WhatsApp channel requires the `whatsapp-web` feature");
-            }
+            anyhow::bail!("WhatsApp channel requires the `whatsapp-web` feature");
         }
-        #[cfg(feature = "channel-qq")]
-        "qq" => {
-            let qq = config
-                .channels
-                .qq
-                .get("default")
-                .context("QQ channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("qq", &alias))
-            };
-            Ok(Arc::new(QQChannel::new(
-                qq.app_id.clone(),
-                qq.app_secret.clone(),
-                alias,
-                peer_resolver,
-            )))
-        }
-        #[cfg(not(feature = "channel-qq"))]
         "qq" => {
             anyhow::bail!("QQ channel requires the `channel-qq` feature");
         }
         "lark" => {
-            #[cfg(feature = "channel-lark")]
-            {
-                let lk = config
-                    .channels
-                    .lark
-                    .get("default")
-                    .context("Lark channel is not configured")?;
-                let alias = "default".to_string();
-                let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                    let cfg_arc = config_arc.clone();
-                    let alias = alias.clone();
-                    Arc::new(move || cfg_arc.read().channel_external_peers("lark", &alias))
-                };
-                Ok(Arc::new(
-                    LarkChannel::from_config(lk, alias, peer_resolver)
-                        .with_workspace_dir(one_shot_channel_workspace_dir(
-                            &config, "lark", "default",
-                        ))
-                        .with_approval_timeout_secs(lk.approval_timeout_secs)
-                        .with_per_user_session(lk.per_user_session)
-                        .with_ack_reactions(
-                            lk.ack_reactions.unwrap_or(config.channels.ack_reactions),
-                        )
-                        .with_streaming(lk.stream_mode, lk.draft_update_interval_ms),
-                ))
-            }
-            #[cfg(not(feature = "channel-lark"))]
-            {
-                anyhow::bail!("Lark channel requires the `channel-lark` feature");
-            }
+            anyhow::bail!("Lark channel requires the `channel-lark` feature");
         }
-        #[cfg(feature = "channel-dingtalk")]
-        "dingtalk" => {
-            let dt = config
-                .channels
-                .dingtalk
-                .get("default")
-                .context("DingTalk channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("dingtalk", &alias))
-            };
-            Ok(Arc::new(
-                DingTalkChannel::new(
-                    dt.client_id.clone(),
-                    dt.client_secret.clone(),
-                    alias,
-                    peer_resolver,
-                )
-                .with_proxy_url(dt.proxy_url.clone()),
-            ))
-        }
-        #[cfg(not(feature = "channel-dingtalk"))]
         "dingtalk" => {
             anyhow::bail!("DingTalk channel requires the `channel-dingtalk` feature");
         }
-        #[cfg(feature = "channel-wecom")]
-        "wecom" => {
-            let wc = config
-                .channels
-                .wecom
-                .get("default")
-                .context("WeCom channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("wecom", &alias))
-            };
-            Ok(Arc::new(WeComChannel::new(
-                wc.webhook_key.clone(),
-                alias,
-                peer_resolver,
-            )))
-        }
-        #[cfg(not(feature = "channel-wecom"))]
         "wecom" => {
             anyhow::bail!("WeCom channel requires the `channel-wecom` feature");
         }
-        #[cfg(feature = "channel-wecom-ws")]
-        channel_id
-            if channel_id == "wecom_ws"
-                || channel_id == "wecom-ws"
-                || channel_id.starts_with("wecom_ws.")
-                || channel_id.starts_with("wecom-ws.") =>
-        {
-            let alias = channel_id
-                .split_once('.')
-                .map(|(_, alias)| alias)
-                .unwrap_or("default")
-                .to_string();
-            let wc =
-                config.channels.wecom_ws.get(&alias).with_context(|| {
-                    format!("WeCom WebSocket channel '{alias}' is not configured")
-                })?;
-            let policy_resolver: Arc<dyn Fn() -> WeComWsRuntimePolicy + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                let snapshot = wc.clone();
-                Arc::new(move || {
-                    let config = cfg_arc.read();
-                    let external_peers = wecom_ws_external_peers(&config, &alias);
-
-                    if let Some(wc_ws) = config.channels.wecom_ws.get(&alias) {
-                        WeComWsRuntimePolicy::from_config(wc_ws, external_peers)
-                    } else {
-                        WeComWsRuntimePolicy::from_config(&snapshot, external_peers)
-                    }
-                })
-            };
-            Ok(Arc::new(WeComWsChannel::new_with_alias(
-                wc,
-                alias.clone(),
-                policy_resolver,
-                &config.channel_workspace_dir(&format!("wecom_ws.{alias}")),
-            )?))
-        }
-        #[cfg(not(feature = "channel-wecom-ws"))]
         channel_id
             if channel_id == "wecom_ws"
                 || channel_id == "wecom-ws"
@@ -13074,364 +12596,44 @@ fn build_channel_by_id(
         {
             anyhow::bail!("WeCom WebSocket channel requires the `channel-wecom-ws` feature");
         }
-        #[cfg(feature = "channel-wechat")]
-        "wechat" => {
-            let wc = config
-                .channels
-                .wechat
-                .get("default")
-                .context("WeChat channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("wechat", &alias))
-            };
-            let workspace_dir = one_shot_channel_workspace_dir(&config, "wechat", &alias);
-            Ok(Arc::new(
-                WeChatChannel::new(
-                    alias,
-                    peer_resolver,
-                    wc.api_base_url.clone(),
-                    wc.cdn_base_url.clone(),
-                    Some(WeChatChannel::resolve_state_dir(wc.state_dir.as_deref())),
-                )?
-                .with_persistence(config_arc.clone())
-                .with_workspace_dir(workspace_dir),
-            ))
-        }
-        #[cfg(not(feature = "channel-wechat"))]
         "wechat" => {
             anyhow::bail!("WeChat channel requires the `channel-wechat` feature");
         }
-        #[cfg(feature = "channel-nextcloud")]
-        "nextcloud_talk" | "nextcloud-talk" => {
-            let nc = config
-                .channels
-                .nextcloud_talk
-                .get("default")
-                .context("Nextcloud Talk channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || {
-                    cfg_arc
-                        .read()
-                        .channel_external_peers("nextcloud_talk", &alias)
-                })
-            };
-            Ok(Arc::new(
-                NextcloudTalkChannel::new_with_proxy(
-                    nc.base_url.clone(),
-                    nc.resolve_bot_secret().unwrap_or_else(|e| {
-                        ::zeroclaw_log::record!(
-                            WARN,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Note
-                            )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure),
-                            &e.to_string()
-                        );
-                        None
-                    }),
-                    nc.bot_name.clone().unwrap_or_default(),
-                    alias,
-                    peer_resolver,
-                    nc.proxy_url.clone(),
-                )
-                .with_streaming(nc.stream_mode, nc.draft_update_interval_ms),
-            ))
-        }
-        #[cfg(not(feature = "channel-nextcloud"))]
         "nextcloud_talk" | "nextcloud-talk" => {
             anyhow::bail!("Nextcloud Talk channel requires the `channel-nextcloud` feature");
         }
-        #[cfg(feature = "channel-linq")]
-        "linq" => {
-            let lq = config
-                .channels
-                .linq
-                .get("default")
-                .context("Linq channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("linq", &alias))
-            };
-            Ok(Arc::new(LinqChannel::new(
-                lq.api_token.clone(),
-                lq.from_phone.clone(),
-                alias,
-                peer_resolver,
-            )))
-        }
-        #[cfg(feature = "channel-linq")]
-        x if x.starts_with("linq.") => {
-            let alias = x.strip_prefix("linq.").context("invalid linq channel id")?;
-            let lq = config
-                .channels
-                .linq
-                .get(alias)
-                .with_context(|| format!("Linq alias '{alias}' not configured"))?;
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.to_string();
-                Arc::new(move || cfg_arc.read().channel_external_peers("linq", &alias))
-            };
-            Ok(Arc::new(LinqChannel::new(
-                lq.api_token.clone(),
-                lq.from_phone.clone(),
-                alias.to_string(),
-                peer_resolver,
-            )))
-        }
-        #[cfg(not(feature = "channel-linq"))]
         x if x.starts_with("linq") => {
             anyhow::bail!("Linq channel requires the `channel-linq` feature");
         }
-        #[cfg(feature = "channel-email")]
-        "email" => {
-            let em = config
-                .channels
-                .email
-                .get("default")
-                .context("Email channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("email", &alias))
-            };
-            Ok(Arc::new(EmailChannel::new(
-                em.clone(),
-                alias,
-                peer_resolver,
-            )))
-        }
-        #[cfg(not(feature = "channel-email"))]
         "email" => {
             anyhow::bail!("Email channel requires the `channel-email` feature");
         }
-        #[cfg(feature = "channel-email")]
-        "gmail_push" | "gmail-push" => {
-            let gp = config
-                .channels
-                .gmail_push
-                .get("default")
-                .context("Gmail Push channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("gmail_push", &alias))
-            };
-            Ok(Arc::new(GmailPushChannel::new(
-                gp.clone(),
-                alias,
-                peer_resolver,
-            )))
-        }
-        #[cfg(not(feature = "channel-email"))]
         "gmail_push" | "gmail-push" => {
             anyhow::bail!("Gmail Push channel requires the `channel-email` feature");
         }
-        #[cfg(feature = "channel-irc")]
-        "irc" => {
-            let irc_cfg = config
-                .channels
-                .irc
-                .get("default")
-                .context("IRC channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("irc", &alias))
-            };
-            Ok(Arc::new(IrcChannel::new(crate::irc::IrcChannelConfig {
-                server: irc_cfg.server.clone(),
-                port: irc_cfg.port,
-                nickname: irc_cfg.nickname.clone(),
-                username: irc_cfg.username.clone(),
-                channels: irc_cfg.channels.clone(),
-                alias,
-                peer_resolver,
-                server_password: irc_cfg.server_password.clone(),
-                nickserv_password: irc_cfg.nickserv_password.clone(),
-                sasl_password: irc_cfg.sasl_password.clone(),
-                verify_tls: irc_cfg.verify_tls.unwrap_or(true),
-                mention_only: irc_cfg.mention_only,
-            })))
-        }
-        #[cfg(not(feature = "channel-irc"))]
         "irc" => {
             anyhow::bail!("IRC channel requires the `channel-irc` feature");
         }
-        #[cfg(feature = "channel-twitch")]
-        "twitch" => {
-            let tw_cfg = config
-                .channels
-                .twitch
-                .get("default")
-                .context("Twitch channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("twitch", &alias))
-            };
-            Ok(Arc::new(TwitchChannel::new(
-                tw_cfg.bot_username.clone(),
-                tw_cfg.oauth_token.clone(),
-                tw_cfg.channels.clone(),
-                tw_cfg.mention_only,
-                alias,
-                peer_resolver,
-            )))
-        }
-        #[cfg(not(feature = "channel-twitch"))]
         "twitch" => {
             anyhow::bail!("Twitch channel requires the `channel-twitch` feature");
         }
-        #[cfg(feature = "channel-twitter")]
-        "twitter" => {
-            let tw = config
-                .channels
-                .twitter
-                .get("default")
-                .context("X/Twitter channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("twitter", &alias))
-            };
-            Ok(Arc::new(TwitterChannel::new(
-                tw.bearer_token.clone(),
-                alias,
-                peer_resolver,
-            )))
-        }
-        #[cfg(not(feature = "channel-twitter"))]
         "twitter" => {
             anyhow::bail!("X/Twitter channel requires the `channel-twitter` feature");
         }
-        #[cfg(feature = "channel-git")]
-        "git" => {
-            let g = config
-                .channels
-                .git
-                .get("default")
-                .context("Git channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("git", &alias))
-            };
-            Ok(Arc::new(GitChannel::new(g.clone(), alias, peer_resolver)?))
-        }
-        #[cfg(not(feature = "channel-git"))]
         "git" => {
             anyhow::bail!("Git channel requires the `channel-git` feature");
         }
-        #[cfg(feature = "channel-mochat")]
-        "mochat" => {
-            let mc = config
-                .channels
-                .mochat
-                .get("default")
-                .context("Mochat channel is not configured")?;
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("mochat", &alias))
-            };
-            Ok(Arc::new(MochatChannel::new(
-                mc.api_url.clone(),
-                mc.api_token.clone(),
-                alias,
-                peer_resolver,
-                mc.poll_interval_secs,
-            )))
-        }
-        #[cfg(not(feature = "channel-mochat"))]
         "mochat" => {
             anyhow::bail!("Mochat channel requires the `channel-mochat` feature");
         }
-        #[cfg(feature = "channel-imessage")]
-        "imessage" => {
-            if !config.channels.imessage.contains_key("default") {
-                anyhow::bail!("iMessage channel is not configured");
-            }
-            let alias = "default".to_string();
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("imessage", &alias))
-            };
-            Ok(Arc::new(IMessageChannel::new(alias, peer_resolver)))
-        }
-        #[cfg(not(feature = "channel-imessage"))]
         "imessage" => {
             anyhow::bail!("iMessage channel requires the `channel-imessage` feature");
         }
         "line" => {
-            #[cfg(feature = "channel-line")]
-            {
-                let ln = config
-                    .channels
-                    .line
-                    .get("default")
-                    .context("LINE channel is not configured")?;
-                let alias = "default".to_string();
-                let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                    let cfg_arc = config_arc.clone();
-                    let alias = alias.clone();
-                    Arc::new(move || cfg_arc.read().channel_external_peers("line", &alias))
-                };
-                let sender_name_resolver: Arc<dyn Fn() -> Option<String> + Send + Sync> = {
-                    let cfg_arc = config_arc.clone();
-                    let alias = alias.clone();
-                    Arc::new(move || {
-                        cfg_arc
-                            .read()
-                            .channels
-                            .line
-                            .get(&alias)
-                            .and_then(|ln| ln.sender_name.clone())
-                            .filter(|s| !s.is_empty())
-                    })
-                };
-                Ok(Arc::new(
-                    LineChannel::from_config(ln, alias, peer_resolver, sender_name_resolver)
-                        .with_persistence(config_arc.clone()),
-                ))
-            }
-            #[cfg(not(feature = "channel-line"))]
-            {
-                anyhow::bail!("LINE channel requires the `channel-line` feature");
-            }
+            anyhow::bail!("LINE channel requires the `channel-line` feature");
         }
         "voice-call" => {
-            #[cfg(feature = "channel-voice-call")]
-            {
-                let (alias, vc) = config
-                    .channels
-                    .voice_call
-                    .iter()
-                    .next()
-                    .context("Voice Call channel is not configured")?;
-                Ok(Arc::new(VoiceCallChannel::new(alias.clone(), vc.clone())))
-            }
-            #[cfg(not(feature = "channel-voice-call"))]
-            {
-                anyhow::bail!("Voice Call channel requires the `channel-voice-call` feature");
-            }
+            anyhow::bail!("Voice Call channel requires the `channel-voice-call` feature");
         }
         other => Err(anyhow::Error::new(UnknownChannelId(other.to_string()))),
     }
@@ -13495,18 +12697,6 @@ struct ConfiguredChannel {
     display_name: &'static str,
     alias: Option<String>,
     channel: Arc<dyn Channel>,
-}
-
-/// The resolved peer policy for a WeCom WebSocket alias.
-///
-/// This channel is written both `wecom-ws` and `wecom_ws` in `peer_groups`, and
-/// every startup path has to resolve both spellings in one pass: resolving them
-/// separately and concatenating leaves a wildcard under one spelling unaware of
-/// an `ignore` under the other. Named once so the one-shot and normal startup
-/// paths cannot answer this differently again.
-#[cfg(feature = "channel-wecom-ws")]
-pub(crate) fn wecom_ws_external_peers(config: &Config, alias: &str) -> Vec<String> {
-    config.channel_external_peers_for(&["wecom-ws", "wecom_ws"], alias)
 }
 
 /// Fold constructed channel plugins into the configured-channel set.
@@ -13905,19 +13095,7 @@ pub fn register_channels_for_tools(
 /// Gated to match its callers: with all transcribing channels compiled out
 /// this has no call sites, and an ungated definition trips the dead-code lint
 /// under a no-default-features build.
-#[cfg(any(
-    feature = "channel-telegram",
-    feature = "channel-discord",
-    feature = "channel-slack",
-    feature = "channel-mattermost",
-    feature = "whatsapp-web",
-    feature = "channel-lark",
-    feature = "channel-line",
-    feature = "channel-qq",
-    feature = "voice-wake",
-    feature = "channel-matrix",
-    feature = "whatsapp-web"
-))]
+#[cfg(any(feature = "channel-telegram", feature = "voice-wake"))]
 fn resolve_agent_transcription_provider(config: &Config, channel_key: &str) -> String {
     let enabled_agents = enabled_agent_aliases(config);
     build_owner_by_channel_key(config, &enabled_agents, &[channel_key.to_string()])
@@ -13934,16 +13112,7 @@ fn resolve_agent_transcription_provider(config: &Config, channel_key: &str) -> S
 /// from live config through `transcription::build_channel_transcription_manager`
 /// (typed providers, legacy-key compatibility, sole-provider fallback), and
 /// on failure log once and leave the channel up without transcription.
-#[cfg(any(
-    feature = "channel-telegram",
-    feature = "channel-discord",
-    feature = "channel-slack",
-    feature = "channel-mattermost",
-    feature = "whatsapp-web",
-    feature = "channel-lark",
-    feature = "channel-line",
-    feature = "channel-qq"
-))]
+#[cfg(feature = "channel-telegram")]
 fn resolved_transcription_manager(
     config: &Config,
     channel_key: &str,
@@ -13967,160 +13136,6 @@ fn resolved_transcription_manager(
             None
         }
     }
-}
-
-#[cfg(feature = "channel-discord")]
-fn configure_discord_transcription(
-    channel: DiscordChannel,
-    config: &Config,
-    channel_key: &str,
-) -> DiscordChannel {
-    channel.with_transcription_manager(
-        config.transcription.clone(),
-        resolved_transcription_manager(config, channel_key),
-    )
-}
-
-#[cfg(feature = "channel-discord")]
-fn build_configured_discord_channel(
-    config_arc: &Arc<RwLock<Config>>,
-    config: &Config,
-    alias: &str,
-    dc: &zeroclaw_config::schema::DiscordConfig,
-) -> DiscordChannel {
-    let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-        let cfg_arc = config_arc.clone();
-        let alias = alias.to_string();
-        Arc::new(move || cfg_arc.read().channel_external_peers("discord", &alias))
-    };
-    let channel_key = format!("discord.{alias}");
-    let channel = DiscordChannel::new(
-        dc.bot_token.clone(),
-        dc.guild_ids.clone(),
-        alias,
-        peer_resolver,
-        dc.listen_to_bots,
-        dc.mention_only,
-    )
-    .with_channel_ids(dc.channel_ids.clone())
-    .with_workspace_dir(config.channel_workspace_dir(&channel_key))
-    .with_streaming(
-        dc.stream_mode,
-        dc.draft_update_interval_ms,
-        dc.multi_message_delay_ms,
-    )
-    .with_proxy_url(dc.proxy_url.clone())
-    .with_stall_timeout(dc.stall_timeout_secs)
-    .with_approval_timeout_secs(dc.approval_timeout_secs)
-    .with_slash_commands(dc.slash_commands)
-    .with_slash_command_scope(dc.slash_command_scope)
-    .with_intents_mask(dc.intents_mask)
-    .with_reaction_notifications(dc.reaction_notifications);
-
-    configure_discord_transcription(channel, config, &channel_key)
-}
-
-/// Resolve the enabled agent that owns `channel_key`, for binding that agent's
-/// `tts_provider`. Shares [`build_owner_by_channel_key`] with message dispatch
-/// and with [`resolve_agent_transcription_provider`], so synthesis can never
-/// select a different owner than the one the router delivers to: with two
-/// enabled agents bound to the same channel, sorted last-writer-wins picks one
-/// answer for both.
-///
-/// Returns `None` when no enabled agent owns the channel, which
-/// [`crate::tts::TtsManager::from_config_for_agent`] treats as "fall back to
-/// the runtime-active agent" — collapsing that to an empty string would
-/// silently drop the fallback.
-#[cfg(feature = "channel-matrix")]
-fn resolve_agent_tts_owner(config: &Config, channel_key: &str) -> Option<String> {
-    let enabled_agents = enabled_agent_aliases(config);
-    build_owner_by_channel_key(config, &enabled_agents, &[channel_key.to_string()])
-        .get(channel_key)
-        .cloned()
-}
-
-/// Per-alias Matrix state directory. Each `[channels.matrix.<alias>]` block
-/// must own its own session/crypto store so two bots under one daemon don't
-/// restore each other's `session.json` and run as the wrong account. The
-/// alias component is what keeps them distinct.
-#[cfg(feature = "channel-matrix")]
-fn matrix_state_dir(config_path: &std::path::Path, alias: &str) -> std::path::PathBuf {
-    config_path
-        .parent()
-        .map(|p| p.join("state").join("matrix").join(alias))
-        .unwrap_or_else(|| std::path::PathBuf::from(".zeroclaw/state/matrix").join(alias))
-}
-
-#[cfg(any(feature = "channel-bluesky", feature = "channel-reddit"))]
-fn live_external_peer_resolver(
-    config: Arc<RwLock<Config>>,
-    channel_type: &'static str,
-    alias: String,
-) -> Arc<dyn Fn() -> Vec<String> + Send + Sync> {
-    Arc::new(move || config.read().channel_external_peers(channel_type, &alias))
-}
-
-/// Build the Matrix channel for `[channels.matrix.<alias>]` with every
-/// live-config resolver installed, mirroring
-/// [`build_configured_discord_channel`].
-///
-/// Extracted from [`collect_configured_channels`] so the *configured*
-/// construction path stays reachable: the loop wraps the result in
-/// `PacedChannel` and type-erases it to `Arc<dyn Channel>` immediately, so a
-/// test can otherwise never observe the resolvers this function installs.
-///
-/// Fallible because [`MatrixChannel::new`] validates `homeserver` and the
-/// credential pair; the caller logs and skips the alias on `Err`.
-#[cfg(feature = "channel-matrix")]
-pub(crate) fn build_configured_matrix_channel(
-    config_arc: &Arc<RwLock<Config>>,
-    config: &Config,
-    alias: &str,
-    mx: &zeroclaw_config::schema::MatrixConfig,
-) -> Result<MatrixChannel> {
-    let state_dir = matrix_state_dir(&config.config_path, alias);
-    let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-        let cfg_arc = config_arc.clone();
-        let alias = alias.to_string();
-        Arc::new(move || cfg_arc.read().channel_external_peers("matrix", &alias))
-    };
-    let ack = mx.ack_reactions.unwrap_or(config.channels.ack_reactions);
-    let transcription_config_arc = Arc::clone(config_arc);
-    let transcription_channel_key = format!("matrix.{alias}");
-    let tts_config_arc = Arc::clone(config_arc);
-    let tts_channel_key = format!("matrix.{alias}");
-    let voice_peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-        let cfg_arc = config_arc.clone();
-        let alias = alias.to_string();
-        Arc::new(move || cfg_arc.read().channel_voice_peers("matrix", &alias))
-    };
-    let channel = MatrixChannel::new(mx.clone(), alias.to_string(), peer_resolver, state_dir)?;
-    Ok(channel
-        .with_transcription_manager_factory(move || {
-            let config = transcription_config_arc.read();
-            if !config.transcription.enabled {
-                return None;
-            }
-            let provider =
-                resolve_agent_transcription_provider(&config, &transcription_channel_key);
-            Some(crate::matrix::build_transcription_manager(
-                &config, &provider,
-            ))
-        })
-        .with_tts_manager_factory(move || {
-            let config = tts_config_arc.read();
-            if !config.tts.enabled {
-                return None;
-            }
-            let owner = resolve_agent_tts_owner(&config, &tts_channel_key);
-            Some(crate::tts::TtsManager::from_config_for_agent(
-                &config,
-                owner.as_deref(),
-            ))
-        })
-        .with_voice_peer_resolver(voice_peer_resolver)
-        .with_workspace_dir(config.channel_workspace_dir(&format!("matrix.{alias}")))
-        .with_ack_reactions(ack))
 }
 
 fn collect_configured_channels(
@@ -14155,7 +13170,6 @@ fn collect_configured_channels_with_authority(
     let _ = authority;
     let _ = matrix_skip_context;
     let _ = tool_specs;
-    #[cfg(not(feature = "channel-amqp"))]
     let _ = (&sop_engine, &sop_audit, &sop_driver_sink);
     #[allow(unused_mut)]
     let mut channels = Vec::new();
@@ -14244,60 +13258,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-discord")]
-    for (alias, dc) in &config.channels.discord {
-        let channel_key = format!("discord.{alias}");
-        if !active_channel_aliases.contains(&channel_key) {
-            continue;
-        }
-        if !dc.enabled {
-            continue;
-        }
-        let mut discord_ch = build_configured_discord_channel(config_arc, &config, alias, dc);
-        if dc.slash_commands {
-            let cfg_arc_for_slash = config_arc.clone();
-            let channel_ref = format!("discord.{alias}");
-            discord_ch = discord_ch.with_slash_command_resolver(std::sync::Arc::new(move || {
-                let config = { cfg_arc_for_slash.read().clone() };
-                let Some(agent_alias) = config
-                    .agent_for_channel(&channel_ref)
-                    .map(ToString::to_string)
-                else {
-                    return Vec::new();
-                };
-                let workspace = config.agent_workspace_dir(&agent_alias);
-                let skills = zeroclaw_runtime::skills::load_skills_for_agent(
-                    &workspace,
-                    &config,
-                    &agent_alias,
-                );
-                crate::discord::discord_slash_specs_from_skills(&skills)
-            }));
-        }
-        if dc.archive {
-            match zeroclaw_memory::SqliteMemory::new_named("sqlite", &config.data_dir, "discord") {
-                Ok(mem) => {
-                    discord_ch = discord_ch.with_archive_memory(std::sync::Arc::new(mem));
-                }
-                Err(e) => {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                        "discord: archive enabled but failed to open discord.db"
-                    );
-                }
-            }
-        }
-        channels.push(ConfiguredChannel {
-            display_name: "Discord",
-            alias: Some(alias.clone()),
-            channel: crate::paced_channel::PacedChannel::wrap(Arc::new(discord_ch), dc),
-        });
-    }
-
-    #[cfg(not(feature = "channel-discord"))]
     if !config.channels.discord.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -14308,65 +13268,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-slack")]
-    for (alias, sl) in &config.channels.slack {
-        if !active_channel_aliases.contains(&format!("slack.{alias}")) {
-            continue;
-        }
-        if !sl.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("slack", &alias))
-        };
-        let thread_context_max_messages_resolver =
-            slack_thread_context_max_messages_resolver(config_arc, alias);
-        let Some(bot_token) = sl.resolved_bot_token() else {
-            ::zeroclaw_log::record!(
-                ERROR,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                    .with_attrs(::serde_json::json!({ "alias": alias.clone() })),
-                "Slack channel skipped: bot_token not set in config or via \
-                 ZEROCLAW_SLACK_BOT_TOKEN / SLACK_BOT_TOKEN env"
-            );
-            continue;
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "Slack",
-            alias: Some(alias.clone()),
-            channel: crate::paced_channel::PacedChannel::wrap(
-                Arc::new(
-                    SlackChannel::new(
-                        bot_token,
-                        sl.resolved_app_token(),
-                        sl.channel_ids.clone(),
-                        alias.clone(),
-                        peer_resolver,
-                    )
-                    .with_thread_context_max_messages_resolver(thread_context_max_messages_resolver)
-                    .with_thread_replies(sl.thread_replies.unwrap_or(true))
-                    .with_group_reply_policy(sl.mention_only, Vec::new())
-                    .with_strict_mention_in_thread(sl.strict_mention_in_thread)
-                    .with_workspace_dir(config.channel_workspace_dir(&format!("slack.{alias}")))
-                    .with_markdown_blocks(sl.use_markdown_blocks)
-                    .with_proxy_url(sl.proxy_url.clone())
-                    .with_transcription_manager(
-                        config.transcription.clone(),
-                        resolved_transcription_manager(&config, &format!("slack.{alias}")),
-                    )
-                    .with_streaming(sl.stream_drafts, sl.draft_update_interval_ms)
-                    .with_cancel_reaction(sl.cancel_reaction.clone())
-                    .with_approval_timeout_secs(sl.approval_timeout_secs),
-                ),
-                sl,
-            ),
-        });
-    }
-
-    #[cfg(not(feature = "channel-slack"))]
     if !config.channels.slack.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -14377,52 +13278,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-mattermost")]
-    for (alias, mm) in &config.channels.mattermost {
-        if !active_channel_aliases.contains(&format!("mattermost.{alias}")) {
-            continue;
-        }
-        if !mm.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("mattermost", &alias))
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "Mattermost",
-            alias: Some(alias.clone()),
-            channel: crate::paced_channel::PacedChannel::wrap(
-                Arc::new(
-                    MattermostChannel::new(
-                        mm.url.clone(),
-                        mm.bot_token.clone(),
-                        mm.login_id.clone(),
-                        mm.password.clone(),
-                        mm.channel_ids.clone(),
-                        alias.clone(),
-                        peer_resolver,
-                        mm.thread_replies.unwrap_or(true),
-                        mm.mention_only.unwrap_or(false),
-                    )
-                    .with_team_ids(mm.team_ids.clone())
-                    .with_discover_dms(mm.discover_dms.unwrap_or(true))
-                    .with_proxy_url(mm.proxy_url.clone())
-                    .with_transcription_manager(
-                        config.transcription.clone(),
-                        resolved_transcription_manager(&config, &format!("mattermost.{alias}")),
-                    )
-                    .with_listen_mode(mm.listen_mode)
-                    .with_approval_timeout_secs(mm.approval_timeout_secs)
-                    .with_purpose_as_instructions(mm.purpose_as_instructions),
-                ),
-                mm,
-            ),
-        });
-    }
-
-    #[cfg(not(feature = "channel-mattermost"))]
     if !config.channels.mattermost.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -14433,31 +13288,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-imessage")]
-    for (alias, im) in &config.channels.imessage {
-        if !active_channel_aliases.contains(&format!("imessage.{alias}")) {
-            continue;
-        }
-        if !im.enabled {
-            continue;
-        }
-        let _ = im;
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("imessage", &alias))
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "iMessage",
-            alias: Some(alias.clone()),
-            channel: crate::paced_channel::PacedChannel::wrap(
-                Arc::new(IMessageChannel::new(alias.clone(), peer_resolver)),
-                im,
-            ),
-        });
-    }
-
-    #[cfg(not(feature = "channel-imessage"))]
     if !config.channels.imessage.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -14468,35 +13298,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-matrix")]
-    for (alias, mx) in &config.channels.matrix {
-        if !active_channel_aliases.contains(&format!("matrix.{alias}")) {
-            continue;
-        }
-        if !mx.enabled {
-            continue;
-        }
-        match build_configured_matrix_channel(config_arc, &config, alias, mx) {
-            Ok(channel) => {
-                channels.push(ConfiguredChannel {
-                    display_name: "Matrix",
-                    alias: Some(alias.clone()),
-                    channel: crate::paced_channel::PacedChannel::wrap(Arc::new(channel), mx),
-                });
-            }
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                    ERROR,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                    "Matrix channel construction failed"
-                );
-            }
-        }
-    }
-
-    #[cfg(not(feature = "channel-matrix"))]
     if !config.channels.matrix.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -14509,56 +13310,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-signal")]
-    for (alias, sig) in &config.channels.signal {
-        if !active_channel_aliases.contains(&format!("signal.{alias}")) {
-            continue;
-        }
-        if !sig.enabled {
-            continue;
-        }
-        if !sig.has_required_credentials() {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                &format!(
-                    "Signal channel '{alias}' is enabled but missing required fields \
-                     (channels.signal.{alias}.http_url, channels.signal.{alias}.account); \
-                     skipping Signal to avoid a connect-fail crashloop."
-                )
-            );
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("signal", &alias))
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "Signal",
-            alias: Some(alias.clone()),
-            channel: crate::paced_channel::PacedChannel::wrap(
-                Arc::new(
-                    SignalChannel::new(
-                        sig.http_url.clone(),
-                        sig.account.clone(),
-                        sig.group_ids.clone(),
-                        sig.dm_only,
-                        alias.clone(),
-                        peer_resolver,
-                        sig.ignore_attachments,
-                        sig.ignore_stories,
-                    )
-                    .with_proxy_url(sig.proxy_url.clone())
-                    .with_approval_timeout_secs(sig.approval_timeout_secs),
-                ),
-                sig,
-            ),
-        });
-    }
-
-    #[cfg(not(feature = "channel-signal"))]
     if !config.channels.signal.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -14569,189 +13320,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(any(feature = "channel-whatsapp-cloud", feature = "whatsapp-web"))]
-    for (alias, wa) in &config.channels.whatsapp {
-        if !active_channel_aliases.contains(&format!("whatsapp.{alias}")) {
-            continue;
-        }
-        if !wa.enabled {
-            continue;
-        }
-        if wa.is_ambiguous_config() {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                "WhatsApp config has both phone_number_id (Cloud) and a Web selector (session_path/pair_phone/pair_code/ws_url/mode=personal) set; preferring Cloud API mode. Remove one selector to avoid ambiguity."
-            );
-        }
-        // Runtime negotiation: detect backend type from config
-        match wa.backend_type() {
-            #[cfg(feature = "channel-whatsapp-cloud")]
-            "cloud" => {
-                // Cloud API mode: requires phone_number_id, access_token, verify_token
-                if wa.is_cloud_config() {
-                    let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                        let cfg_arc = config_arc.clone();
-                        let alias = alias.clone();
-                        Arc::new(move || cfg_arc.read().channel_external_peers("whatsapp", &alias))
-                    };
-                    channels.push(ConfiguredChannel {
-                        display_name: "WhatsApp",
-                        alias: Some(alias.clone()),
-                        channel: crate::paced_channel::PacedChannel::wrap(
-                            Arc::new(
-                                WhatsAppChannel::new(
-                                    wa.access_token.clone().unwrap_or_default(),
-                                    wa.phone_number_id.clone().unwrap_or_default(),
-                                    wa.verify_token.clone().unwrap_or_default(),
-                                    alias.clone(),
-                                    peer_resolver,
-                                )
-                                .with_proxy_url(wa.proxy_url.clone())
-                                .with_dm_mention_patterns(wa.dm_mention_patterns.clone())
-                                .with_group_mention_patterns(wa.group_mention_patterns.clone())
-                                .with_approval_timeout_secs(wa.approval_timeout_secs),
-                            ),
-                            wa,
-                        ),
-                    });
-                } else {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        "WhatsApp Cloud API configured but missing required fields (phone_number_id, access_token, verify_token)"
-                    );
-                }
-                #[cfg(not(feature = "channel-whatsapp-cloud"))]
-                {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        "WhatsApp Cloud API backend requires 'channel-whatsapp-cloud' feature. Build/run with --features channel-whatsapp-cloud"
-                    );
-                }
-            }
-            #[cfg(not(feature = "channel-whatsapp-cloud"))]
-            "cloud" => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                    "WhatsApp Cloud API is configured but this build was compiled without `channel-whatsapp-cloud`; skipping WhatsApp Cloud."
-                );
-            }
-            "web" => {
-                // Web mode: requires session_path
-                #[cfg(feature = "whatsapp-web")]
-                if wa.is_web_config() {
-                    let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                        let cfg_arc = config_arc.clone();
-                        let alias = alias.clone();
-                        Arc::new(move || cfg_arc.read().channel_external_peers("whatsapp", &alias))
-                    };
-                    let workspace_dir = config.channel_workspace_dir(&format!("whatsapp.{alias}"));
-                    let allowed_groups_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                        let cfg_arc = config_arc.clone();
-                        let alias = alias.clone();
-                        Arc::new(move || {
-                            cfg_arc
-                                .read()
-                                .channels
-                                .whatsapp
-                                .get(&alias)
-                                .map(|wa| wa.allowed_groups.clone())
-                                .unwrap_or_default()
-                        })
-                    };
-                    channels.push(ConfiguredChannel {
-                        display_name: "WhatsApp",
-                        alias: Some(alias.clone()),
-                        channel: crate::paced_channel::PacedChannel::wrap(
-                            Arc::new(
-                                WhatsAppWebChannel::new(
-                                    wa,
-                                    alias.clone(),
-                                    peer_resolver,
-                                    allowed_groups_resolver,
-                                )
-                                .with_persistence_authority(authority.clone())
-                                .with_transcription_manager(
-                                    config.transcription.clone(),
-                                    resolved_transcription_manager(
-                                        &config,
-                                        &format!("whatsapp.{alias}"),
-                                    ),
-                                )
-                                .with_tts(&config)
-                                .with_workspace_dir(workspace_dir)
-                                .with_dm_mention_patterns(wa.dm_mention_patterns.clone())
-                                .with_group_mention_patterns(wa.group_mention_patterns.clone()),
-                            ),
-                            wa,
-                        ),
-                    });
-                } else {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        "WhatsApp Web configured but session_path not set"
-                    );
-                }
-                #[cfg(not(feature = "whatsapp-web"))]
-                {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                        "WhatsApp Web backend requires 'whatsapp-web' feature. Enable with: cargo build --features whatsapp-web"
-                    );
-                    eprintln!(
-                        "  ⚠ WhatsApp Web is configured but the 'whatsapp-web' feature is not compiled in."
-                    );
-                    eprintln!("    Rebuild with: cargo build --features whatsapp-web");
-                }
-            }
-            _ => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                    "WhatsApp config invalid: neither phone_number_id (Cloud API) nor session_path (Web) is set"
-                );
-            }
-        }
-    }
-
-    #[cfg(feature = "channel-linq")]
-    for (alias, lq) in &config.channels.linq {
-        if !active_channel_aliases.contains(&format!("linq.{alias}")) {
-            continue;
-        }
-        if !lq.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("linq", &alias))
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "Linq",
-            alias: Some(alias.clone()),
-            channel: Arc::new(LinqChannel::new(
-                lq.api_token.clone(),
-                lq.from_phone.clone(),
-                alias.clone(),
-                peer_resolver,
-            )),
-        });
-    }
-
-    #[cfg(not(feature = "channel-linq"))]
     if !config.channels.linq.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -14762,46 +13330,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-nextcloud")]
-    for (alias, nc) in &config.channels.nextcloud_talk {
-        if !active_channel_aliases.contains(&format!("nextcloud_talk.{alias}")) {
-            continue;
-        }
-        if !nc.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || {
-                cfg_arc
-                    .read()
-                    .channel_external_peers("nextcloud_talk", &alias)
-            })
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "Nextcloud Talk",
-            alias: Some(alias.clone()),
-            channel: Arc::new(NextcloudTalkChannel::new_with_proxy(
-                nc.base_url.clone(),
-                nc.resolve_bot_secret().unwrap_or_else(|e| {
-                    ::zeroclaw_log::record!(
-                        WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure),
-                        &e.to_string()
-                    );
-                    None
-                }),
-                nc.bot_name.clone().unwrap_or_default(),
-                alias.clone(),
-                peer_resolver,
-                nc.proxy_url.clone(),
-            )),
-        });
-    }
-
-    #[cfg(not(feature = "channel-nextcloud"))]
     if !config.channels.nextcloud_talk.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -14812,60 +13340,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-email")]
-    {
-        // Construct once and share across all email channel instances.
-        let auth_service = Arc::new(zeroclaw_providers::auth::AuthService::from_config(&config));
-
-        for (alias, email_cfg) in &config.channels.email {
-            if !active_channel_aliases.contains(&format!("email.{alias}")) {
-                continue;
-            }
-            if !email_cfg.enabled {
-                continue;
-            }
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("email", &alias))
-            };
-            let mut channel = EmailChannel::new(email_cfg.clone(), alias.clone(), peer_resolver);
-            if email_cfg.oauth2.is_some() {
-                channel = channel.with_auth_service(auth_service.clone());
-            }
-            channels.push(ConfiguredChannel {
-                display_name: "Email",
-                alias: Some(alias.clone()),
-                channel: Arc::new(channel),
-            });
-        }
-    }
-
-    #[cfg(feature = "channel-email")]
-    for (alias, gp_cfg) in &config.channels.gmail_push {
-        if !active_channel_aliases.contains(&format!("gmail_push.{alias}")) {
-            continue;
-        }
-        if !gp_cfg.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("gmail_push", &alias))
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "Gmail Push",
-            alias: Some(alias.clone()),
-            channel: Arc::new(GmailPushChannel::new(
-                gp_cfg.clone(),
-                alias.clone(),
-                peer_resolver,
-            )),
-        });
-    }
-
-    #[cfg(not(feature = "channel-email"))]
     if !config.channels.email.is_empty() || !config.channels.gmail_push.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -14876,40 +13350,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-irc")]
-    for (alias, irc) in &config.channels.irc {
-        if !active_channel_aliases.contains(&format!("irc.{alias}")) {
-            continue;
-        }
-        if !irc.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("irc", &alias))
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "IRC",
-            alias: Some(alias.clone()),
-            channel: Arc::new(IrcChannel::new(crate::irc::IrcChannelConfig {
-                server: irc.server.clone(),
-                port: irc.port,
-                nickname: irc.nickname.clone(),
-                username: irc.username.clone(),
-                channels: irc.channels.clone(),
-                alias: alias.clone(),
-                peer_resolver,
-                server_password: irc.server_password.clone(),
-                nickserv_password: irc.nickserv_password.clone(),
-                sasl_password: irc.sasl_password.clone(),
-                verify_tls: irc.verify_tls.unwrap_or(true),
-                mention_only: irc.mention_only,
-            })),
-        });
-    }
-
-    #[cfg(not(feature = "channel-irc"))]
     if !config.channels.irc.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -14920,61 +13360,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-amqp")]
-    for (alias, amqp) in &config.channels.amqp {
-        if !active_channel_aliases.contains(&format!("amqp.{alias}")) {
-            continue;
-        }
-        if !amqp.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("amqp", &alias))
-        };
-        let amqp_channel = match AmqpChannel::new(crate::amqp::AmqpChannelConfig {
-            amqp_url: amqp.amqp_url.clone(),
-            exchange: amqp.exchange.clone(),
-            routing_keys: amqp.routing_keys.clone(),
-            queue: amqp.queue.clone(),
-            ca_cert: amqp.ca_cert.clone(),
-            client_cert: amqp.client_cert.clone(),
-            client_key: amqp.client_key.clone(),
-            sender_label: amqp.sender_label.clone(),
-            content_template: amqp.content_template.clone(),
-            thread_id_field: amqp.thread_id_field.clone(),
-            durable_ack: amqp.durable_ack,
-            dispatch: amqp.dispatch,
-            engine: sop_engine.clone(),
-            audit: sop_audit.clone(),
-            driver_sink: sop_driver_sink.clone(),
-            alias: alias.clone(),
-            peer_resolver,
-        }) {
-            Ok(ch) => ch,
-            Err(err) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({
-                            "alias": alias,
-                            "error": err.to_string(),
-                        })),
-                    "skipping AMQP channel: SOP dispatch without engine/audit handles"
-                );
-                continue;
-            }
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "AMQP",
-            alias: Some(alias.clone()),
-            channel: Arc::new(amqp_channel),
-        });
-    }
-
-    #[cfg(not(feature = "channel-amqp"))]
     if !config.channels.amqp.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -14985,34 +13370,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-twitch")]
-    for (alias, tw) in &config.channels.twitch {
-        if !active_channel_aliases.contains(&format!("twitch.{alias}")) {
-            continue;
-        }
-        if !tw.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("twitch", &alias))
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "Twitch",
-            alias: Some(alias.clone()),
-            channel: Arc::new(TwitchChannel::new(
-                tw.bot_username.clone(),
-                tw.oauth_token.clone(),
-                tw.channels.clone(),
-                tw.mention_only,
-                alias.clone(),
-                peer_resolver,
-            )),
-        });
-    }
-
-    #[cfg(not(feature = "channel-twitch"))]
     if !config.channels.twitch.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -15023,39 +13380,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-lark")]
-    for (alias, lk) in &config.channels.lark {
-        if !active_channel_aliases.contains(&format!("lark.{alias}")) {
-            continue;
-        }
-        if !lk.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("lark", &alias))
-        };
-        let display_name = if lk.use_feishu { "Feishu" } else { "Lark" };
-        channels.push(ConfiguredChannel {
-            display_name,
-            alias: Some(alias.clone()),
-            channel: Arc::new(
-                LarkChannel::from_config(lk, alias.clone(), peer_resolver)
-                    .with_workspace_dir(config.channel_workspace_dir(&format!("lark.{alias}")))
-                    .with_approval_timeout_secs(lk.approval_timeout_secs)
-                    .with_per_user_session(lk.per_user_session)
-                    .with_ack_reactions(lk.ack_reactions.unwrap_or(config.channels.ack_reactions))
-                    .with_streaming(lk.stream_mode, lk.draft_update_interval_ms)
-                    .with_transcription_manager(
-                        config.transcription.clone(),
-                        resolved_transcription_manager(&config, &format!("lark.{alias}")),
-                    ),
-            ),
-        });
-    }
-
-    #[cfg(not(feature = "channel-lark"))]
     if !config.channels.lark.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -15065,47 +13389,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-line")]
-    for (alias, ln) in &config.channels.line {
-        if !active_channel_aliases.contains(&format!("line.{alias}")) {
-            continue;
-        }
-        if !ln.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("line", &alias))
-        };
-        let sender_name_resolver: Arc<dyn Fn() -> Option<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || {
-                cfg_arc
-                    .read()
-                    .channels
-                    .line
-                    .get(&alias)
-                    .and_then(|ln| ln.sender_name.clone())
-                    .filter(|s| !s.is_empty())
-            })
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "LINE",
-            alias: Some(alias.clone()),
-            channel: Arc::new(
-                LineChannel::from_config(ln, alias.clone(), peer_resolver, sender_name_resolver)
-                    .with_persistence_authority(authority.clone())
-                    .with_transcription_manager(
-                        config.transcription.clone(),
-                        resolved_transcription_manager(&config, &format!("line.{alias}")),
-                    ),
-            ),
-        });
-    }
-
-    #[cfg(not(feature = "channel-line"))]
     if !config.channels.line.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -15115,35 +13398,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-dingtalk")]
-    for (alias, dt) in &config.channels.dingtalk {
-        if !active_channel_aliases.contains(&format!("dingtalk.{alias}")) {
-            continue;
-        }
-        if !dt.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("dingtalk", &alias))
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "DingTalk",
-            alias: Some(alias.clone()),
-            channel: Arc::new(
-                DingTalkChannel::new(
-                    dt.client_id.clone(),
-                    dt.client_secret.clone(),
-                    alias.clone(),
-                    peer_resolver,
-                )
-                .with_proxy_url(dt.proxy_url.clone()),
-            ),
-        });
-    }
-
-    #[cfg(not(feature = "channel-dingtalk"))]
     if !config.channels.dingtalk.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -15154,40 +13408,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-qq")]
-    for (alias, qq) in &config.channels.qq {
-        if !active_channel_aliases.contains(&format!("qq.{alias}")) {
-            continue;
-        }
-        if !qq.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("qq", &alias))
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "QQ",
-            alias: Some(alias.clone()),
-            channel: Arc::new(
-                QQChannel::new(
-                    qq.app_id.clone(),
-                    qq.app_secret.clone(),
-                    alias.clone(),
-                    peer_resolver,
-                )
-                .with_workspace_dir(config.channel_workspace_dir(&format!("qq.{alias}")))
-                .with_proxy_url(qq.proxy_url.clone())
-                .with_transcription_manager(
-                    config.transcription.clone(),
-                    resolved_transcription_manager(&config, &format!("qq.{alias}")),
-                ),
-            ),
-        });
-    }
-
-    #[cfg(not(feature = "channel-qq"))]
     if !config.channels.qq.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -15198,31 +13418,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-twitter")]
-    for (alias, tw) in &config.channels.twitter {
-        if !active_channel_aliases.contains(&format!("twitter.{alias}")) {
-            continue;
-        }
-        if !tw.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("twitter", &alias))
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "X/Twitter",
-            alias: Some(alias.clone()),
-            channel: Arc::new(TwitterChannel::new(
-                tw.bearer_token.clone(),
-                alias.clone(),
-                peer_resolver,
-            )),
-        });
-    }
-
-    #[cfg(not(feature = "channel-twitter"))]
     if !config.channels.twitter.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -15233,41 +13428,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-git")]
-    for (alias, g) in &config.channels.git {
-        if !active_channel_aliases.contains(&format!("git.{alias}")) {
-            continue;
-        }
-        if !g.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("git", &alias))
-        };
-        match GitChannel::new(g.clone(), alias.clone(), peer_resolver) {
-            Ok(channel) => channels.push(ConfiguredChannel {
-                display_name: "Git",
-                alias: Some(alias.clone()),
-                channel: Arc::new(channel),
-            }),
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({
-                            "alias": alias,
-                            "error": e.to_string(),
-                        })),
-                    "Git channel alias misconfigured; skipping"
-                );
-            }
-        }
-    }
-
-    #[cfg(not(feature = "channel-git"))]
     if !config.channels.git.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -15278,33 +13438,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-mochat")]
-    for (alias, mc) in &config.channels.mochat {
-        if !active_channel_aliases.contains(&format!("mochat.{alias}")) {
-            continue;
-        }
-        if !mc.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("mochat", &alias))
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "Mochat",
-            alias: Some(alias.clone()),
-            channel: Arc::new(MochatChannel::new(
-                mc.api_url.clone(),
-                mc.api_token.clone(),
-                alias.clone(),
-                peer_resolver,
-                mc.poll_interval_secs,
-            )),
-        });
-    }
-
-    #[cfg(not(feature = "channel-mochat"))]
     if !config.channels.mochat.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -15315,31 +13448,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-wecom")]
-    for (alias, wc) in &config.channels.wecom {
-        if !active_channel_aliases.contains(&format!("wecom.{alias}")) {
-            continue;
-        }
-        if !wc.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("wecom", &alias))
-        };
-        channels.push(ConfiguredChannel {
-            display_name: "WeCom",
-            alias: Some(alias.clone()),
-            channel: Arc::new(WeComChannel::new(
-                wc.webhook_key.clone(),
-                alias.clone(),
-                peer_resolver,
-            )),
-        });
-    }
-
-    #[cfg(not(feature = "channel-wecom"))]
     if !config.channels.wecom.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -15350,57 +13458,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-wecom-ws")]
-    for (alias, wc_ws) in &config.channels.wecom_ws {
-        if !active_channel_aliases.contains(&format!("wecom_ws.{alias}"))
-            && !active_channel_aliases.contains(&format!("wecom-ws.{alias}"))
-        {
-            continue;
-        }
-        if !wc_ws.enabled {
-            continue;
-        }
-        let policy_resolver: Arc<dyn Fn() -> WeComWsRuntimePolicy + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            let snapshot = wc_ws.clone();
-            Arc::new(move || {
-                let config = cfg_arc.read();
-                let external_peers = wecom_ws_external_peers(&config, &alias);
-
-                if let Some(wc_ws) = config.channels.wecom_ws.get(&alias) {
-                    WeComWsRuntimePolicy::from_config(wc_ws, external_peers)
-                } else {
-                    WeComWsRuntimePolicy::from_config(&snapshot, external_peers)
-                }
-            })
-        };
-        match WeComWsChannel::new_with_alias(
-            wc_ws,
-            alias.clone(),
-            policy_resolver,
-            &config.channel_workspace_dir(&format!("wecom_ws.{alias}")),
-        ) {
-            Ok(channel) => channels.push(ConfiguredChannel {
-                display_name: "WeCom WebSocket",
-                alias: Some(alias.clone()),
-                channel: Arc::new(channel),
-            }),
-            Err(err) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({"error": format!("{err:#}")})),
-                    format!(
-                        "WeCom WebSocket channel configuration is invalid; skipping WeCom WebSocket {matrix_skip_context}"
-                    ),
-                );
-            }
-        }
-    }
-
-    #[cfg(not(feature = "channel-wecom-ws"))]
     if !config.channels.wecom_ws.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -15412,48 +13469,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-wechat")]
-    for (alias, wechat) in &config.channels.wechat {
-        if !active_channel_aliases.contains(&format!("wechat.{alias}")) {
-            continue;
-        }
-        if !wechat.enabled {
-            continue;
-        }
-        let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-            let cfg_arc = config_arc.clone();
-            let alias = alias.clone();
-            Arc::new(move || cfg_arc.read().channel_external_peers("wechat", &alias))
-        };
-        match WeChatChannel::new(
-            alias.clone(),
-            peer_resolver,
-            wechat.api_base_url.clone(),
-            wechat.cdn_base_url.clone(),
-            Some(WeChatChannel::resolve_state_dir(
-                wechat.state_dir.as_deref(),
-            )),
-        ) {
-            Ok(channel) => {
-                channels.push(ConfiguredChannel {
-                    display_name: "WeChat",
-                    alias: Some(alias.clone()),
-                    channel: Arc::new(
-                        channel
-                            .with_persistence_authority(authority.clone())
-                            .with_workspace_dir(
-                                config.channel_workspace_dir(&format!("wechat.{alias}")),
-                            ),
-                    ),
-                });
-            }
-            Err(err) => {
-                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"matrix_skip_context": matrix_skip_context, "err": err.to_string()})), "WeChat channel configuration is invalid; skipping WeChat");
-            }
-        }
-    }
-
-    #[cfg(not(feature = "channel-wechat"))]
     for alias in config.channels.wechat.keys() {
         if active_channel_aliases.contains(&format!("wechat.{alias}")) {
             ::zeroclaw_log::record!(
@@ -15466,22 +13481,6 @@ fn collect_configured_channels_with_authority(
         }
     }
 
-    #[cfg(feature = "channel-clawdtalk")]
-    for (alias, ct) in &config.channels.clawdtalk {
-        if !active_channel_aliases.contains(&format!("clawdtalk.{alias}")) {
-            continue;
-        }
-        if !ct.enabled {
-            continue;
-        }
-        channels.push(ConfiguredChannel {
-            display_name: "ClawdTalk",
-            alias: Some(alias.clone()),
-            channel: Arc::new(ClawdTalkChannel::new(alias.clone(), ct.clone())),
-        });
-    }
-
-    #[cfg(not(feature = "channel-clawdtalk"))]
     if !config.channels.clawdtalk.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -15492,38 +13491,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    // Notion database poller channel
-    #[cfg(feature = "channel-notion")]
-    if config.notion.enabled && !config.notion.database_id.trim().is_empty() {
-        let notion_api_key = config.notion.api_key.trim().to_string();
-        if notion_api_key.is_empty() {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                "Notion channel enabled but `notion.api_key` is unset. Set it via the schema-mirror grammar: \
-                 `ZEROCLAW_notion__api_key=...`."
-            );
-        } else {
-            channels.push(ConfiguredChannel {
-                display_name: "Notion",
-                alias: None,
-                channel: Arc::new(NotionChannel::new(
-                    "notion",
-                    notion_api_key,
-                    config.notion.database_id.clone(),
-                    config.notion.poll_interval_secs,
-                    config.notion.status_property.clone(),
-                    config.notion.input_property.clone(),
-                    config.notion.result_property.clone(),
-                    config.notion.max_concurrent,
-                    config.notion.recover_stale,
-                )),
-            });
-        }
-    }
-
-    #[cfg(not(feature = "channel-notion"))]
     if config.notion.enabled {
         ::zeroclaw_log::record!(
             WARN,
@@ -15534,32 +13501,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-reddit")]
-    for (alias, rd) in &config.channels.reddit {
-        if !active_channel_aliases.contains(&format!("reddit.{alias}")) {
-            continue;
-        }
-        if !rd.enabled {
-            continue;
-        }
-        let peer_resolver =
-            live_external_peer_resolver(Arc::clone(config_arc), "reddit", alias.clone());
-        channels.push(ConfiguredChannel {
-            display_name: "Reddit",
-            alias: Some(alias.clone()),
-            channel: Arc::new(RedditChannel::new(
-                alias.clone(),
-                rd.client_id.clone(),
-                rd.client_secret.clone(),
-                rd.refresh_token.clone(),
-                rd.username.clone(),
-                rd.subreddits.clone(),
-                peer_resolver,
-            )),
-        });
-    }
-
-    #[cfg(not(feature = "channel-reddit"))]
     if !config.channels.reddit.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -15570,29 +13511,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-bluesky")]
-    for (alias, bs) in &config.channels.bluesky {
-        if !active_channel_aliases.contains(&format!("bluesky.{alias}")) {
-            continue;
-        }
-        if !bs.enabled {
-            continue;
-        }
-        let peer_resolver =
-            live_external_peer_resolver(Arc::clone(config_arc), "bluesky", alias.clone());
-        channels.push(ConfiguredChannel {
-            display_name: "Bluesky",
-            alias: Some(alias.clone()),
-            channel: Arc::new(BlueskyChannel::new(
-                alias.clone(),
-                bs.handle.clone(),
-                bs.app_password.clone(),
-                peer_resolver,
-            )),
-        });
-    }
-
-    #[cfg(not(feature = "channel-bluesky"))]
     if !config.channels.bluesky.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -15644,36 +13562,6 @@ fn collect_configured_channels_with_authority(
         );
     }
 
-    #[cfg(feature = "channel-voice-call")]
-    for (alias, vc) in &config.channels.voice_call {
-        if !active_channel_aliases.contains(&format!("voice_call.{alias}")) {
-            continue;
-        }
-        if !vc.enabled {
-            continue;
-        }
-        if !vc.has_required_credentials() {
-            ::zeroclaw_log::record!(
-                WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                &format!(
-                    "Voice Call channel '{alias}' is enabled but missing required fields \
-                     (channels.voice_call.{alias}.account_id, channels.voice_call.{alias}.auth_token, \
-                     channels.voice_call.{alias}.from_number); skipping Voice Call to avoid a \
-                     connect-fail crashloop."
-                )
-            );
-            continue;
-        }
-        channels.push(ConfiguredChannel {
-            display_name: "Voice Call",
-            alias: Some(alias.clone()),
-            channel: Arc::new(VoiceCallChannel::new(alias.clone(), vc.clone())),
-        });
-    }
-
-    #[cfg(not(feature = "channel-voice-call"))]
     if !config.channels.voice_call.is_empty() {
         ::zeroclaw_log::record!(
             WARN,
@@ -15777,44 +13665,6 @@ pub async fn doctor_channels(config: Config) -> Result<()> {
     .await;
     append_configured_plugin_channels(&mut channels, plugin_channels);
 
-    #[cfg(feature = "channel-nostr")]
-    {
-        // Materialize the work list into owned values BEFORE any `.await`
-        // so the RwLockReadGuard is dropped before the async constructor
-        // runs (parking_lot guards are not Send).
-        let nostr_jobs: Vec<(String, String, Vec<String>)> = {
-            let config = config_arc.read();
-            // Share the same gate as the Discord/shared-collector path so
-            // theinvariant ("a disabled agent must not bring its
-            // bound channel online") is enforced uniformly — see the
-            // `ActiveChannelAliases::compute` constructor for details.
-            let active = ActiveChannelAliases::compute(&config);
-            config
-                .channels
-                .nostr
-                .iter()
-                .filter(|(alias, _)| active.contains(&format!("nostr.{alias}")))
-                .filter(|(_, ns)| ns.enabled)
-                .map(|(alias, ns)| (alias.clone(), ns.private_key.clone(), ns.relays.clone()))
-                .collect()
-        };
-        for (alias, private_key, relays) in nostr_jobs {
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                let cfg_arc = config_arc.clone();
-                let alias = alias.clone();
-                Arc::new(move || cfg_arc.read().channel_external_peers("nostr", &alias))
-            };
-            channels.push(ConfiguredChannel {
-                display_name: "Nostr",
-                alias: Some(alias.clone()),
-                channel: Arc::new(
-                    NostrChannel::new(&private_key, relays, alias, peer_resolver).await?,
-                ),
-            });
-        }
-    }
-
-    #[cfg(not(feature = "channel-nostr"))]
     {
         let config = config_arc.read();
         if !config.channels.nostr.is_empty() {
@@ -16815,37 +14665,6 @@ pub async fn start_channels_with_authority_and_plugin_webhooks(
                     sop_driver_sink.clone(),
                 );
 
-            #[cfg(feature = "channel-nostr")]
-            {
-                let active = ActiveChannelAliases::compute(&config);
-                // Materialize the work list into owned values BEFORE any
-                // `.await` so we don't hold any lock across the async
-                // constructor (parking_lot guards are not Send). Mirrors
-                // the same pattern in `doctor_channels`.
-                let nostr_jobs: Vec<(String, String, Vec<String>)> = config
-                    .channels
-                    .nostr
-                    .iter()
-                    .filter(|(alias, _)| active.contains(&format!("nostr.{alias}")))
-                    .filter(|(_, ns)| ns.enabled)
-                    .map(|(alias, ns)| (alias.clone(), ns.private_key.clone(), ns.relays.clone()))
-                    .collect();
-                for (alias, private_key, relays) in nostr_jobs {
-                    let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-                        let cfg_arc = config_arc.clone();
-                        let alias = alias.clone();
-                        Arc::new(move || cfg_arc.read().channel_external_peers("nostr", &alias))
-                    };
-                    configured_channels.push(ConfiguredChannel {
-                        display_name: "Nostr",
-                        alias: Some(alias.clone()),
-                        channel: Arc::new(
-                            NostrChannel::new(&private_key, relays, alias, peer_resolver).await?,
-                        ),
-                    });
-                }
-            }
-            #[cfg(not(feature = "channel-nostr"))]
             if !config.channels.nostr.is_empty() {
                 ::zeroclaw_log::record!(
                     WARN,
@@ -17318,199 +15137,21 @@ pub async fn deliver_announcement(
         "telegram" => {
             anyhow::bail!("Telegram channel requires the `channel-telegram` feature");
         }
-        #[cfg(feature = "channel-discord")]
-        "discord" => {
-            let dc = config
-                .channels
-                .discord
-                .get(alias)
-                .ok_or_else(not_configured)?;
-            let peers = config.channel_external_peers("discord", alias);
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> =
-                Arc::new(move || peers.clone());
-            let ch = DiscordChannel::new(
-                dc.bot_token.clone(),
-                dc.guild_ids.clone(),
-                alias,
-                peer_resolver,
-                dc.listen_to_bots,
-                dc.mention_only,
-            )
-            .with_channel_ids(dc.channel_ids.clone())
-            .with_workspace_dir(config.channel_workspace_dir(channel));
-            zeroclaw_api::channel::Channel::send(&ch, &make_msg(&safe_output)).await?;
-        }
-        #[cfg(not(feature = "channel-discord"))]
         "discord" => {
             anyhow::bail!("Discord channel requires the `channel-discord` feature");
         }
-        #[cfg(feature = "channel-slack")]
-        "slack" => {
-            let sl = config
-                .channels
-                .slack
-                .get(alias)
-                .ok_or_else(not_configured)?;
-            let peers = config.channel_external_peers("slack", alias);
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> =
-                Arc::new(move || peers.clone());
-            let bot_token = sl.resolved_bot_token().with_context(|| {
-                format!(
-                    "Slack channel '{alias}': bot_token is not set. Provide it in config \
-                     (channels.slack.{alias}.bot_token) or via the \
-                     ZEROCLAW_SLACK_BOT_TOKEN / SLACK_BOT_TOKEN environment variable."
-                )
-            })?;
-            let ch = SlackChannel::new(
-                bot_token,
-                sl.resolved_app_token(),
-                sl.channel_ids.clone(),
-                alias,
-                peer_resolver,
-            )
-            .with_workspace_dir(config.channel_workspace_dir(channel));
-            zeroclaw_api::channel::Channel::send(&ch, &make_msg(&safe_output)).await?;
-        }
-        #[cfg(not(feature = "channel-slack"))]
         "slack" => {
             anyhow::bail!("Slack channel requires the `channel-slack` feature");
         }
-        #[cfg(feature = "channel-signal")]
-        "signal" => {
-            let sg = config
-                .channels
-                .signal
-                .get(alias)
-                .ok_or_else(not_configured)?;
-            let peers = config.channel_external_peers("signal", alias);
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> =
-                Arc::new(move || peers.clone());
-            let ch = SignalChannel::new(
-                sg.http_url.clone(),
-                sg.account.clone(),
-                sg.group_ids.clone(),
-                sg.dm_only,
-                alias,
-                peer_resolver,
-                sg.ignore_attachments,
-                sg.ignore_stories,
-            );
-            zeroclaw_api::channel::Channel::send(&ch, &make_msg(&safe_output)).await?;
-        }
-        #[cfg(not(feature = "channel-signal"))]
         "signal" => {
             anyhow::bail!("Signal channel requires the `channel-signal` feature");
         }
-        #[cfg(feature = "channel-wechat")]
-        "wechat" => {
-            let wc = config
-                .channels
-                .wechat
-                .get(alias)
-                .ok_or_else(not_configured)?;
-            let peers = config.channel_external_peers("wechat", alias);
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> =
-                Arc::new(move || peers.clone());
-            let ch = WeChatChannel::new(
-                alias,
-                peer_resolver,
-                wc.api_base_url.clone(),
-                wc.cdn_base_url.clone(),
-                Some(WeChatChannel::resolve_state_dir(wc.state_dir.as_deref())),
-            )?
-            .with_workspace_dir(config.channel_workspace_dir(channel));
-            zeroclaw_api::channel::Channel::send(&ch, &make_msg(&safe_output)).await?;
-        }
-        #[cfg(not(feature = "channel-wechat"))]
         "wechat" => {
             anyhow::bail!("WeChat channel requires the `channel-wechat` feature");
         }
-        #[cfg(feature = "channel-qq")]
-        "qq" => {
-            let qq = config.channels.qq.get(alias).ok_or_else(not_configured)?;
-            // The listener collector skips a disabled alias, but cron and
-            // one-off delivery reach this arm without a live instance, so the
-            // off switch has to be honored here before the transport is built.
-            if !qq.enabled {
-                let message =
-                    format!("[channels.qq.{alias}] is disabled; set enabled = true to deliver");
-                ::zeroclaw_log::record!(
-                    ERROR,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                        .with_attrs(::serde_json::json!({"channel": format!("qq.{alias}")})),
-                    &message
-                );
-                anyhow::bail!("{message}");
-            }
-            let peers = config.channel_external_peers("qq", alias);
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> =
-                Arc::new(move || peers.clone());
-            let ch = QQChannel::new(
-                qq.app_id.clone(),
-                qq.app_secret.clone(),
-                alias,
-                peer_resolver,
-            )
-            .with_proxy_url(qq.proxy_url.clone());
-            zeroclaw_api::channel::Channel::send(&ch, &make_msg(&safe_output)).await?;
-        }
-        #[cfg(not(feature = "channel-qq"))]
         "qq" => {
             anyhow::bail!("QQ channel requires the `channel-qq` feature");
         }
-        #[cfg(feature = "channel-lark")]
-        "lark" | "feishu" => {
-            // [channels.lark.<alias>] is the single source of truth for both
-            // names (AGENTS.md). from_config selects the endpoint via
-            // use_feishu. Error text names the real config table, not the
-            // cron alias the user wrote.
-            let lk = config.channels.lark.get(alias).ok_or_else(|| {
-                ::zeroclaw_log::record!(
-                    ERROR,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure),
-                    &format!(
-                        "[channels.lark.{alias}] not configured (cron channel \"{channel_type}.{alias}\")"
-                    )
-                );
-                anyhow::Error::msg(format!(
-                    "[channels.lark.{alias}] not configured (cron channel \"{channel_type}.{alias}\")"
-                ))
-            })?;
-            // Asymmetric by design: "feishu"+use_feishu=false is a typo
-            // (hard fail). "lark"+use_feishu=true is a soft compat path
-            // (warn but still deliver via fallback construction).
-            if channel_type == "feishu" && !lk.use_feishu {
-                anyhow::bail!(
-                    "[channels.lark.{alias}] has use_feishu=false but cron channel=\"feishu.{alias}\"; \
-                     use channel=\"lark.{alias}\" or set use_feishu=true"
-                );
-            }
-            if channel_type == "lark" && lk.use_feishu {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
-                    &format!(
-                        "cron channel=\"lark.{alias}\" with [channels.lark.{alias}] use_feishu=true \
-                         falls back to one-shot channel construction; prefer channel=\"feishu.{alias}\" \
-                         to reuse the live Feishu handle from start_channels"
-                    )
-                );
-            }
-            let peers = config.channel_external_peers("lark", alias);
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> =
-                Arc::new(move || peers.clone());
-            let ch = LarkChannel::from_config(lk, alias, peer_resolver)
-                .with_workspace_dir(config.channel_workspace_dir(&format!("lark.{alias}")))
-                .with_approval_timeout_secs(lk.approval_timeout_secs)
-                .with_per_user_session(lk.per_user_session)
-                .with_ack_reactions(lk.ack_reactions.unwrap_or(config.channels.ack_reactions))
-                .with_streaming(lk.stream_mode, lk.draft_update_interval_ms);
-            zeroclaw_api::channel::Channel::send(&ch, &make_msg(&safe_output)).await?;
-        }
-        #[cfg(not(feature = "channel-lark"))]
         "lark" | "feishu" => {
             anyhow::bail!("Lark channel requires the `channel-lark` feature");
         }
@@ -17547,51 +15188,9 @@ pub async fn deliver_announcement(
                 .ok_or_else(not_configured)?;
             anyhow::bail!("wecom_ws channel is not connected");
         }
-        #[cfg(feature = "channel-email")]
-        "email" => {
-            let em = config
-                .channels
-                .email
-                .get(alias)
-                .ok_or_else(not_configured)?;
-            let peers = config.channel_external_peers("email", alias);
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> =
-                Arc::new(move || peers.clone());
-            let ch = EmailChannel::new(em.clone(), alias.to_string(), peer_resolver);
-            zeroclaw_api::channel::Channel::send(&ch, &make_msg(&safe_output)).await?;
-        }
-        #[cfg(not(feature = "channel-email"))]
         "email" => {
             anyhow::bail!("Email channel requires the `channel-email` feature");
         }
-        #[cfg(feature = "whatsapp-web")]
-        "whatsapp" | "whatsapp-web" | "whatsapp_web" => {
-            let wa = config
-                .channels
-                .whatsapp
-                .get(alias)
-                .ok_or_else(not_configured)?;
-            if !wa.is_web_config() {
-                anyhow::bail!(
-                    "WhatsApp channel send requires Web mode (set session_path, pair_phone, or mode = personal)"
-                );
-            }
-            let peers = config.channel_external_peers("whatsapp", alias);
-            let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> =
-                Arc::new(move || peers.clone());
-            let allowed_groups = wa.allowed_groups.clone();
-            let allowed_groups_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> =
-                Arc::new(move || allowed_groups.clone());
-            let ch = WhatsAppWebChannel::new(
-                wa,
-                alias.to_string(),
-                peer_resolver,
-                allowed_groups_resolver,
-            )
-            .with_workspace_dir(config.channel_workspace_dir(&format!("whatsapp.{alias}")));
-            zeroclaw_api::channel::Channel::send(&ch, &make_msg(&safe_output)).await?;
-        }
-        #[cfg(not(feature = "whatsapp-web"))]
         "whatsapp" | "whatsapp-web" | "whatsapp_web" => {
             anyhow::bail!("WhatsApp channel requires the `whatsapp-web` feature");
         }
@@ -19176,51 +16775,6 @@ pub(crate) mod tests {
     const ASSEMBLY_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
     use zeroclaw_runtime::agent::loop_::apply_policy_tool_filter;
     use zeroclaw_runtime::agent::loop_::build_tool_instructions;
-
-    #[cfg(feature = "channel-reddit")]
-    #[test]
-    fn reddit_peer_resolver_uses_the_production_alias() {
-        let config: Config = toml::from_str(
-            r#"
-            [peer_groups.ops]
-            channel = "reddit.ops"
-            external_peers = ["authorized-redditor"]
-
-            [peer_groups.other]
-            channel = "reddit.other"
-            external_peers = ["wrong-redditor"]
-            "#,
-        )
-        .expect("peer-group config should parse");
-        let resolver =
-            live_external_peer_resolver(Arc::new(RwLock::new(config)), "reddit", "ops".to_string());
-
-        assert_eq!(resolver(), vec!["authorized-redditor".to_string()]);
-    }
-
-    #[cfg(feature = "channel-bluesky")]
-    #[test]
-    fn bluesky_peer_resolver_uses_the_production_alias() {
-        let config: Config = toml::from_str(
-            r#"
-            [peer_groups.work]
-            channel = "bluesky.work"
-            external_peers = ["allowed.bsky.social"]
-
-            [peer_groups.other]
-            channel = "bluesky.other"
-            external_peers = ["wrong.bsky.social"]
-            "#,
-        )
-        .expect("peer-group config should parse");
-        let resolver = live_external_peer_resolver(
-            Arc::new(RwLock::new(config)),
-            "bluesky",
-            "work".to_string(),
-        );
-
-        assert_eq!(resolver(), vec!["allowed.bsky.social".to_string()]);
-    }
 
     fn source_block_after<'a>(
         source: &'a str,
@@ -22014,22 +19568,6 @@ temperature = 0.3
         assert_eq!(channel_message_timeout_budget_secs(300, 3), 900);
     }
 
-    #[cfg(feature = "channel-wechat")]
-    #[test]
-    fn wechat_resolve_state_dir_expands_home_prefix() {
-        use crate::wechat::WeChatChannel;
-
-        let expanded = WeChatChannel::resolve_state_dir(Some("~/wechat-state"));
-        assert!(!expanded.starts_with("~"));
-        assert!(expanded.ends_with("wechat-state"));
-
-        let absolute = WeChatChannel::resolve_state_dir(Some("/absolute/path"));
-        assert_eq!(absolute, PathBuf::from("/absolute/path"));
-
-        let relative = WeChatChannel::resolve_state_dir(Some("relative/path"));
-        assert_eq!(relative, PathBuf::from("relative/path"));
-    }
-
     #[test]
     fn parse_reply_intent_recognizes_reply_token() {
         assert!(matches!(
@@ -23898,47 +21436,6 @@ api_key = "anthropic-key"
         }
     }
 
-    #[cfg(feature = "channel-email")]
-    struct TransientErrorModelProvider;
-
-    #[cfg(feature = "channel-email")]
-    #[async_trait::async_trait]
-    impl ModelProvider for TransientErrorModelProvider {
-        async fn chat_with_system(
-            &self,
-            _system_prompt: Option<&str>,
-            _message: &str,
-            _model: &str,
-            _temperature: Option<f64>,
-        ) -> anyhow::Result<String> {
-            anyhow::bail!("503 service unavailable")
-        }
-
-        async fn chat_with_history(
-            &self,
-            _messages: &[ChatMessage],
-            _model: &str,
-            _temperature: Option<f64>,
-        ) -> anyhow::Result<String> {
-            anyhow::bail!("503 service unavailable")
-        }
-    }
-
-    #[cfg(feature = "channel-email")]
-    impl ::zeroclaw_api::attribution::Attributable for TransientErrorModelProvider {
-        fn role(&self) -> ::zeroclaw_api::attribution::Role {
-            ::zeroclaw_api::attribution::Role::Provider(
-                ::zeroclaw_api::attribution::ProviderKind::Model(
-                    ::zeroclaw_api::attribution::ModelProviderKind::Custom,
-                ),
-            )
-        }
-
-        fn alias(&self) -> &str {
-            "TransientErrorModelProvider"
-        }
-    }
-
     const TEST_PROVIDER_QUERY_SECRET: &str = "abc,def'ghi(jkl)";
 
     struct QuerySecretErrorModelProvider;
@@ -24097,59 +21594,6 @@ api_key = "anthropic-key"
         ) -> anyhow::Result<()> {
             Ok(())
         }
-    }
-
-    #[cfg(feature = "channel-email")]
-    #[derive(Default)]
-    struct ThreadingRecordingChannel {
-        sent_messages: tokio::sync::Mutex<Vec<SendMessage>>,
-    }
-
-    #[cfg(feature = "channel-email")]
-    impl ::zeroclaw_api::attribution::Attributable for ThreadingRecordingChannel {
-        fn role(&self) -> ::zeroclaw_api::attribution::Role {
-            ::zeroclaw_api::attribution::Role::Channel(
-                ::zeroclaw_api::attribution::ChannelKind::Email,
-            )
-        }
-
-        fn alias(&self) -> &str {
-            "test"
-        }
-    }
-
-    #[cfg(feature = "channel-email")]
-    #[async_trait::async_trait]
-    impl Channel for ThreadingRecordingChannel {
-        fn name(&self) -> &str {
-            "email"
-        }
-
-        async fn send(&self, message: &SendMessage) -> anyhow::Result<()> {
-            self.sent_messages.lock().await.push(message.clone());
-            Ok(())
-        }
-
-        async fn listen(
-            &self,
-            _tx: tokio::sync::mpsc::Sender<zeroclaw_api::channel::ChannelMessage>,
-        ) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[cfg(feature = "channel-email")]
-    fn email_wire(message: &SendMessage) -> String {
-        let channel = EmailChannel::new(
-            crate::email_channel::EmailConfig {
-                from_address: "bot@example.invalid".to_string(),
-                ..crate::email_channel::EmailConfig::default()
-            },
-            "test",
-            Arc::new(Vec::new),
-        );
-        String::from_utf8_lossy(&channel.build_email_message(message).unwrap().formatted())
-            .into_owned()
     }
 
     enum PendingApprovalOutcome {
@@ -25185,23 +22629,6 @@ api_key = "anthropic-key"
             security: Arc::new(SecurityPolicy::default()),
             sop_driver_sink: None,
         })
-    }
-
-    #[cfg(feature = "channel-matrix")]
-    pub(crate) async fn process_message_with_dummy_provider(
-        channel: Arc<dyn Channel>,
-        msg: zeroclaw_api::channel::ChannelMessage,
-        prompt_config: zeroclaw_config::schema::Config,
-    ) {
-        let runtime_ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
-            channel,
-            Arc::new(DummyModelProvider),
-            prompt_config,
-            zeroclaw_config::schema::AliasedAgentConfig::default(),
-            "test-provider",
-            None,
-        );
-        process_channel_message(runtime_ctx, msg, CancellationToken::new()).await;
     }
 
     fn test_runtime_ctx_with_observer(
@@ -43149,178 +40576,6 @@ BTC is currently around $65,000 based on latest tool output."#
         );
     }
 
-    #[cfg(feature = "channel-email")]
-    fn threaded_email_message(content: &str) -> ChannelMessage {
-        ChannelMessage {
-            id: "current@example.invalid".to_string(),
-            sender: "sender@example.invalid".to_string(),
-            reply_target: "sender@example.invalid".to_string(),
-            channel: "email".to_string(),
-            channel_alias: Some("test".to_string()),
-            content: content.to_string(),
-            subject: Some("Thread subject".to_string()),
-            references: vec![
-                "root@example.invalid".to_string(),
-                "parent@example.invalid".to_string(),
-            ],
-            ..ChannelMessage::default()
-        }
-    }
-
-    #[cfg(feature = "channel-email")]
-    fn assert_full_email_reply_chain(message: &SendMessage) {
-        assert_eq!(
-            message.in_reply_to.as_deref(),
-            Some("current@example.invalid")
-        );
-        assert_eq!(
-            message.references,
-            [
-                "root@example.invalid",
-                "parent@example.invalid",
-                "current@example.invalid"
-            ]
-        );
-        let wire = email_wire(message);
-        let unfolded_wire = wire.replace("\r\n ", " ");
-        assert!(
-            wire.contains("In-Reply-To: <current@example.invalid>"),
-            "runtime response lost its immediate parent on the wire:\n{wire}"
-        );
-        assert!(
-            unfolded_wire.contains(
-                "References: <root@example.invalid> <parent@example.invalid> <current@example.invalid>"
-            ),
-            "runtime response lost its References ancestry on the wire:\n{wire}"
-        );
-    }
-
-    #[cfg(feature = "channel-email")]
-    #[tokio::test]
-    async fn runtime_command_email_reply_preserves_full_references_chain() {
-        let channel_impl = Arc::new(ThreadingRecordingChannel::default());
-        let channel: Arc<dyn Channel> = channel_impl.clone();
-        let ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
-            channel,
-            Arc::new(DummyModelProvider),
-            zeroclaw_config::schema::Config::default(),
-            zeroclaw_config::schema::AliasedAgentConfig::default(),
-            "test-provider",
-            None,
-        );
-
-        let handled = handle_runtime_command_if_needed(
-            ctx.as_ref(),
-            &threaded_email_message("/new"),
-            Some(&(channel_impl.clone() as Arc<dyn Channel>)),
-        )
-        .await;
-
-        assert!(handled);
-        let sent = channel_impl.sent_messages.lock().await;
-        assert_eq!(sent.len(), 1);
-        assert_full_email_reply_chain(&sent[0]);
-    }
-
-    #[cfg(feature = "channel-email")]
-    #[tokio::test]
-    async fn llm_error_email_reply_preserves_full_references_chain() {
-        let channel_impl = Arc::new(ThreadingRecordingChannel::default());
-        let channel: Arc<dyn Channel> = channel_impl.clone();
-        let ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
-            channel,
-            Arc::new(FormatErrorModelProvider),
-            zeroclaw_config::schema::Config::default(),
-            zeroclaw_config::schema::AliasedAgentConfig::default(),
-            "test-provider",
-            None,
-        );
-
-        process_channel_message(
-            ctx,
-            threaded_email_message("trigger format error"),
-            CancellationToken::new(),
-        )
-        .await;
-
-        let sent = channel_impl.sent_messages.lock().await;
-        assert_eq!(sent.len(), 1);
-        assert_full_email_reply_chain(&sent[0]);
-    }
-
-    #[cfg(feature = "channel-email")]
-    #[tokio::test]
-    async fn transient_error_email_reply_preserves_full_references_chain() {
-        let channel_impl = Arc::new(ThreadingRecordingChannel::default());
-        let channel: Arc<dyn Channel> = channel_impl.clone();
-        let mut ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
-            channel,
-            Arc::new(TransientErrorModelProvider),
-            zeroclaw_config::schema::Config::default(),
-            zeroclaw_config::schema::AliasedAgentConfig::default(),
-            "test-provider",
-            None,
-        );
-        Arc::get_mut(&mut ctx)
-            .expect("test owns the only runtime context handle")
-            .reliability = Arc::new(zeroclaw_config::schema::ReliabilityConfig {
-            provider_retries: 0,
-            provider_backoff_ms: 0,
-            ..zeroclaw_config::schema::ReliabilityConfig::default()
-        });
-
-        process_channel_message(
-            ctx,
-            threaded_email_message("trigger transient error"),
-            CancellationToken::new(),
-        )
-        .await;
-
-        let sent = channel_impl.sent_messages.lock().await;
-        assert_eq!(sent.len(), 1);
-        assert_full_email_reply_chain(&sent[0]);
-    }
-
-    #[cfg(feature = "channel-email")]
-    #[tokio::test]
-    async fn timeout_email_reply_preserves_full_references_chain() {
-        let channel_impl = Arc::new(ThreadingRecordingChannel::default());
-        let channel: Arc<dyn Channel> = channel_impl.clone();
-        let mut ctx = test_runtime_ctx_with_config_agent_and_provider_ref(
-            channel,
-            Arc::new(SlowModelProvider {
-                delay: Duration::from_secs(1),
-            }),
-            zeroclaw_config::schema::Config::default(),
-            zeroclaw_config::schema::AliasedAgentConfig::default(),
-            "test-provider",
-            None,
-        );
-        Arc::get_mut(&mut ctx)
-            .expect("test owns the only runtime context handle")
-            .message_timeout_secs = 0;
-
-        process_channel_message(
-            ctx,
-            threaded_email_message("trigger timeout"),
-            CancellationToken::new(),
-        )
-        .await;
-
-        let sent = channel_impl.sent_messages.lock().await;
-        assert_eq!(sent.len(), 1);
-        assert_full_email_reply_chain(&sent[0]);
-    }
-
-    #[cfg(feature = "channel-email")]
-    #[test]
-    fn stop_email_reply_preserves_full_references_chain() {
-        let message = threaded_email_message("/stop");
-        let reply = stop_reply_message(&message, "stop requested");
-
-        assert_full_email_reply_chain(&reply);
-    }
-
     #[tokio::test]
     async fn dispatch_agent_scope_rejects_when_no_peer_groups_configured() {
         // Default config (no peer_groups) — every sender must be denied.
@@ -45846,30 +43101,6 @@ This is an example JSON object for profile settings."#;
         assert_eq!(state, ChannelHealthState::Timeout);
     }
 
-    #[cfg(feature = "channel-matrix")]
-    #[test]
-    fn matrix_state_dir_is_distinct_per_alias() {
-        // Regression: two [channels.matrix.<alias>] blocks previously resolved
-        // to the same <config>/state/matrix dir, so the second listener to
-        // start restored the first's session.json and ran as the wrong Matrix
-        // account. The alias component must keep them separate.
-        let config_path = std::path::Path::new("/home/u/.zeroclaw/config.toml");
-        let clamps = matrix_state_dir(config_path, "clamps");
-        let bender = matrix_state_dir(config_path, "bender");
-        assert_ne!(
-            clamps, bender,
-            "distinct matrix aliases must not share a state dir"
-        );
-        assert_eq!(
-            clamps,
-            std::path::Path::new("/home/u/.zeroclaw/state/matrix/clamps")
-        );
-        assert_eq!(
-            bender,
-            std::path::Path::new("/home/u/.zeroclaw/state/matrix/bender")
-        );
-    }
-
     #[test]
     fn compiled_channel_families_have_listener_registration_or_explicit_runtime_ownership() {
         let source = include_str!("mod.rs");
@@ -45997,485 +43228,6 @@ This is an example JSON object for profile settings."#;
     }
 
     #[test]
-    fn compiled_channel_listener_guard_distinguishes_whatsapp_backends() {
-        const PUSH_MARKER: &str = "channels.push(ConfiguredChannel {";
-
-        let source = include_str!("mod.rs");
-        let whatsapp_loop = source_block_after_channel_loop(source, "whatsapp")
-            .expect("WhatsApp listener loop must remain identifiable");
-        assert!(whatsapp_listener_registration_in_loop(
-            whatsapp_loop,
-            "whatsapp"
-        ));
-        assert!(whatsapp_listener_registration_in_loop(
-            whatsapp_loop,
-            "whatsapp-web"
-        ));
-
-        let without_backend_push = |key: &str| {
-            let (branch_start_marker, branch_end_marker) =
-                whatsapp_listener_branch_markers(key).expect("WhatsApp backend key must be known");
-            let branch_start = whatsapp_loop
-                .find(branch_start_marker)
-                .expect("WhatsApp backend branch must remain identifiable")
-                + branch_start_marker.len();
-            let branch_end = branch_start
-                + whatsapp_loop[branch_start..]
-                    .find(branch_end_marker)
-                    .expect("WhatsApp backend branch boundary must remain identifiable");
-            let relative_push = whatsapp_loop[branch_start..branch_end]
-                .find(PUSH_MARKER)
-                .expect("WhatsApp backend branch must register a channel");
-            let push_start = branch_start + relative_push;
-            let mut mutated = whatsapp_loop.to_string();
-            mutated.replace_range(push_start..push_start + PUSH_MARKER.len(), "removed_push({");
-            mutated
-        };
-
-        let cloud_removed = without_backend_push("whatsapp");
-        assert!(!whatsapp_listener_registration_in_loop(
-            &cloud_removed,
-            "whatsapp"
-        ));
-        assert!(whatsapp_listener_registration_in_loop(
-            &cloud_removed,
-            "whatsapp-web"
-        ));
-
-        let web_removed = without_backend_push("whatsapp-web");
-        assert!(whatsapp_listener_registration_in_loop(
-            &web_removed,
-            "whatsapp"
-        ));
-        assert!(!whatsapp_listener_registration_in_loop(
-            &web_removed,
-            "whatsapp-web"
-        ));
-    }
-
-    #[cfg(feature = "channel-mattermost")]
-    #[test]
-    fn collect_configured_channels_includes_mattermost_when_configured() {
-        let mut config = Config::default();
-        config.channels.mattermost.insert(
-            "default".to_string(),
-            zeroclaw_config::schema::MattermostConfig {
-                enabled: true,
-                url: "https://mattermost.example.com".to_string(),
-                bot_token: Some("test-token".to_string()),
-                login_id: None,
-                password: None,
-                channel_ids: vec!["channel-1".to_string()],
-                team_ids: vec![],
-                discover_dms: None,
-                thread_replies: Some(true),
-                mention_only: Some(false),
-                interrupt_on_new_message: false,
-                proxy_url: None,
-                listen_mode: zeroclaw_config::schema::MattermostListenMode::default(),
-                excluded_tools: vec![],
-                reply_min_interval_secs: 0,
-                reply_queue_depth_max: 0,
-                approval_timeout_secs: 300,
-                purpose_as_instructions: false,
-            },
-        );
-        // A channel is only collected when an enabled agent references it.
-        config.agents.insert(
-            "mattermost-default".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                channels: vec!["mattermost.default".into()],
-                ..Default::default()
-            },
-        );
-
-        let config_arc = Arc::new(RwLock::new(config));
-        let channels = collect_configured_channels(&config_arc, "test", &[], None, None, None);
-
-        assert!(
-            channels
-                .iter()
-                .any(|entry| entry.display_name == "Mattermost")
-        );
-        assert!(
-            channels
-                .iter()
-                .any(|entry| entry.channel.name() == "mattermost")
-        );
-    }
-
-    #[cfg(feature = "channel-mattermost")]
-    #[test]
-    fn collect_configured_channels_falls_back_when_agent_bindings_missing() {
-        let mut config = Config::default();
-        config.channels.mattermost.insert(
-            "default".to_string(),
-            zeroclaw_config::schema::MattermostConfig {
-                enabled: true,
-                url: "https://mattermost.example.com".to_string(),
-                bot_token: Some("test-token".to_string()),
-                login_id: None,
-                password: None,
-                channel_ids: vec!["channel-1".to_string()],
-                team_ids: vec![],
-                discover_dms: None,
-                thread_replies: Some(true),
-                mention_only: Some(false),
-                interrupt_on_new_message: false,
-                proxy_url: None,
-                listen_mode: zeroclaw_config::schema::MattermostListenMode::default(),
-                excluded_tools: vec![],
-                reply_min_interval_secs: 0,
-                reply_queue_depth_max: 0,
-                approval_timeout_secs: 300,
-                purpose_as_instructions: false,
-            },
-        );
-        config.agents.clear();
-        config.agents.insert(
-            "legacy".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: true,
-                channels: vec![],
-                ..Default::default()
-            },
-        );
-
-        let config_arc = Arc::new(RwLock::new(config));
-        let channels = collect_configured_channels(&config_arc, "test", &[], None, None, None);
-
-        assert!(
-            channels
-                .iter()
-                .any(|entry| entry.display_name == "Mattermost"),
-            "enabled channels should still load when no enabled agent declares channel bindings"
-        );
-    }
-
-    #[cfg(feature = "channel-discord")]
-    #[test]
-    fn collect_configured_channels_skips_channel_when_only_owner_is_disabled() {
-        // T1 — the bug path: an explicit binding exists, but the
-        // owner agent is `enabled = false`. Legacy fallback must NOT
-        // bring the channel online.
-        let mut config = Config::default();
-        config.agents.clear();
-        config.agents.insert(
-            "disco".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: false,
-                channels: vec!["discord.default".into()],
-                ..Default::default()
-            },
-        );
-        config.channels.discord.insert(
-            "default".to_string(),
-            zeroclaw_config::schema::DiscordConfig {
-                enabled: true,
-                bot_token: "test-token".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let config_arc = Arc::new(RwLock::new(config));
-        let channels = collect_configured_channels(&config_arc, "test", &[], None, None, None);
-
-        assert!(
-            !channels.iter().any(|entry| entry.display_name == "Discord"),
-            "disabled-owner channel must not be collected (#8013)"
-        );
-    }
-
-    #[cfg(feature = "channel-discord")]
-    #[test]
-    fn collect_configured_channels_legacy_accepts_all_when_no_bindings_declared() {
-        let mut config = Config::default();
-        config.agents.clear();
-        config.agents.insert(
-            "legacy".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: true,
-                channels: vec![],
-                ..Default::default()
-            },
-        );
-        config.channels.discord.insert(
-            "default".to_string(),
-            zeroclaw_config::schema::DiscordConfig {
-                enabled: true,
-                bot_token: "test-token".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let config_arc = Arc::new(RwLock::new(config));
-        let channels = collect_configured_channels(&config_arc, "test", &[], None, None, None);
-
-        assert!(
-            channels.iter().any(|entry| entry.display_name == "Discord"),
-            "no-bindings-anywhere must still trigger the legacy fallback"
-        );
-    }
-
-    #[cfg(feature = "channel-discord")]
-    #[test]
-    fn collect_configured_channels_respects_mixed_enabled_and_disabled_owners() {
-        // T3 — two bound channels, one owner enabled (keeper) and one
-        // owner disabled (loser). Only the enabled owner's channel
-        // comes online.
-        let mut config = Config::default();
-        config.agents.clear();
-        config.agents.insert(
-            "keeper".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: true,
-                channels: vec!["discord.a".into()],
-                ..Default::default()
-            },
-        );
-        config.agents.insert(
-            "loser".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: false,
-                channels: vec!["discord.b".into()],
-                ..Default::default()
-            },
-        );
-        config.channels.discord.insert(
-            "a".to_string(),
-            zeroclaw_config::schema::DiscordConfig {
-                enabled: true,
-                bot_token: "token-a".to_string(),
-                ..Default::default()
-            },
-        );
-        config.channels.discord.insert(
-            "b".to_string(),
-            zeroclaw_config::schema::DiscordConfig {
-                enabled: true,
-                bot_token: "token-b".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let config_arc = Arc::new(RwLock::new(config));
-        let channels = collect_configured_channels(&config_arc, "test", &[], None, None, None);
-
-        let discord_channels: Vec<_> = channels
-            .iter()
-            .filter(|entry| entry.display_name == "Discord")
-            .collect();
-        assert_eq!(
-            discord_channels.len(),
-            1,
-            "exactly one Discord channel should be active when only one owner is enabled"
-        );
-        assert_eq!(
-            discord_channels[0].alias.as_deref(),
-            Some("a"),
-            "only the enabled owner's channel should be active"
-        );
-    }
-
-    #[cfg(feature = "channel-discord")]
-    #[test]
-    fn approval_route_collects_unowned_channel_without_agent_dispatch() {
-        let mut config = Config::default();
-        config.agents.clear();
-        config.agents.insert(
-            "worker".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: true,
-                channels: vec!["discord.worker".into()],
-                ..Default::default()
-            },
-        );
-        config.channels.discord.insert(
-            "worker".to_string(),
-            zeroclaw_config::schema::DiscordConfig {
-                enabled: true,
-                bot_token: "worker-token".to_string(),
-                ..Default::default()
-            },
-        );
-        config.channels.discord.insert(
-            "ops".to_string(),
-            zeroclaw_config::schema::DiscordConfig {
-                enabled: true,
-                bot_token: "ops-token".to_string(),
-                ..Default::default()
-            },
-        );
-        config.sop.approval.policies.insert(
-            "prod".to_string(),
-            zeroclaw_config::schema::ApprovalPolicyConfig {
-                request_route: Some("discord.ops:room-1".to_string()),
-                escalation_route: Some("discord.ops:room-2".to_string()),
-                ..Default::default()
-            },
-        );
-
-        let config_arc = Arc::new(RwLock::new(config.clone()));
-        let configured = collect_configured_channels(&config_arc, "test", &[], None, None, None);
-        let channel_map = configured_channel_map(&configured);
-        assert!(
-            channel_map.contains_key("discord.ops"),
-            "the approval route's configured channel must be live for adapter delivery"
-        );
-
-        let collected_keys: Vec<String> = channel_map.keys().cloned().collect();
-        let owners = build_owner_by_channel_key(&config, &["worker".to_string()], &collected_keys);
-        assert!(
-            !owners.contains_key("discord.ops"),
-            "approval-route liveness must not create an agent owner"
-        );
-
-        let worker_ctx = router_test_ctx();
-        let router = AgentRouter::multi(
-            HashMap::from([("worker".to_string(), worker_ctx)]),
-            owners,
-            None,
-            None,
-            None,
-        );
-        assert!(
-            router
-                .resolve(&channel_message("discord", Some("ops")))
-                .is_none(),
-            "ordinary traffic on the approval-only alias must not reach the worker"
-        );
-    }
-
-    #[cfg(feature = "channel-discord")]
-    #[test]
-    fn risk_profile_approval_route_collects_unowned_channel_without_agent_dispatch() {
-        let mut config = Config::default();
-        config.agents.clear();
-        config.agents.insert(
-            "worker".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: true,
-                channels: vec!["discord.worker".into()],
-                risk_profile: "supervised".into(),
-                ..Default::default()
-            },
-        );
-        config.channels.discord.insert(
-            "worker".to_string(),
-            zeroclaw_config::schema::DiscordConfig {
-                enabled: true,
-                bot_token: "worker-token".to_string(),
-                ..Default::default()
-            },
-        );
-        config.channels.discord.insert(
-            "ops".to_string(),
-            zeroclaw_config::schema::DiscordConfig {
-                enabled: true,
-                bot_token: "ops-token".to_string(),
-                ..Default::default()
-            },
-        );
-        config.risk_profiles.insert(
-            "supervised".to_string(),
-            zeroclaw_config::schema::RiskProfileConfig {
-                approval_route: Some(zeroclaw_config::autonomy::ApprovalRoute {
-                    approver_channel: "discord.ops".to_string(),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-        );
-
-        let active = ActiveChannelAliases::compute(&config);
-        assert!(
-            active.contains("discord.ops"),
-            "a risk-profile approval route must activate its unowned alias"
-        );
-
-        let config_arc = Arc::new(RwLock::new(config.clone()));
-        let configured = collect_configured_channels(&config_arc, "test", &[], None, None, None);
-        let channel_map = configured_channel_map(&configured);
-        assert!(
-            channel_map.contains_key("discord.ops"),
-            "the risk-profile approver must be available in the routed channel registry"
-        );
-
-        let collected_keys: Vec<String> = channel_map.keys().cloned().collect();
-        let owners = build_owner_by_channel_key(&config, &["worker".to_string()], &collected_keys);
-        assert!(
-            !owners.contains_key("discord.ops"),
-            "approval-route liveness must not create an agent owner"
-        );
-
-        let worker_ctx = router_test_ctx();
-        let router = AgentRouter::multi(
-            HashMap::from([("worker".to_string(), worker_ctx)]),
-            owners,
-            None,
-            None,
-            None,
-        );
-        assert!(
-            router
-                .resolve(&channel_message("discord", Some("ops")))
-                .is_none(),
-            "ordinary traffic on the approval-only alias must not reach the worker"
-        );
-    }
-
-    #[cfg(feature = "channel-discord")]
-    #[test]
-    fn bare_approval_route_collects_the_sole_enabled_alias() {
-        let mut config = Config::default();
-        config.agents.clear();
-        config.agents.insert(
-            "worker".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: true,
-                channels: vec!["discord.worker".into()],
-                ..Default::default()
-            },
-        );
-        config.channels.discord.insert(
-            "worker".to_string(),
-            zeroclaw_config::schema::DiscordConfig {
-                enabled: false,
-                bot_token: "worker-token".to_string(),
-                ..Default::default()
-            },
-        );
-        config.channels.discord.insert(
-            "ops".to_string(),
-            zeroclaw_config::schema::DiscordConfig {
-                enabled: true,
-                bot_token: "ops-token".to_string(),
-                ..Default::default()
-            },
-        );
-        config.sop.approval.policies.insert(
-            "prod".to_string(),
-            zeroclaw_config::schema::ApprovalPolicyConfig {
-                request_route: Some("discord:room-1".to_string()),
-                ..Default::default()
-            },
-        );
-
-        let config_arc = Arc::new(RwLock::new(config));
-        let configured = collect_configured_channels(&config_arc, "test", &[], None, None, None);
-        let channel_map = configured_channel_map(&configured);
-        assert!(channel_map.contains_key("discord.ops"));
-        assert!(
-            channel_map.contains_key("discord"),
-            "the route adapter can resolve the bare singleton key"
-        );
-        assert!(
-            !channel_map.contains_key("discord.worker"),
-            "a disabled channel must not be revived just because a sibling route is active"
-        );
-    }
-
-    #[test]
     fn build_owner_by_channel_key_skips_disabled_owners() {
         let mut config = Config::default();
         config.agents.clear();
@@ -46496,382 +43248,6 @@ This is an example JSON object for profile settings."#;
             owners.is_empty(),
             "disabled-owner channels must not be rebound to any fallback agent (#8013)"
         );
-    }
-
-    /// Helper: returns the set of `nostr.<alias>` references that pass
-    /// the unified `ActiveChannelAliases` gate AND the channel-level
-    /// `enabled = true` check, in the same way `doctor_channels` and
-    /// `start_channels` use it after Phase 2.
-    #[cfg(feature = "channel-nostr")]
-    fn resolve_nostr_active(config: &Config) -> Vec<String> {
-        let active = ActiveChannelAliases::compute(config);
-        config
-            .channels
-            .nostr
-            .iter()
-            .filter(|(alias, _)| active.contains(&format!("nostr.{alias}")))
-            .filter(|(_, ns)| ns.enabled)
-            .map(|(alias, _)| format!("nostr.{alias}"))
-            .collect()
-    }
-
-    #[cfg(feature = "channel-nostr")]
-    #[test]
-    fn doctor_channels_skips_nostr_when_only_owner_is_disabled() {
-        // T5 — thebug path on the Nostr side. An explicit
-        // `nostr.default` binding exists, but the owner agent is
-        // `enabled = false`. Both the doctor and startup Nostr blocks
-        // must NOT bring this channel online.
-        let mut config = Config::default();
-        config.agents.clear();
-        config.agents.insert(
-            "disabled_owner".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: false,
-                channels: vec!["nostr.default".into()],
-                ..Default::default()
-            },
-        );
-        config.channels.nostr.insert(
-            "default".to_string(),
-            zeroclaw_config::schema::NostrConfig {
-                enabled: true,
-                private_key: "nsec1test".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let active = resolve_nostr_active(&config);
-        assert!(
-            active.is_empty(),
-            "Nostr channel with only a disabled owner must not pass the gate (#8013): got {:?}",
-            active
-        );
-    }
-
-    #[cfg(feature = "channel-nostr")]
-    #[test]
-    fn start_channels_legacy_includes_nostr_when_no_bindings_declared() {
-        // T6 — the legacy fallback on the Nostr side. No agent declares
-        // any channel binding, so the `all_known_bindings.is_empty()`
-        // branch fires and every enabled Nostr alias is accepted. This
-        // pins parity with the Discord T2 behavior.
-        let mut config = Config::default();
-        config.agents.clear();
-        config.agents.insert(
-            "legacy".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: true,
-                channels: vec![],
-                ..Default::default()
-            },
-        );
-        config.channels.nostr.insert(
-            "legacy_alias".to_string(),
-            zeroclaw_config::schema::NostrConfig {
-                enabled: true,
-                private_key: "nsec1test".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let active = resolve_nostr_active(&config);
-        assert_eq!(
-            active,
-            vec!["nostr.legacy_alias".to_string()],
-            "Legacy fallback must keep Nostr active when no agent declares bindings"
-        );
-    }
-
-    #[cfg(feature = "channel-nostr")]
-    #[test]
-    fn start_channels_nostr_skips_channel_level_disabled() {
-        // T7 — channel-level `enabled = false` still skips even when
-        // the agent binding path is satisfied. Pins the channel-level
-        // half of the gate that was previously missing in the
-        // `start_channels` Nostr block.
-        let mut config = Config::default();
-        config.agents.clear();
-        config.agents.insert(
-            "owner".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: true,
-                channels: vec!["nostr.muted".into()],
-                ..Default::default()
-            },
-        );
-        config.channels.nostr.insert(
-            "muted".to_string(),
-            zeroclaw_config::schema::NostrConfig {
-                enabled: false, // channel-level off
-                private_key: "nsec1test".to_string(),
-                ..Default::default()
-            },
-        );
-
-        let active = resolve_nostr_active(&config);
-        assert!(
-            active.is_empty(),
-            "Nostr channel with `enabled = false` must not start regardless of agent binding"
-        );
-    }
-
-    #[cfg(feature = "channel-email")]
-    #[test]
-    fn collect_configured_channels_skips_unreferenced_email() {
-        let mut config = Config::default();
-        config.channels.email.insert(
-            "default".to_string(),
-            zeroclaw_config::scattered_types::EmailConfig::default(),
-        );
-
-        let config_arc = Arc::new(RwLock::new(config));
-        let channels = collect_configured_channels(&config_arc, "test", &[], None, None, None);
-        assert!(
-            !channels.iter().any(|entry| entry.display_name == "Email"),
-            "email with no agent reference should not be collected"
-        );
-    }
-
-    #[cfg(feature = "channel-voice-call")]
-    #[test]
-    fn collect_configured_channels_skips_unreferenced_voice_call() {
-        let mut config = Config::default();
-        config.channels.voice_call.insert(
-            "default".to_string(),
-            zeroclaw_config::scattered_types::VoiceCallConfig::default(),
-        );
-
-        let config_arc = Arc::new(RwLock::new(config));
-        let channels = collect_configured_channels(&config_arc, "test", &[], None, None, None);
-        assert!(
-            !channels
-                .iter()
-                .any(|entry| entry.display_name == "Voice Call"),
-            "voice-call with no agent reference should not be collected"
-        );
-    }
-
-    // Regression: an enabled Signal or Voice Call channel with
-    // empty required credentials was built anyway, then its listener
-    // failed to connect and the per-channel supervisor restarted it
-    // forever (crashloop). The orchestrator must skip-with-warn instead of
-    // building it, mirroring the WhatsApp Cloud `is_cloud_config()` gate.
-    #[cfg(feature = "channel-signal")]
-    #[test]
-    fn collect_configured_channels_skips_enabled_signal_without_credentials() {
-        let mut config = Config::default();
-        config.channels.signal.insert(
-            "default".to_string(),
-            zeroclaw_config::schema::SignalConfig {
-                enabled: true,
-                http_url: "   ".into(),
-                account: "   ".into(),
-                ..Default::default()
-            },
-        );
-
-        let config_arc = Arc::new(RwLock::new(config));
-        let channels = collect_configured_channels(&config_arc, "test", &[], None, None, None);
-        assert!(
-            !channels.iter().any(|entry| entry.display_name == "Signal"),
-            "enabled Signal without credentials must not be collected (would crashloop)"
-        );
-    }
-
-    #[cfg(feature = "channel-signal")]
-    #[test]
-    fn collect_configured_channels_builds_signal_with_credentials() {
-        let mut config = Config::default();
-        config.channels.signal.insert(
-            "default".to_string(),
-            zeroclaw_config::schema::SignalConfig {
-                enabled: true,
-                http_url: "http://127.0.0.1:8686".into(),
-                account: "+15551234567".into(),
-                ..Default::default()
-            },
-        );
-
-        let config_arc = Arc::new(RwLock::new(config));
-        let channels = collect_configured_channels(&config_arc, "test", &[], None, None, None);
-        assert!(
-            channels.iter().any(|entry| entry.display_name == "Signal"),
-            "enabled Signal with credentials must be collected"
-        );
-    }
-
-    #[cfg(feature = "channel-voice-call")]
-    #[test]
-    fn collect_configured_channels_builds_voice_call_with_credentials() {
-        let mut config = Config::default();
-        config.channels.voice_call.insert(
-            "default".to_string(),
-            zeroclaw_config::scattered_types::VoiceCallConfig {
-                enabled: true,
-                account_id: "AC123".into(),
-                auth_token: "tok".into(),
-                from_number: "+15551234567".into(),
-                ..Default::default()
-            },
-        );
-
-        let config_arc = Arc::new(RwLock::new(config));
-        let channels = collect_configured_channels(&config_arc, "test", &[], None, None, None);
-        assert!(
-            channels
-                .iter()
-                .any(|entry| entry.display_name == "Voice Call"),
-            "enabled Voice Call with credentials must be collected"
-        );
-    }
-
-    #[cfg(feature = "channel-voice-call")]
-    #[test]
-    fn collect_configured_channels_skips_enabled_voice_call_without_credentials() {
-        let mut config = Config::default();
-        config.channels.voice_call.insert(
-            "default".to_string(),
-            zeroclaw_config::scattered_types::VoiceCallConfig {
-                enabled: true,
-                account_id: "   ".into(),
-                auth_token: "   ".into(),
-                from_number: "   ".into(),
-                ..Default::default()
-            },
-        );
-
-        let config_arc = Arc::new(RwLock::new(config));
-        let channels = collect_configured_channels(&config_arc, "test", &[], None, None, None);
-        assert!(
-            !channels
-                .iter()
-                .any(|entry| entry.display_name == "Voice Call"),
-            "enabled Voice Call without credentials must not be collected (would crashloop)"
-        );
-    }
-
-    /// A voice note on a configured Discord channel must reach the STT server
-    /// named by the owning agent's `transcription_provider`.
-    ///
-    /// Two providers are registered so the assertion distinguishes *selection*
-    /// from *presence*: against a lone registered provider, a dispatch that
-    /// ignored the named alias and reached whatever happened to be configured
-    /// would look identical to a correct one. The decoy must receive nothing.
-    ///
-    /// The channel alias, the agent alias and the provider aliases share no
-    /// name, so nothing can route correctly by coincidence.
-    #[cfg(feature = "channel-discord")]
-    #[tokio::test]
-    async fn configured_discord_transcription_dispatches_to_routed_agent_provider() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-        use zeroclaw_config::schema::LocalWhisperTranscriptionProviderConfig;
-
-        let media_server = MockServer::start().await;
-        let whisper_server = MockServer::start().await;
-        let decoy_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/voice.ogg"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"fake-audio"))
-            .expect(1)
-            .mount(&media_server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/v1/transcribe"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"text": "routed transcript"})),
-            )
-            .expect(1)
-            .mount(&whisper_server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/v1/transcribe"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({"text": "decoy transcript"})),
-            )
-            .expect(0)
-            .mount(&decoy_server)
-            .await;
-
-        let mut config = Config::default();
-        config.transcription.enabled = true;
-        config.channels.discord.insert(
-            "community".to_string(),
-            zeroclaw_config::schema::DiscordConfig {
-                enabled: true,
-                bot_token: "test-token".into(),
-                ..Default::default()
-            },
-        );
-        config.agents.insert(
-            "listener".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: true,
-                channels: vec!["discord.community".into()],
-                transcription_provider: "local_whisper.routed".into(),
-                ..Default::default()
-            },
-        );
-        config.providers.transcription.local_whisper.insert(
-            "routed".to_string(),
-            LocalWhisperTranscriptionProviderConfig {
-                uri: format!("{}/v1/transcribe", whisper_server.uri()),
-                ..Default::default()
-            },
-        );
-        config.providers.transcription.local_whisper.insert(
-            "decoy".to_string(),
-            LocalWhisperTranscriptionProviderConfig {
-                uri: format!("{}/v1/transcribe", decoy_server.uri()),
-                ..Default::default()
-            },
-        );
-
-        let config_arc = Arc::new(RwLock::new(config));
-        let channel = {
-            let config = config_arc.read();
-            build_configured_discord_channel(
-                &config_arc,
-                &config,
-                "community",
-                config
-                    .channels
-                    .discord
-                    .get("community")
-                    .expect("configured Discord alias"),
-            )
-        };
-
-        let attachments = vec![serde_json::json!({
-            "content_type": "audio/ogg",
-            "filename": "voice.ogg",
-            "url": format!("{}/voice.ogg", media_server.uri()),
-        })];
-        let (text, media) = channel
-            .process_attachments_for_test(&attachments, &reqwest::Client::new())
-            .await;
-
-        assert_eq!(text, "[Voice] routed transcript");
-        assert!(
-            media.is_empty(),
-            "successful direct-channel transcription must not fall back to media"
-        );
-        assert!(
-            decoy_server.received_requests().await.unwrap().is_empty(),
-            "the provider the agent did not name must never be called"
-        );
-        let routed = whisper_server.received_requests().await.unwrap();
-        assert_eq!(routed.len(), 1, "exactly one transcription request");
-        assert!(
-            routed[0].body.windows(10).any(|w| w == b"fake-audio"),
-            "the routed request must carry the downloaded audio bytes verbatim"
-        );
-        media_server.verify().await;
-        whisper_server.verify().await;
-        decoy_server.verify().await;
     }
 
     // Regression: Voice Wake bound its transcription manager to its own
@@ -46907,111 +43283,6 @@ This is an example JSON object for profile settings."#;
             resolved, "frontdoor",
             "must not resolve to the channel alias"
         );
-    }
-
-    /// Regression: the WhatsApp Web channel built its manager from the legacy
-    /// `[transcription]` section alone, so typed
-    /// `[providers.transcription.*]` entries never registered and the owning
-    /// agent's alias stayed empty — `transcribe()` then bailed with "Agent has
-    /// no transcription_provider configured" for every voice note.
-    #[cfg(feature = "whatsapp-web")]
-    #[test]
-    fn whatsapp_transcription_registers_typed_provider_and_binds_the_agent_alias() {
-        let mut config = Config::default();
-        config.transcription.enabled = true;
-        config.channels.whatsapp.insert(
-            "default".to_string(),
-            zeroclaw_config::schema::WhatsAppConfig {
-                enabled: true,
-                ..Default::default()
-            },
-        );
-        config.providers.transcription.groq.insert(
-            "fast".to_string(),
-            zeroclaw_config::schema::GroqTranscriptionProviderConfig {
-                base: zeroclaw_config::schema::TranscriptionProviderConfig {
-                    api_key: Some("test-key".into()),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        );
-        config.agents.insert(
-            "voice-agent".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: true,
-                channels: vec!["whatsapp.default".into()],
-                transcription_provider: "groq.fast".into(),
-                ..Default::default()
-            },
-        );
-
-        let provider = resolve_agent_transcription_provider(&config, "whatsapp.default");
-        assert_eq!(
-            provider, "groq.fast",
-            "the owning agent's provider must resolve for a whatsapp.<alias> key"
-        );
-
-        let manager = resolved_transcription_manager(&config, "whatsapp.default")
-            .expect("the shared path must build a manager for the typed provider");
-        assert!(
-            manager.available_providers().contains(&"groq.fast"),
-            "typed provider must register, got {:?}",
-            manager.available_providers()
-        );
-        assert_eq!(
-            manager.bound_provider(),
-            "groq.fast",
-            "the owning agent's typed provider must be bound, not just registered"
-        );
-    }
-
-    #[cfg(feature = "channel-slack")]
-    #[test]
-    fn resolved_transcription_manager_binds_the_owning_agents_provider() {
-        let mut config = Config {
-            transcription: zeroclaw_config::schema::TranscriptionConfig {
-                enabled: true,
-                api_key: Some("k".to_string()),
-                ..Default::default()
-            },
-            ..Config::default()
-        };
-        config.agents.insert(
-            "ops".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: true,
-                channels: vec!["slack.support".into()],
-                transcription_provider: "groq.default".into(),
-                ..Default::default()
-            },
-        );
-        let manager = resolved_transcription_manager(&config, "slack.support")
-            .expect("an enabled legacy groq section builds a manager");
-        // The agent's typed-alias preference resolves to the legacy type key
-        // that is actually registered, instead of failing at transcribe time.
-        assert_eq!(manager.available_providers(), vec!["groq"]);
-        let mut disabled = config.clone();
-        disabled.transcription.enabled = false;
-        assert!(resolved_transcription_manager(&disabled, "slack.support").is_none());
-    }
-
-    #[cfg(feature = "channel-slack")]
-    #[test]
-    fn resolved_transcription_manager_falls_back_to_the_sole_provider_without_a_preference() {
-        let config = Config {
-            transcription: zeroclaw_config::schema::TranscriptionConfig {
-                enabled: true,
-                api_key: Some("k".to_string()),
-                ..Default::default()
-            },
-            ..Config::default()
-        };
-        // No owning agent declares a preference: the lone provider is bound so
-        // a single-provider deployment keeps working.
-        let manager = resolved_transcription_manager(&config, "slack.support")
-            .expect("an enabled legacy groq section builds a manager");
-        assert_eq!(manager.available_providers(), vec!["groq"]);
     }
 
     #[cfg(feature = "voice-wake")]
@@ -47108,100 +43379,6 @@ This is an example JSON object for profile settings."#;
             "local_whisper.office",
             "Voice Wake must select that same fallback owner's provider"
         );
-    }
-
-    /// `Config::agent_for_channel` takes the first match out of a `HashMap`,
-    /// so with two agents bound to one Matrix alias it can name a different
-    /// owner than dispatch does — silencing voice, or speaking through the
-    /// wrong agent's provider. Synthesis must go through the same sorted,
-    /// last-writer-wins decision the router uses.
-    #[cfg(feature = "channel-matrix")]
-    #[test]
-    fn matrix_tts_owner_is_the_same_canonical_co_owner_as_dispatch() {
-        let mut config = Config::default();
-        config.agents.clear();
-        config.agents.insert(
-            "zeta".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: true,
-                channels: vec!["matrix.default".into()],
-                tts_provider: "openai.loud".into(),
-                ..Default::default()
-            },
-        );
-        config.agents.insert(
-            "alpha".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: true,
-                channels: vec!["matrix.default".into()],
-                tts_provider: "elevenlabs.quiet".into(),
-                ..Default::default()
-            },
-        );
-
-        let enabled_agents = enabled_agent_aliases(&config);
-        let owners =
-            build_owner_by_channel_key(&config, &enabled_agents, &["matrix.default".to_string()]);
-        let dispatch_owner = owners.get("matrix.default").map(String::as_str);
-
-        assert_eq!(dispatch_owner, Some("zeta"));
-        assert_eq!(
-            resolve_agent_tts_owner(&config, "matrix.default").as_deref(),
-            dispatch_owner,
-            "synthesis must bind the same owning agent the router delivers to"
-        );
-    }
-
-    /// With no agent declaring any binding, the router falls back to a
-    /// deterministic owner. TTS has to land on that same one.
-    #[cfg(feature = "channel-matrix")]
-    #[test]
-    fn matrix_tts_owner_is_the_same_legacy_fallback_owner_as_dispatch() {
-        let mut config = Config::default();
-        config.agents.clear();
-        config.agents.insert(
-            "legacy".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: true,
-                channels: vec![],
-                tts_provider: "openai.office".into(),
-                ..Default::default()
-            },
-        );
-
-        let enabled_agents = enabled_agent_aliases(&config);
-        let collected_channel_keys = vec!["matrix.default".to_string()];
-        let owners = build_owner_by_channel_key(&config, &enabled_agents, &collected_channel_keys);
-
-        assert_eq!(
-            owners.get("matrix.default").map(String::as_str),
-            Some("legacy")
-        );
-        assert_eq!(
-            resolve_agent_tts_owner(&config, "matrix.default").as_deref(),
-            Some("legacy")
-        );
-    }
-
-    /// An unowned channel yields `None`, not an empty alias:
-    /// `TtsManager::from_config_for_agent` reads `None` as "fall back to the
-    /// runtime-active agent", and collapsing it to `""` would drop that.
-    #[cfg(feature = "channel-matrix")]
-    #[test]
-    fn matrix_tts_owner_is_none_when_no_enabled_agent_owns_the_channel() {
-        let mut config = Config::default();
-        config.agents.clear();
-        config.agents.insert(
-            "off".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                enabled: false,
-                channels: vec!["matrix.default".into()],
-                tts_provider: "openai.loud".into(),
-                ..Default::default()
-            },
-        );
-
-        assert_eq!(resolve_agent_tts_owner(&config, "matrix.default"), None);
     }
 
     #[cfg(feature = "voice-wake")]
@@ -47618,12 +43795,7 @@ This is an example JSON object for profile settings."#;
         );
     }
 
-    #[cfg(any(
-        feature = "channel-telegram",
-        feature = "channel-line",
-        feature = "channel-wechat",
-        feature = "whatsapp-web"
-    ))]
+    #[cfg(feature = "channel-telegram")]
     #[tokio::test]
     async fn supervised_listener_cancels_identity_persistence_waiting_for_config_lock() {
         use std::future::{Future, poll_fn};
@@ -48397,87 +44569,6 @@ This is an example JSON object for profile settings."#;
                 .as_str()
                 .unwrap_or("")
                 .contains("401 Unauthorized")
-        );
-
-        drop(rx);
-        cancel.cancel();
-        let join = tokio::time::timeout(Duration::from_millis(500), handle).await;
-        assert!(join.is_ok(), "listener should stop on cancel");
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[cfg(feature = "channel-discord")]
-    #[tokio::test]
-    async fn supervised_listener_enters_retry_path_on_discord_gateway_rate_limit() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let channel_name = format!("discord-{}", uuid::Uuid::new_v4());
-        let channel: Arc<dyn Channel> = Arc::new(FailOnceChannel {
-            name: channel_name,
-            calls: Arc::clone(&calls),
-            err: Mutex::new(Some(anyhow::Error::msg(
-                "discord gateway preflight rate-limited (429 Too Many Requests)",
-            ))),
-        });
-
-        let component_name = format!("channel:{}", channel.name());
-        let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(1);
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let handle = spawn_supervised_listener(channel, None, tx, 1, 1, cancel.clone());
-
-        tokio::time::sleep(Duration::from_millis(80)).await;
-        let snapshot = zeroclaw_runtime::health::snapshot_json();
-        let component = &snapshot["components"][&component_name];
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(component["status"], "error");
-        assert!(
-            component["last_error"]
-                .as_str()
-                .unwrap_or("")
-                .contains("429 Too Many Requests")
-        );
-        assert!(
-            component["restart_count"].as_u64().unwrap_or(0) >= 1,
-            "Discord gateway 429 should back off through the retry path instead of parking"
-        );
-
-        drop(rx);
-        cancel.cancel();
-        let join = tokio::time::timeout(Duration::from_millis(500), handle).await;
-        assert!(join.is_ok(), "listener should stop on cancel");
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[cfg(feature = "channel-discord")]
-    #[tokio::test]
-    async fn supervised_listener_does_not_restart_on_fatal_discord_gateway_close_code() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let channel_name = format!("discord-{}", uuid::Uuid::new_v4());
-        let channel: Arc<dyn Channel> = Arc::new(FailOnceChannel {
-            name: channel_name,
-            calls: Arc::clone(&calls),
-            err: Mutex::new(Some(anyhow::Error::new(
-                crate::discord::DiscordListenerFatalError::new(
-                    "discord gateway closed with fatal code 4014: disallowed intent(s)",
-                ),
-            ))),
-        });
-
-        let component_name = format!("channel:{}", channel.name());
-        let (tx, rx) = tokio::sync::mpsc::channel::<zeroclaw_api::channel::ChannelMessage>(1);
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let handle = spawn_supervised_listener(channel, None, tx, 1, 1, cancel.clone());
-
-        tokio::time::sleep(Duration::from_millis(80)).await;
-        let snapshot = zeroclaw_runtime::health::snapshot_json();
-        let component = &snapshot["components"][&component_name];
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(component["status"], "error");
-        assert_eq!(component["restart_count"].as_u64().unwrap_or(0), 0);
-        assert!(
-            component["last_error"]
-                .as_str()
-                .unwrap_or("")
-                .contains("fatal code 4014")
         );
 
         drop(rx);
@@ -49739,8 +45830,7 @@ This is an example JSON object for profile settings."#;
                     Err(error) => error,
                 };
                 let feature_available =
-                    !matches!(*key, "whatsapp" | "whatsapp-web" | "whatsapp_web")
-                        || cfg!(feature = "whatsapp-web");
+                    !matches!(*key, "whatsapp" | "whatsapp-web" | "whatsapp_web");
                 assert_channel_surface_disposition(
                     key,
                     "one-shot builder",
@@ -49775,31 +45865,6 @@ This is an example JSON object for profile settings."#;
 
         assert_eq!(resolved, config.agent_workspace_dir("alice"));
         assert_ne!(resolved, config.data_dir);
-    }
-
-    #[cfg(feature = "channel-slack")]
-    #[test]
-    fn slack_thread_context_resolver_tracks_live_alias_config() {
-        let mut config = Config::default();
-        config.channels.slack.insert(
-            "default".to_string(),
-            zeroclaw_config::schema::SlackConfig {
-                thread_context_max_messages: Some(3),
-                ..Default::default()
-            },
-        );
-        let config_arc = Arc::new(RwLock::new(config));
-        let resolver = slack_thread_context_max_messages_resolver(&config_arc, "default");
-
-        assert_eq!(resolver(), 3);
-        config_arc
-            .write()
-            .channels
-            .slack
-            .get_mut("default")
-            .unwrap()
-            .thread_context_max_messages = Some(8);
-        assert_eq!(resolver(), 8);
     }
 
     // ── Query classification in channel message processing ─────────
@@ -50895,51 +46960,6 @@ This is an example JSON object for profile settings."#;
         assert!(channel_identity_normalizer("telegram").is_some());
         assert!(channel_identity_normalizer("wechat").is_some());
         assert!(channel_identity_normalizer("line").is_some());
-    }
-
-    #[cfg(feature = "channel-voice-call")]
-    #[test]
-    fn build_channel_by_id_unconfigured_voice_call_returns_error() {
-        let config = Config::default();
-        let config_arc = Arc::new(RwLock::new(config));
-        match build_channel_by_id(&config_arc, "voice-call") {
-            Err(e) => {
-                let err_msg = e.to_string();
-                assert!(
-                    err_msg.contains("not configured"),
-                    "expected 'not configured' in error, got: {err_msg}"
-                );
-            }
-            Ok(_) => panic!("should fail when voice-call is not configured"),
-        }
-    }
-
-    #[cfg(feature = "channel-voice-call")]
-    #[test]
-    fn build_channel_by_id_configured_voice_call_succeeds() {
-        let mut config = Config::default();
-        config.channels.voice_call.insert(
-            "default".to_string(),
-            zeroclaw_config::scattered_types::VoiceCallConfig {
-                enabled: true,
-                model_provider: zeroclaw_config::scattered_types::VoiceProvider::Twilio,
-                account_id: "AC_TEST".to_string(),
-                auth_token: "test_token".to_string(),
-                from_number: "+15551234567".to_string(),
-                webhook_port: 8090,
-                require_outbound_approval: true,
-                transcription_logging: true,
-                tts_voice: None,
-                max_call_duration_secs: 3600,
-                webhook_base_url: None,
-                excluded_tools: vec![],
-            },
-        );
-        let config_arc = Arc::new(RwLock::new(config));
-        match build_channel_by_id(&config_arc, "voice-call") {
-            Ok(channel) => assert_eq!(channel.name(), "voice_call"),
-            Err(e) => panic!("should succeed when voice-call is configured: {e}"),
-        }
     }
 
     // ── is_stop_command tests ─────────────────────────────────────────────
@@ -54369,67 +50389,6 @@ Done."#;
         );
     }
 
-    #[tokio::test]
-    #[cfg(feature = "channel-discord")]
-    async fn one_off_send_resolves_dotted_discord_alias() {
-        let config = zeroclaw_config::schema::Config::default();
-
-        let err = send_channel_message(&config, "discord.governance", "123456789", "test message")
-            .await
-            .expect_err("unconfigured alias should fail after dotted ref resolution");
-        let message = format!("{err:#}");
-        assert!(
-            message.contains("[channels.discord.governance] not configured"),
-            "dotted alias should reach named channel resolution; got: {message}"
-        );
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "channel-qq")]
-    async fn one_off_send_resolves_dotted_qq_alias() {
-        // The QQ instance alias is the channel type in practice
-        // (`[channels.qq.qq]`), and a bare id only ever resolves a
-        // `default` alias, so the dotted form is the one operators use.
-        // It must reach the QQ arm rather than the dispatcher's reject path.
-        let config = zeroclaw_config::schema::Config::default();
-
-        let err = send_channel_message(&config, "qq.qq", "user:OPENID", "test message")
-            .await
-            .expect_err("unconfigured alias should fail after dotted ref resolution");
-        let message = format!("{err:#}");
-        assert!(
-            message.contains("[channels.qq.qq] not configured"),
-            "dotted qq id should reach named channel resolution; got: {message}"
-        );
-        assert!(
-            !message.contains("unsupported delivery channel"),
-            "dotted qq id must not be reported as an unsupported delivery channel; got: {message}"
-        );
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "channel-linq")]
-    async fn one_off_send_keeps_dotted_linq_alias_on_builder() {
-        // `linq.<alias>` predates the announcement delegation and is resolved by
-        // the one-off builder itself. Delegating every dotted id would route it
-        // to an arm that does not exist, so assert it still lands on the
-        // builder's own alias lookup rather than the dispatcher's reject path.
-        let config = zeroclaw_config::schema::Config::default();
-
-        let err = send_channel_message(&config, "linq.governance", "+15550100", "test message")
-            .await
-            .expect_err("unconfigured alias should fail at the builder's linq arm");
-        let message = format!("{err:#}");
-        assert!(
-            message.contains("Linq alias 'governance' not configured"),
-            "dotted linq id should stay on the one-off builder; got: {message}"
-        );
-        assert!(
-            !message.contains("unsupported delivery channel"),
-            "dotted linq id must not be delegated to deliver_announcement; got: {message}"
-        );
-    }
-
     #[test]
     fn compiled_channel_keys_have_intentional_announcement_delivery_registration() {
         let source = include_str!("mod.rs");
@@ -54485,8 +50444,7 @@ Done."#;
             }
             for key in type_keys {
                 let surface_available =
-                    !matches!(*key, "whatsapp" | "whatsapp-web" | "whatsapp_web")
-                        || cfg!(feature = "whatsapp-web");
+                    !matches!(*key, "whatsapp" | "whatsapp-web" | "whatsapp_web");
                 let production_support_detected = announcement_arm_supports_delivery(dispatch, key);
                 assert_channel_surface_disposition(
                     key,
@@ -54537,194 +50495,6 @@ Done."#;
         for key in ["rejected", "rejected-alias"] {
             assert!(!announcement_arm_supports_delivery(dispatch, key));
         }
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "channel-lark")]
-    async fn deliver_announcement_routes_lark_to_lark_arm() {
-        // Both names must enter the merged lark|feishu arm. Falling through
-        // to `unsupported delivery channel` would mean the schema enum and
-        // the match arm have drifted apart.
-        let config = zeroclaw_config::schema::Config::default();
-
-        for channel in ["lark.default", "feishu.default"] {
-            let err = deliver_announcement(&config, channel, "oc_test_chat", None, "hi")
-                .await
-                .err()
-                .unwrap_or_else(|| {
-                    panic!("expected {channel} to bail because channel is not configured")
-                });
-            let msg = format!("{err:#}");
-            assert!(
-                !msg.contains("unsupported delivery channel"),
-                "{channel} must route to lark|feishu arm, not fall through; got: {msg}"
-            );
-            assert!(
-                msg.contains("[channels.lark.default] not configured"),
-                "{channel} must report the real config table [channels.lark.default]; got: {msg}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "channel-email")]
-    async fn deliver_announcement_routes_email_to_email_arm() {
-        let config = zeroclaw_config::schema::Config::default();
-
-        let err = deliver_announcement(&config, "email.default", "user@example.com", None, "hi")
-            .await
-            .expect_err("expected email.default to bail because channel is not configured");
-        let msg = format!("{err:#}");
-        assert!(
-            !msg.contains("unsupported delivery channel"),
-            "email.default must route to the email arm, not fall through; got: {msg}"
-        );
-        assert!(
-            msg.contains("[channels.email.default] not configured"),
-            "email.default must report the real config table; got: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "channel-qq")]
-    async fn deliver_announcement_routes_qq_to_qq_arm() {
-        let config = zeroclaw_config::schema::Config::default();
-
-        let err = deliver_announcement(&config, "qq.qq", "user:OPENID", None, "hi")
-            .await
-            .expect_err("expected qq.qq to bail because channel is not configured");
-        let msg = format!("{err:#}");
-        assert!(
-            !msg.contains("unsupported delivery channel"),
-            "qq.qq must route to the QQ arm, not fall through; got: {msg}"
-        );
-        assert!(
-            msg.contains("[channels.qq.qq] not configured"),
-            "qq.qq must report the real config table; got: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "channel-qq")]
-    async fn deliver_announcement_rejects_disabled_qq_alias() {
-        // Disabling an alias keeps its credentials, and the cron scheduler
-        // reaches this arm without consulting the listener collector, so the
-        // refusal has to come from the dispatcher itself.
-        let mut config = zeroclaw_config::schema::Config::default();
-        config.channels.qq.insert(
-            "work".to_string(),
-            zeroclaw_config::schema::QQConfig {
-                enabled: false,
-                app_id: "test-app-id".to_string(),
-                app_secret: "test-app-secret".to_string(),
-                // If the guard regresses, the send attempt lands on a refused
-                // loopback port instead of Tencent's API.
-                proxy_url: Some("http://127.0.0.1:1".to_string()),
-                ..Default::default()
-            },
-        );
-
-        let err = deliver_announcement(&config, "qq.work", "user:OPENID", None, "hi")
-            .await
-            .expect_err("a disabled qq alias must not be delivered to");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("[channels.qq.work] is disabled"),
-            "disabled alias must report the off switch; got: {msg}"
-        );
-        assert!(
-            !msg.contains("unsupported delivery channel"),
-            "disabled alias must reach the QQ arm; got: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "whatsapp-web")]
-    async fn deliver_announcement_routes_whatsapp_to_whatsapp_arm() {
-        let config = zeroclaw_config::schema::Config::default();
-
-        let err = deliver_announcement(&config, "whatsapp.default", "+15551234567", None, "hi")
-            .await
-            .expect_err("expected whatsapp.default to bail because channel is not configured");
-        let msg = format!("{err:#}");
-        assert!(
-            !msg.contains("unsupported delivery channel"),
-            "whatsapp.default must route to the whatsapp arm, not fall through; got: {msg}"
-        );
-        assert!(
-            msg.contains("[channels.whatsapp.default] not configured"),
-            "whatsapp.default must report the real config table; got: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "whatsapp-web")]
-    async fn deliver_announcement_rejects_whatsapp_non_web_config_clearly() {
-        let mut config = zeroclaw_config::schema::Config::default();
-        config.channels.whatsapp.insert(
-            "default".to_string(),
-            zeroclaw_config::schema::WhatsAppConfig {
-                enabled: true,
-                access_token: Some("test-token".to_string()),
-                phone_number_id: Some("phone-number-id".to_string()),
-                verify_token: Some("verify-token".to_string()),
-                ..Default::default()
-            },
-        );
-
-        let err = deliver_announcement(&config, "whatsapp.default", "+15551234567", None, "hi")
-            .await
-            .expect_err("expected WhatsApp Cloud config to be rejected for cron delivery");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("WhatsApp channel send requires Web mode"),
-            "whatsapp.default must clearly explain the Web mode requirement; got: {msg}"
-        );
-        assert!(
-            msg.contains("session_path")
-                && msg.contains("pair_phone")
-                && msg.contains("mode = personal"),
-            "whatsapp.default must name the Web selectors accepted by cron delivery; got: {msg}"
-        );
-        assert!(
-            !msg.contains("unsupported delivery channel")
-                && !msg.contains("[channels.whatsapp.default] not configured"),
-            "whatsapp.default must reject the configured non-Web mode, not fall through; got: {msg}"
-        );
-    }
-
-    #[tokio::test]
-    #[cfg(feature = "channel-lark")]
-    async fn deliver_announcement_rejects_feishu_value_when_use_feishu_false() {
-        // Reject (not warn): otherwise the message silently lands on the
-        // Lark endpoint despite the user explicitly naming Feishu.
-        let mut config = zeroclaw_config::schema::Config::default();
-        config.channels.lark.insert(
-            "work".to_string(),
-            zeroclaw_config::schema::LarkConfig {
-                enabled: true,
-                use_feishu: false,
-                app_id: "cli_test".to_string(),
-                app_secret: "secret".to_string(),
-                approval_timeout_secs: 300,
-                per_user_session: false,
-                ack_reactions: None,
-                ..Default::default()
-            },
-        );
-
-        let err = deliver_announcement(&config, "feishu.work", "oc_test_chat", None, "hi")
-            .await
-            .expect_err("expected bail when channel=feishu but use_feishu=false");
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("use_feishu=false"),
-            "bail must explain the use_feishu mismatch; got: {msg}"
-        );
-        assert!(
-            msg.contains("[channels.lark.work]"),
-            "bail must point at the real config table; got: {msg}"
-        );
     }
 
     fn email_msg(id: &str, subject: Option<&str>) -> ChannelMessage {

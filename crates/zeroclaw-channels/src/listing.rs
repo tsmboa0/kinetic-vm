@@ -26,147 +26,147 @@ const CHANNEL_COMPILE_SPECS: &[ChannelCompileSpec] = &[
     ChannelCompileSpec {
         schema_name: Some("Discord"),
         type_keys: &["discord"],
-        compiled: cfg!(feature = "channel-discord"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("Slack"),
         type_keys: &["slack"],
-        compiled: cfg!(feature = "channel-slack"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("Mattermost"),
         type_keys: &["mattermost"],
-        compiled: cfg!(feature = "channel-mattermost"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("iMessage"),
         type_keys: &["imessage"],
-        compiled: cfg!(feature = "channel-imessage"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("Matrix"),
         type_keys: &["matrix"],
-        compiled: cfg!(feature = "channel-matrix"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("Signal"),
         type_keys: &["signal"],
-        compiled: cfg!(feature = "channel-signal"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("WhatsApp"),
         type_keys: &["whatsapp"],
-        compiled: cfg!(feature = "channel-whatsapp-cloud"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("WhatsApp Web"),
         type_keys: &["whatsapp-web", "whatsapp_web"],
-        compiled: cfg!(feature = "whatsapp-web"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("Linq"),
         type_keys: &["linq"],
-        compiled: cfg!(feature = "channel-linq"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("NextCloud Talk"),
         type_keys: &["nextcloud", "nextcloud-talk", "nextcloud_talk"],
-        compiled: cfg!(feature = "channel-nextcloud"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("Email"),
         type_keys: &["email"],
-        compiled: cfg!(feature = "channel-email"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("Gmail Push"),
         type_keys: &["gmail-push", "gmail_push"],
-        compiled: cfg!(feature = "channel-email"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("IRC"),
         type_keys: &["irc"],
-        compiled: cfg!(feature = "channel-irc"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("Twitch"),
         type_keys: &["twitch"],
-        compiled: cfg!(feature = "channel-twitch"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("Lark"),
         type_keys: &["lark", "feishu"],
-        compiled: cfg!(feature = "channel-lark"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("DingTalk"),
         type_keys: &["dingtalk"],
-        compiled: cfg!(feature = "channel-dingtalk"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("WeCom"),
         type_keys: &["wecom"],
-        compiled: cfg!(feature = "channel-wecom"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("WeCom WebSocket"),
         type_keys: &["wecom-ws", "wecom_ws"],
-        compiled: cfg!(feature = "channel-wecom-ws"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("WeChat"),
         type_keys: &["wechat"],
-        compiled: cfg!(feature = "channel-wechat"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("QQ Official"),
         type_keys: &["qq"],
-        compiled: cfg!(feature = "channel-qq"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("Nostr"),
         type_keys: &["nostr"],
-        compiled: cfg!(feature = "channel-nostr"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("ClawdTalk"),
         type_keys: &["clawdtalk"],
-        compiled: cfg!(feature = "channel-clawdtalk"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("Reddit"),
         type_keys: &["reddit"],
-        compiled: cfg!(feature = "channel-reddit"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("Bluesky"),
         type_keys: &["bluesky"],
-        compiled: cfg!(feature = "channel-bluesky"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("Git"),
         type_keys: &["git"],
-        compiled: cfg!(feature = "channel-git"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("X/Twitter"),
         type_keys: &["twitter"],
-        compiled: cfg!(feature = "channel-twitter"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("Mochat"),
         type_keys: &["mochat"],
-        compiled: cfg!(feature = "channel-mochat"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("LINE"),
         type_keys: &["line"],
-        compiled: cfg!(feature = "channel-line"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("Voice Call"),
         type_keys: &["voice-call", "voice_call"],
-        compiled: cfg!(feature = "channel-voice-call"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("VoiceWake"),
@@ -181,7 +181,7 @@ const CHANNEL_COMPILE_SPECS: &[ChannelCompileSpec] = &[
     ChannelCompileSpec {
         schema_name: Some("AMQP"),
         type_keys: &["amqp"],
-        compiled: cfg!(feature = "channel-amqp"),
+        compiled: false,
     },
     ChannelCompileSpec {
         schema_name: Some("Filesystem"),
@@ -262,12 +262,7 @@ pub fn is_channel_type_compiled(channel_type: &str) -> bool {
 /// cannot name (or dispatch on) a channel it cannot run — dispatch sites
 /// stay exhaustive without a dead fallback arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QrPairingChannel {
-    #[cfg(feature = "channel-wechat")]
-    WeChat,
-    #[cfg(feature = "whatsapp-web")]
-    WhatsAppWeb,
-}
+pub enum QrPairingChannel {}
 
 /// Resolve a channel type key to its typed QR-pairing channel.
 ///
@@ -279,14 +274,8 @@ pub enum QrPairingChannel {
 /// agreement). Returns `None` for channel types that have no channel-owned
 /// QR login state and for channels not compiled into this binary — the two
 /// cases callers treat identically as "unsupported".
-pub fn qr_pairing_channel(channel_type: &str) -> Option<QrPairingChannel> {
-    match channel_type {
-        #[cfg(feature = "channel-wechat")]
-        "wechat" => Some(QrPairingChannel::WeChat),
-        #[cfg(feature = "whatsapp-web")]
-        "whatsapp-web" | "whatsapp_web" => Some(QrPairingChannel::WhatsAppWeb),
-        _ => None,
-    }
+pub fn qr_pairing_channel(_channel_type: &str) -> Option<QrPairingChannel> {
+    None
 }
 
 #[cfg(test)]
@@ -299,18 +288,14 @@ mod tests {
     #[test]
     fn channel_type_compilation_tracks_enabled_features() {
         assert!(is_channel_type_compiled("telegram"));
-        assert!(is_channel_type_compiled("email"));
+        assert!(!is_channel_type_compiled("email"));
         assert!(is_channel_type_compiled("webhook"));
         assert!(is_channel_type_compiled("acp-server"));
-        assert!(is_channel_type_compiled("discord"));
-        assert_eq!(
-            is_channel_type_compiled("nextcloud-talk"),
-            cfg!(feature = "channel-nextcloud")
-        );
-        assert_eq!(
-            is_channel_type_compiled("linq"),
-            cfg!(feature = "channel-linq")
-        );
+        assert!(!is_channel_type_compiled("discord"));
+        assert!(is_channel_type_compiled("mqtt"));
+        assert!(is_channel_type_compiled("filesystem"));
+        assert!(!is_channel_type_compiled("nextcloud-talk"));
+        assert!(!is_channel_type_compiled("linq"));
         assert_eq!(
             is_channel_type_compiled("plugin"),
             zeroclaw_runtime::plugin_runtime::WASM_PLUGIN_SUPPORT_COMPILED
@@ -369,7 +354,7 @@ mod tests {
             .map(|info| info.name)
             .collect();
 
-        assert_eq!(names.contains("Slack"), !cfg!(feature = "channel-slack"));
+        assert!(names.contains("Slack"));
         assert_eq!(
             names.contains("Plugin"),
             !zeroclaw_runtime::plugin_runtime::WASM_PLUGIN_SUPPORT_COMPILED,
@@ -421,9 +406,9 @@ mod tests {
         // compile-spec registry with a matching compiled flag, so the typed
         // key space cannot drift from the canonical channel inventory.
         for (key, feature_compiled) in [
-            ("wechat", cfg!(feature = "channel-wechat")),
-            ("whatsapp-web", cfg!(feature = "whatsapp-web")),
-            ("whatsapp_web", cfg!(feature = "whatsapp-web")),
+            ("wechat", false),
+            ("whatsapp-web", false),
+            ("whatsapp_web", false),
         ] {
             assert!(
                 CHANNEL_COMPILE_SPECS

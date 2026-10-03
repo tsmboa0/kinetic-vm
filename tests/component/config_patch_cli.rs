@@ -92,20 +92,6 @@ fn test_state(config: Config) -> AppState {
             Duration::from_secs(300),
             1000,
         )),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp: HashMap::new(),
-        #[cfg(feature = "channel-whatsapp-cloud")]
-        whatsapp_app_secret: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq: HashMap::new(),
-        #[cfg(feature = "channel-linq")]
-        linq_signing_secrets: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk: HashMap::new(),
-        #[cfg(feature = "channel-nextcloud")]
-        nextcloud_talk_webhook_secret: HashMap::new(),
-        #[cfg(feature = "channel-email")]
-        gmail_push: None,
         observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
         tools_registry: Arc::new(Vec::new()),
         tools_registry_by_agent: Arc::new(HashMap::new()),

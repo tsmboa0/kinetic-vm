@@ -41,7 +41,7 @@ pub(crate) fn mime_for_audio(extension: &str) -> Option<&'static str> {
 /// `mime_for_audio`. `None` when the MIME does not map to a format
 /// `resolve_audio_format` accepts. Codec parameters (e.g.
 /// "audio/ogg; codecs=opus") are stripped before matching.
-#[cfg(any(feature = "channel-matrix", test))]
+#[cfg(test)]
 pub(crate) fn extension_for_audio_mime(mime: &str) -> Option<&'static str> {
     let mime = mime.split(';').next().unwrap_or(mime).trim();
     match mime.to_ascii_lowercase().as_str() {
@@ -1203,15 +1203,6 @@ impl TranscriptionManager {
         Ok(())
     }
 
-    /// The provider `transcribe` will dispatch to, or empty when unbound.
-    /// Test-only: lets channel tests assert the binding without a network
-    /// call. Gated on the two channels whose tests assert it, so no feature
-    /// shape compiles an unused method.
-    #[cfg(all(test, any(feature = "channel-slack", feature = "whatsapp-web")))]
-    pub(crate) fn bound_provider(&self) -> &str {
-        &self.agent_transcription_provider
-    }
-
     /// List registered transcription_provider names.
     pub fn available_providers(&self) -> Vec<&str> {
         self.transcription_providers
@@ -1238,18 +1229,7 @@ impl TranscriptionManager {
 /// 4. Otherwise leave the choice unbound: with several providers a silent
 ///    pick would route audio to an arbitrary vendor, and `transcribe` fails
 ///    loud instead.
-#[cfg(any(
-    feature = "channel-telegram",
-    feature = "channel-discord",
-    feature = "channel-slack",
-    feature = "channel-mattermost",
-    feature = "whatsapp-web",
-    feature = "channel-lark",
-    feature = "channel-line",
-    feature = "channel-qq",
-    feature = "channel-matrix",
-    feature = "voice-wake"
-))]
+#[cfg(any(feature = "channel-telegram", feature = "voice-wake"))]
 fn bind_channel_provider(
     manager: TranscriptionManager,
     agent_provider: &str,
@@ -1288,18 +1268,7 @@ fn bind_channel_provider(
 ///
 /// Returns the manager constructor's error: transcription is enabled but no
 /// provider registered, or an invalid audio bound.
-#[cfg(any(
-    feature = "channel-telegram",
-    feature = "channel-discord",
-    feature = "channel-slack",
-    feature = "channel-mattermost",
-    feature = "whatsapp-web",
-    feature = "channel-lark",
-    feature = "channel-line",
-    feature = "channel-qq",
-    feature = "channel-matrix",
-    feature = "voice-wake"
-))]
+#[cfg(any(feature = "channel-telegram", feature = "voice-wake"))]
 pub(crate) fn build_channel_transcription_manager(
     config: &Config,
     agent_provider: &str,
@@ -1317,18 +1286,7 @@ pub(crate) fn build_channel_transcription_manager(
 /// returns `None` when transcription is disabled or the manager cannot be
 /// built; the failure is logged once here rather than in every channel, and
 /// the channel stays up without transcription.
-#[cfg(any(
-    feature = "channel-telegram",
-    feature = "channel-discord",
-    feature = "channel-slack",
-    feature = "channel-mattermost",
-    feature = "whatsapp-web",
-    feature = "channel-lark",
-    feature = "channel-line",
-    feature = "channel-qq",
-    feature = "channel-matrix",
-    feature = "voice-wake"
-))]
+#[cfg(any(feature = "channel-telegram", feature = "voice-wake"))]
 pub(crate) fn manager_from_snapshot(
     config: &TranscriptionConfig,
 ) -> Option<std::sync::Arc<TranscriptionManager>> {
@@ -2803,21 +2761,7 @@ mod tests {
 }
 
 #[cfg(test)]
-#[cfg(all(
-    test,
-    any(
-        feature = "channel-telegram",
-        feature = "channel-discord",
-        feature = "channel-slack",
-        feature = "channel-mattermost",
-        feature = "whatsapp-web",
-        feature = "channel-lark",
-        feature = "channel-line",
-        feature = "channel-qq",
-        feature = "channel-matrix",
-        feature = "voice-wake"
-    )
-))]
+#[cfg(all(test, any(feature = "channel-telegram", feature = "voice-wake")))]
 mod channel_builder_tests {
     use super::*;
 

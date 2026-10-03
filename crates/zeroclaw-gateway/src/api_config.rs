@@ -3338,20 +3338,6 @@ mod tests {
             rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
             auth_limiter: Arc::new(crate::auth_rate_limit::AuthRateLimiter::new()),
             idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-            #[cfg(feature = "channel-whatsapp-cloud")]
-            whatsapp: std::collections::HashMap::new(),
-            #[cfg(feature = "channel-whatsapp-cloud")]
-            whatsapp_app_secret: std::collections::HashMap::new(),
-            #[cfg(feature = "channel-linq")]
-            linq: std::collections::HashMap::new(),
-            #[cfg(feature = "channel-linq")]
-            linq_signing_secrets: std::collections::HashMap::new(),
-            #[cfg(feature = "channel-nextcloud")]
-            nextcloud_talk: std::collections::HashMap::new(),
-            #[cfg(feature = "channel-nextcloud")]
-            nextcloud_talk_webhook_secret: std::collections::HashMap::new(),
-            #[cfg(feature = "channel-email")]
-            gmail_push: None,
             observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),

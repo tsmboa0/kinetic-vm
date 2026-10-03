@@ -2247,17 +2247,6 @@ pub(crate) mod tests {
     use axum::response::IntoResponse;
     use http_body_util::BodyExt;
     use parking_lot::RwLock;
-    // Gated on every channel feature whose `AppState` fields below are built
-    // with `HashMap::new()`, not just `channel-linq`. With only one of the
-    // others enabled the import vanished while its uses remained, so
-    // `--features channel-nextcloud` alone failed to compile. `--all-features`
-    // hid it, because `channel-linq` was always along for the ride.
-    #[cfg(any(
-        feature = "channel-linq",
-        feature = "channel-nextcloud",
-        feature = "channel-whatsapp-cloud"
-    ))]
-    use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use zeroclaw_infra::session_backend::SessionBackend;
@@ -2444,20 +2433,6 @@ pub(crate) mod tests {
             rate_limiter: Arc::new(GatewayRateLimiter::new(100, 100, 100)),
             auth_limiter: Arc::new(crate::auth_rate_limit::AuthRateLimiter::new()),
             idempotency_store: Arc::new(IdempotencyStore::new(Duration::from_secs(300), 1000)),
-            #[cfg(feature = "channel-whatsapp-cloud")]
-            whatsapp: HashMap::new(),
-            #[cfg(feature = "channel-whatsapp-cloud")]
-            whatsapp_app_secret: HashMap::new(),
-            #[cfg(feature = "channel-linq")]
-            linq: HashMap::new(),
-            #[cfg(feature = "channel-linq")]
-            linq_signing_secrets: HashMap::new(),
-            #[cfg(feature = "channel-nextcloud")]
-            nextcloud_talk: HashMap::new(),
-            #[cfg(feature = "channel-nextcloud")]
-            nextcloud_talk_webhook_secret: HashMap::new(),
-            #[cfg(feature = "channel-email")]
-            gmail_push: None,
             observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
             tools_registry: Arc::new(Vec::new()),
             tools_registry_by_agent: Arc::new(std::collections::HashMap::new()),
@@ -2895,7 +2870,6 @@ pub(crate) mod tests {
         );
     }
 
-    #[cfg(not(feature = "channel-nextcloud"))]
     #[tokio::test]
     async fn api_channels_marks_configured_uncompiled_channel_unavailable() {
         let mut config = zeroclaw_config::schema::Config::default();
@@ -2947,107 +2921,6 @@ pub(crate) mod tests {
         );
     }
 
-    #[cfg(feature = "channel-wechat")]
-    #[tokio::test]
-    async fn api_channels_wechat_authenticated_tracks_persisted_login() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut config = zeroclaw_config::schema::Config::default();
-        config.gateway.require_pairing = false;
-        config.channels.wechat.insert(
-            "admin".to_string(),
-            zeroclaw_config::schema::WeChatConfig {
-                enabled: true,
-                state_dir: Some(temp.path().to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-        bind_channel_to_agent(&mut config, "wechat.admin");
-
-        // Unpaired: nothing persisted in the channel's state dir.
-        let response = handle_api_channels(State(test_state(config.clone())), HeaderMap::new())
-            .await
-            .into_response();
-        let json = response_json(response).await;
-        let channel = json["channels"]
-            .as_array()
-            .expect("channels array")
-            .iter()
-            .find(|channel| channel["name"] == "wechat.admin")
-            .cloned()
-            .expect("wechat channel is listed");
-        assert_eq!(channel["readiness"]["authenticated"], "missing");
-        assert_eq!(channel["status"], "error");
-        assert_eq!(channel["health"], "down");
-        assert!(
-            channel["readiness"]["requirements"]
-                .as_array()
-                .expect("requirements array")
-                .iter()
-                .any(|item| item
-                    .as_str()
-                    .is_some_and(|s| s.contains("Pair this channel")))
-        );
-
-        // Paired: the channel's own persisted login (account.json token).
-        std::fs::write(
-            temp.path().join("account.json"),
-            r#"{"token": "tok_persisted", "account_id": "acct_1"}"#,
-        )
-        .unwrap();
-        let response = handle_api_channels(State(test_state(config)), HeaderMap::new())
-            .await
-            .into_response();
-        let json = response_json(response).await;
-        let channel = json["channels"]
-            .as_array()
-            .expect("channels array")
-            .iter()
-            .find(|channel| channel["name"] == "wechat.admin")
-            .cloned()
-            .expect("wechat channel is listed");
-        assert_eq!(channel["readiness"]["authenticated"], "ready");
-        // Listener liveness is still unprobed, so the summary stays
-        // conservative rather than claiming the channel is up.
-        assert_eq!(channel["readiness"]["listening"], "unknown");
-        assert_eq!(channel["status"], "unknown");
-    }
-
-    #[cfg(feature = "whatsapp-web")]
-    #[tokio::test]
-    async fn api_channels_whatsapp_web_unpaired_reports_missing_auth_without_touching_disk() {
-        let temp = tempfile::tempdir().unwrap();
-        let session_path = temp.path().join("session.db");
-        let mut config = zeroclaw_config::schema::Config::default();
-        config.gateway.require_pairing = false;
-        config.channels.whatsapp.insert(
-            "admin".to_string(),
-            zeroclaw_config::schema::WhatsAppConfig {
-                enabled: true,
-                session_path: Some(session_path.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-        bind_channel_to_agent(&mut config, "whatsapp.admin");
-
-        let response = handle_api_channels(State(test_state(config)), HeaderMap::new())
-            .await
-            .into_response();
-        let json = response_json(response).await;
-        let channel = json["channels"]
-            .as_array()
-            .expect("channels array")
-            .iter()
-            .find(|channel| channel["name"] == "whatsapp.admin")
-            .cloned()
-            .expect("whatsapp channel is listed");
-        assert_eq!(channel["readiness"]["authenticated"], "missing");
-        assert_eq!(channel["status"], "error");
-        assert!(
-            !session_path.exists(),
-            "the readiness probe must never create the session database"
-        );
-    }
-
     #[tokio::test]
     async fn api_channels_without_login_probe_keeps_authenticated_unknown() {
         let mut config = config_with_telegram("default");
@@ -3074,88 +2947,6 @@ pub(crate) mod tests {
                     note.as_str()
                         .is_some_and(|s| s.contains("not checked for `telegram`"))
                 })
-        );
-    }
-
-    #[cfg(feature = "channel-wechat")]
-    #[tokio::test]
-    async fn api_channel_relink_wechat_clears_persisted_login_then_noops() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut config = zeroclaw_config::schema::Config::default();
-        config.gateway.require_pairing = false;
-        config.channels.wechat.insert(
-            "admin".to_string(),
-            zeroclaw_config::schema::WeChatConfig {
-                enabled: true,
-                state_dir: Some(temp.path().to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-        std::fs::write(
-            temp.path().join("account.json"),
-            r#"{"token": "tok_persisted", "account_id": "acct_1"}"#,
-        )
-        .unwrap();
-        std::fs::write(temp.path().join("sync.json"), r#"{"get_updates_buf": "c"}"#).unwrap();
-
-        let response = handle_api_channel_relink(
-            State(test_state(config.clone())),
-            Path("wechat.admin".to_string()),
-            HeaderMap::new(),
-        )
-        .await
-        .into_response();
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = response_json(response).await;
-        assert_eq!(json["outcome"], "cleared");
-        assert_eq!(json["restart_required"], true);
-        assert_eq!(json["removed"].as_array().expect("removed array").len(), 2);
-        assert!(!temp.path().join("account.json").exists());
-        assert!(!temp.path().join("sync.json").exists());
-
-        // Relinking again is the documented no-op.
-        let response = handle_api_channel_relink(
-            State(test_state(config)),
-            Path("wechat.admin".to_string()),
-            HeaderMap::new(),
-        )
-        .await
-        .into_response();
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = response_json(response).await;
-        assert_eq!(json["outcome"], "nothing_to_clear");
-        assert_eq!(json["restart_required"], false);
-    }
-
-    #[cfg(feature = "whatsapp-web")]
-    #[tokio::test]
-    async fn api_channel_relink_whatsapp_web_unpaired_noops_without_touching_disk() {
-        let temp = tempfile::tempdir().unwrap();
-        let session_path = temp.path().join("session.db");
-        let mut config = zeroclaw_config::schema::Config::default();
-        config.gateway.require_pairing = false;
-        config.channels.whatsapp.insert(
-            "admin".to_string(),
-            zeroclaw_config::schema::WhatsAppConfig {
-                enabled: true,
-                session_path: Some(session_path.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-
-        let response = handle_api_channel_relink(
-            State(test_state(config)),
-            Path("whatsapp.admin".to_string()),
-            HeaderMap::new(),
-        )
-        .await
-        .into_response();
-        assert_eq!(response.status(), StatusCode::OK);
-        let json = response_json(response).await;
-        assert_eq!(json["outcome"], "nothing_to_clear");
-        assert!(
-            !session_path.exists(),
-            "relinking an unpaired channel must not create the session database"
         );
     }
 

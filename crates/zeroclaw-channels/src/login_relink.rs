@@ -71,58 +71,11 @@ pub fn relink(
     // Read at use-time in the feature-gated arms below; the binding keeps
     // the signature stable when no QR-pairing channel feature is compiled.
     let (_config, _alias) = (config, alias);
-    match channel {
-        #[cfg(feature = "channel-wechat")]
-        QrPairingChannel::WeChat => {
-            let state_dir = crate::wechat::WeChatChannel::resolve_state_dir(
-                _config
-                    .channels
-                    .wechat
-                    .get(_alias)
-                    .and_then(|wechat| wechat.state_dir.as_deref()),
-            );
-            let removed = crate::wechat::WeChatChannel::clear_persisted_login(&state_dir)?;
-            if removed.is_empty() {
-                Ok(RelinkOutcome::NothingToClear)
-            } else {
-                Ok(RelinkOutcome::Cleared { removed })
-            }
-        }
-        #[cfg(feature = "whatsapp-web")]
-        QrPairingChannel::WhatsAppWeb => {
-            match _config
-                .channels
-                .whatsapp
-                .get(_alias)
-                .and_then(|whatsapp| whatsapp.session_path.as_deref())
-            {
-                Some(session_path) => {
-                    let removed = crate::whatsapp_web::WhatsAppWebChannel::clear_persisted_session(
-                        session_path,
-                    )?;
-                    if removed.is_empty() {
-                        Ok(RelinkOutcome::NothingToClear)
-                    } else {
-                        Ok(RelinkOutcome::Cleared { removed })
-                    }
-                }
-                // The WhatsApp Web key is only resolved for aliases whose
-                // config carries a `session_path`; without one there is
-                // nothing on disk to clear.
-                None => Ok(RelinkOutcome::NothingToClear),
-            }
-        }
-    }
+    match channel {}
 }
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(feature = "channel-wechat", feature = "whatsapp-web"))]
-    use super::{RelinkOutcome, relink};
-    #[cfg(any(feature = "channel-wechat", feature = "whatsapp-web"))]
-    use crate::listing::QrPairingChannel;
-    #[cfg(any(feature = "channel-wechat", feature = "whatsapp-web"))]
-    use zeroclaw_config::schema::Config;
 
     #[test]
     fn channels_without_a_relink_hook_resolve_to_no_qr_pairing_key() {
@@ -135,72 +88,5 @@ mod tests {
             None,
             "the Cloud API backend has no on-disk session to clear"
         );
-    }
-
-    #[cfg(feature = "channel-wechat")]
-    #[test]
-    fn wechat_relink_clears_state_dir_files() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
-        config.channels.wechat.insert(
-            "admin".to_string(),
-            zeroclaw_config::schema::WeChatConfig {
-                enabled: true,
-                state_dir: Some(temp.path().to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-
-        assert_eq!(
-            relink(QrPairingChannel::WeChat, &config, "admin").unwrap(),
-            RelinkOutcome::NothingToClear,
-            "an unpaired channel relinks as a no-op"
-        );
-
-        std::fs::write(
-            temp.path().join("account.json"),
-            r#"{"token": "tok_persisted"}"#,
-        )
-        .unwrap();
-        std::fs::write(temp.path().join("sync.json"), r#"{"get_updates_buf": "c"}"#).unwrap();
-
-        match relink(QrPairingChannel::WeChat, &config, "admin").unwrap() {
-            RelinkOutcome::Cleared { removed } => assert_eq!(removed.len(), 2),
-            other => panic!("expected Cleared, got {other:?}"),
-        }
-        assert!(!temp.path().join("account.json").exists());
-        assert!(!temp.path().join("sync.json").exists());
-    }
-
-    #[cfg(feature = "whatsapp-web")]
-    #[test]
-    fn whatsapp_web_relink_clears_session_without_creating_it() {
-        let temp = tempfile::tempdir().unwrap();
-        let session_path = temp.path().join("session.db");
-        let mut config = Config::default();
-        config.channels.whatsapp.insert(
-            "admin".to_string(),
-            zeroclaw_config::schema::WhatsAppConfig {
-                enabled: true,
-                session_path: Some(session_path.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        );
-
-        assert_eq!(
-            relink(QrPairingChannel::WhatsAppWeb, &config, "admin").unwrap(),
-            RelinkOutcome::NothingToClear
-        );
-        assert!(
-            !session_path.exists(),
-            "relinking an unpaired channel must not create the session database"
-        );
-
-        std::fs::write(&session_path, b"db").unwrap();
-        match relink(QrPairingChannel::WhatsAppWeb, &config, "admin").unwrap() {
-            RelinkOutcome::Cleared { removed } => assert_eq!(removed.len(), 1),
-            other => panic!("expected Cleared, got {other:?}"),
-        }
-        assert!(!session_path.exists());
     }
 }

@@ -1,12 +1,4 @@
-#[cfg(any(
-    test,
-    feature = "channel-discord",
-    feature = "channel-lark",
-    feature = "channel-matrix",
-    feature = "channel-signal",
-    feature = "channel-slack",
-    feature = "channel-telegram"
-))]
+#[cfg(any(test, feature = "channel-telegram"))]
 use std::{collections::HashMap, sync::Arc};
 
 /// Removes a pending approval if its requesting future is cancelled.
@@ -14,29 +6,13 @@ use std::{collections::HashMap, sync::Arc};
 /// The guard is armed immediately after registration. Normal cleanup removes
 /// the entry before disarming so cancellation while waiting for the map lock
 /// cannot leave a stale token behind.
-#[cfg(any(
-    test,
-    feature = "channel-discord",
-    feature = "channel-lark",
-    feature = "channel-matrix",
-    feature = "channel-signal",
-    feature = "channel-slack",
-    feature = "channel-telegram"
-))]
+#[cfg(any(test, feature = "channel-telegram"))]
 pub(crate) struct PendingApprovalGuard<V: Send + 'static> {
     pending: Arc<tokio::sync::Mutex<HashMap<String, V>>>,
     token: Option<String>,
 }
 
-#[cfg(any(
-    test,
-    feature = "channel-discord",
-    feature = "channel-lark",
-    feature = "channel-matrix",
-    feature = "channel-signal",
-    feature = "channel-slack",
-    feature = "channel-telegram"
-))]
+#[cfg(any(test, feature = "channel-telegram"))]
 impl<V: Send + 'static> PendingApprovalGuard<V> {
     pub(crate) fn new(pending: Arc<tokio::sync::Mutex<HashMap<String, V>>>, token: String) -> Self {
         Self {
@@ -60,15 +36,7 @@ impl<V: Send + 'static> PendingApprovalGuard<V> {
     }
 }
 
-#[cfg(any(
-    test,
-    feature = "channel-discord",
-    feature = "channel-lark",
-    feature = "channel-matrix",
-    feature = "channel-signal",
-    feature = "channel-slack",
-    feature = "channel-telegram"
-))]
+#[cfg(any(test, feature = "channel-telegram"))]
 impl<V: Send + 'static> Drop for PendingApprovalGuard<V> {
     fn drop(&mut self) {
         let Some(token) = self.token.take() else {
@@ -90,10 +58,10 @@ impl<V: Send + 'static> Drop for PendingApprovalGuard<V> {
     }
 }
 
-#[cfg(any(feature = "channel-slack", feature = "channel-telegram"))]
+#[cfg(feature = "channel-telegram")]
 use zeroclaw_api::channel::ProgressEvent;
 
-#[cfg(any(feature = "channel-slack", feature = "channel-telegram"))]
+#[cfg(feature = "channel-telegram")]
 pub(crate) fn lifecycle_progress_fluent_key(event: ProgressEvent) -> &'static str {
     match event {
         ProgressEvent::Received => "channel-runtime-progress-received",
@@ -105,7 +73,7 @@ pub(crate) fn lifecycle_progress_fluent_key(event: ProgressEvent) -> &'static st
     }
 }
 
-#[cfg(any(feature = "channel-slack", feature = "channel-telegram"))]
+#[cfg(feature = "channel-telegram")]
 pub(crate) fn localized_lifecycle_progress(event: ProgressEvent) -> String {
     zeroclaw_runtime::i18n::get_required_cli_string(lifecycle_progress_fluent_key(event))
 }
@@ -129,58 +97,6 @@ pub fn truncate_with_ellipsis(s: &str, max_chars: usize) -> String {
 pub fn floor_char_boundary(s: &str, max_bytes: usize) -> usize {
     // Keep downstream callers source-compatible without retaining duplicate boundary logic.
     s.floor_char_boundary(max_bytes)
-}
-
-#[cfg(any(feature = "channel-mattermost", feature = "channel-qq"))]
-pub(crate) async fn read_response_body_limited(
-    mut response: reqwest::Response,
-    max_bytes: u64,
-) -> anyhow::Result<Vec<u8>> {
-    if let Some(content_length) = response.content_length()
-        && content_length > max_bytes
-    {
-        anyhow::bail!(
-            "response body content length {content_length} exceeds {max_bytes}-byte limit"
-        );
-    }
-
-    let mut body = Vec::new();
-
-    while let Some(chunk) = response.chunk().await? {
-        let chunk_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
-        let next_len = u64::try_from(body.len())
-            .unwrap_or(u64::MAX)
-            .saturating_add(chunk_len);
-        if next_len > max_bytes {
-            anyhow::bail!("response body exceeds {max_bytes}-byte limit");
-        }
-        body.extend_from_slice(&chunk);
-    }
-
-    Ok(body)
-}
-
-#[cfg(all(test, any(feature = "channel-mattermost", feature = "channel-qq")))]
-pub(crate) async fn spawn_raw_http_response(
-    raw_response: Vec<u8>,
-    hold_open: bool,
-) -> (String, tokio::task::JoinHandle<()>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = zeroclaw_spawn::spawn!(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut request = [0_u8; 1024];
-        let _ = socket.read(&mut request).await.unwrap();
-        socket.write_all(&raw_response).await.unwrap();
-        if hold_open {
-            std::future::pending::<()>().await;
-        }
-        socket.shutdown().await.unwrap();
-    });
-
-    (format!("http://{address}"), server)
 }
 
 pub const BLOCK_KIT_PREFIX: &str = "__ZEROCLAW_BLOCK_KIT__";
@@ -417,13 +333,13 @@ pub(crate) fn parse_attachment_markers_of_kinds(
 
 /// Minimum reply size, in bytes, that earns a voice note. Byte-measured, so a
 /// non-ASCII reply clears the floor with fewer characters than an ASCII one.
-#[cfg(any(feature = "channel-telegram", feature = "whatsapp-web", test))]
+#[cfg(any(feature = "channel-telegram", test))]
 const MIN_VOICE_REPLY_BYTES: usize = 40;
 
 /// Bytes allowed between the brackets of a leading expressive audio tag. Real
 /// tags are short (`[whispers]`, `[strong French accent]`); the bound keeps a
 /// long bracketed block from passing as one.
-#[cfg(any(feature = "channel-telegram", feature = "whatsapp-web", test))]
+#[cfg(any(feature = "channel-telegram", test))]
 const MAX_AUDIO_TAG_INNER_BYTES: usize = 32;
 
 /// Classify a reply that opens with `[`. Returns the skip reason when the
@@ -432,7 +348,7 @@ const MAX_AUDIO_TAG_INNER_BYTES: usize = 32;
 ///
 /// Audio tags are stage directions that TTS engines interpret rather than
 /// speak, so a reply opening with one is prose and belongs in a voice note.
-#[cfg(any(feature = "channel-telegram", feature = "whatsapp-web", test))]
+#[cfg(any(feature = "channel-telegram", test))]
 fn leading_bracket_skip_reason(content: &str) -> Option<&'static str> {
     let after_open = content.strip_prefix('[')?;
 
@@ -470,7 +386,7 @@ fn leading_bracket_skip_reason(content: &str) -> Option<&'static str> {
 /// Why a reply was not queued as a TTS voice note, or `None` when it is worth
 /// speaking. Voice chats mirror the agent's prose, not its plumbing: URLs,
 /// JSON, code blocks, raw tool output and one-line status make poor audio.
-#[cfg(any(feature = "channel-telegram", feature = "whatsapp-web", test))]
+#[cfg(any(feature = "channel-telegram", test))]
 pub(crate) fn voice_reply_skip_reason(content: &str) -> Option<&'static str> {
     if content.len() <= MIN_VOICE_REPLY_BYTES {
         return Some("too_short");
@@ -501,7 +417,7 @@ pub(crate) fn voice_reply_skip_reason(content: &str) -> Option<&'static str> {
 
 /// A native location pin parsed from a `[LOCATION:...]` marker. Shared by
 /// both WhatsApp backends (web protobuf send and Cloud API JSON send).
-#[cfg(any(feature = "whatsapp-web", feature = "channel-whatsapp-cloud", test))]
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct WhatsAppLocation {
     pub(crate) lat: f64,
@@ -510,7 +426,7 @@ pub(crate) struct WhatsAppLocation {
     pub(crate) address: Option<String>,
 }
 
-#[cfg(any(feature = "whatsapp-web", feature = "channel-whatsapp-cloud", test))]
+#[cfg(test)]
 impl WhatsAppLocation {
     pub(crate) fn parse(target: &str) -> Option<Self> {
         // Extract the next field.  If the trimmed input starts with `"` the
@@ -565,7 +481,7 @@ impl WhatsAppLocation {
 /// Render an inbound static location as chat text, e.g.
 /// `[Location: 40.712800, -74.006000 — NYC]`. Shared by both WhatsApp
 /// backends so inbound pins read identically regardless of transport.
-#[cfg(any(feature = "whatsapp-web", feature = "channel-whatsapp-cloud", test))]
+#[cfg(test)]
 pub(crate) fn format_location_content(lat: f64, lng: f64, name: Option<&str>) -> String {
     match name.filter(|n| !n.is_empty()) {
         Some(name) => format!("[Location: {lat:.6}, {lng:.6} — {name}]"),
@@ -573,15 +489,7 @@ pub(crate) fn format_location_content(lat: f64, lng: f64, name: Option<&str>) ->
     }
 }
 
-#[cfg(any(
-    feature = "channel-discord",
-    feature = "channel-mattermost",
-    feature = "channel-signal",
-    feature = "channel-slack",
-    feature = "channel-whatsapp-cloud",
-    feature = "whatsapp-web",
-    test
-))]
+#[cfg(test)]
 pub(crate) fn new_approval_token() -> String {
     use rand::RngExt;
     const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
@@ -629,15 +537,7 @@ pub fn parse_approval_reply(
 /// from the runtime Fluent catalogue; `token`/`tool_name`/`arguments_summary`
 /// are protocol-exact values echoed verbatim — never localized — so a locale
 /// switch cannot desync the prompt from [`parse_approval_reply`].
-#[cfg(any(
-    feature = "channel-discord",
-    feature = "channel-mattermost",
-    feature = "channel-signal",
-    feature = "channel-slack",
-    feature = "channel-whatsapp-cloud",
-    feature = "whatsapp-web",
-    test
-))]
+#[cfg(test)]
 pub(crate) fn build_yesno_approval_prompt(
     token: &str,
     tool_name: &str,
@@ -669,18 +569,7 @@ pub(crate) fn build_yesno_approval_prompt(
 ///
 /// Kept here so every adapter renders the same wording from the same
 /// catalogue key and the phrasing cannot drift per channel.
-#[cfg(any(
-    feature = "channel-discord",
-    feature = "channel-mattermost",
-    feature = "channel-signal",
-    feature = "channel-slack",
-    feature = "channel-whatsapp-cloud",
-    feature = "whatsapp-web",
-    feature = "channel-matrix",
-    feature = "channel-telegram",
-    feature = "channel-lark",
-    test
-))]
+#[cfg(any(feature = "channel-telegram", test))]
 pub(crate) fn approval_position_line(position: Option<(u32, u32)>) -> String {
     match position {
         // `1 of 1` tells the operator nothing they did not already know. The
@@ -703,7 +592,7 @@ pub(crate) fn approval_position_line(position: Option<(u32, u32)>) -> String {
 /// Localized text-reply approval prompt using approve/deny/always reply
 /// keywords: Matrix's own reply parser (distinct from
 /// [`parse_approval_reply`]) expects this shape.
-#[cfg(any(feature = "channel-matrix", test))]
+#[cfg(test)]
 pub(crate) fn build_approve_deny_approval_prompt(
     token: &str,
     tool_name: &str,
@@ -730,28 +619,14 @@ pub(crate) fn build_approve_deny_approval_prompt(
     )
 }
 
-#[cfg(any(
-    feature = "channel-discord",
-    feature = "channel-matrix",
-    feature = "channel-signal",
-    feature = "channel-slack",
-    feature = "channel-telegram",
-    test
-))]
+#[cfg(any(feature = "channel-telegram", test))]
 pub(crate) struct PendingApproval {
     pub(crate) sender: tokio::sync::oneshot::Sender<zeroclaw_api::channel::ChannelApprovalResponse>,
     pub(crate) destination: String,
     pub(crate) tool_name: String,
 }
 
-#[cfg(any(
-    feature = "channel-discord",
-    feature = "channel-matrix",
-    feature = "channel-signal",
-    feature = "channel-slack",
-    feature = "channel-telegram",
-    test
-))]
+#[cfg(any(feature = "channel-telegram", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PendingApprovalResolution {
     NotFound,
@@ -760,28 +635,15 @@ pub(crate) enum PendingApprovalResolution {
     ReceiverClosed,
 }
 
-#[cfg(any(
-    feature = "channel-discord",
-    feature = "channel-matrix",
-    feature = "channel-signal",
-    feature = "channel-slack",
-    feature = "channel-telegram",
-    test
-))]
+#[cfg(any(feature = "channel-telegram", test))]
 impl PendingApprovalResolution {
-    #[cfg(any(feature = "channel-matrix", feature = "channel-slack", test))]
+    #[cfg(test)]
     pub(crate) fn suppresses_message(self) -> bool {
         !matches!(self, Self::NotFound)
     }
 }
 
-#[cfg(any(
-    feature = "channel-discord",
-    feature = "channel-matrix",
-    feature = "channel-signal",
-    feature = "channel-slack",
-    test
-))]
+#[cfg(test)]
 pub(crate) async fn resolve_pending_approval(
     pending_approvals: &tokio::sync::Mutex<std::collections::HashMap<String, PendingApproval>>,
     token: &str,
@@ -800,14 +662,7 @@ pub(crate) async fn resolve_pending_approval(
     .0
 }
 
-#[cfg(any(
-    feature = "channel-discord",
-    feature = "channel-matrix",
-    feature = "channel-signal",
-    feature = "channel-slack",
-    feature = "channel-telegram",
-    test
-))]
+#[cfg(any(feature = "channel-telegram", test))]
 pub(crate) async fn resolve_pending_approval_with_tool(
     pending_approvals: &tokio::sync::Mutex<std::collections::HashMap<String, PendingApproval>>,
     token: &str,
@@ -845,68 +700,9 @@ pub fn conversation_history_key(msg: &zeroclaw_api::channel::ChannelMessage) -> 
     }
 }
 
-/// Fail with the vendor's status and body when an HTTP response is not a
-/// success, otherwise hand the response back so the caller can read it.
-///
-/// This is the one shape twenty-nine hand-written checks shared: a status
-/// test, the status captured, the body read best-effort, and
-/// `"<what> failed (<status>): <body>"`. Keeping the message byte-identical
-/// means callers migrate without changing what an operator sees in a log.
-/// Sites that need something else, such as a typed error, a sanitized body, a
-/// status-specific retry, or a body that must stay unread so it can be
-/// streamed — keep their own check on purpose.
-#[cfg(any(
-    feature = "channel-dingtalk",
-    feature = "channel-discord",
-    feature = "channel-line",
-    feature = "channel-mochat",
-    feature = "channel-qq",
-    feature = "channel-twitter",
-    feature = "channel-wechat",
-    feature = "channel-wecom"
-))]
-pub(crate) async fn ensure_success(
-    resp: reqwest::Response,
-    what: &str,
-) -> anyhow::Result<reqwest::Response> {
-    if resp.status().is_success() {
-        return Ok(resp);
-    }
-    let status = resp.status();
-    let err = resp.text().await.unwrap_or_default();
-    anyhow::bail!("{what} failed ({status}): {err}");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(feature = "channel-qq")]
-    #[tokio::test]
-    async fn ensure_success_passes_a_success_through_and_reports_status_and_body_otherwise() {
-        let (url, server) = spawn_raw_http_response(
-            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec(),
-            false,
-        )
-        .await;
-        let resp = reqwest::get(&url).await.unwrap();
-        let resp = ensure_success(resp, "QQ sendMessage").await.unwrap();
-        assert_eq!(resp.text().await.unwrap(), "ok");
-        server.await.unwrap();
-
-        let (url, server) = spawn_raw_http_response(
-            b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 5\r\n\r\nboom!".to_vec(),
-            false,
-        )
-        .await;
-        let resp = reqwest::get(&url).await.unwrap();
-        let err = ensure_success(resp, "QQ sendMessage").await.unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "QQ sendMessage failed (500 Internal Server Error): boom!"
-        );
-        server.await.unwrap();
-    }
 
     /// Verifies the exported compatibility wrapper retains the legacy UTF-8 boundary contract.
     #[allow(deprecated)]
@@ -918,78 +714,7 @@ mod tests {
         assert_eq!(floor_char_boundary(text, usize::MAX), text.len());
     }
 
-    #[cfg(any(feature = "channel-mattermost", feature = "channel-qq"))]
-    async fn response_from_raw_http(
-        raw_response: Vec<u8>,
-        hold_open: bool,
-    ) -> (reqwest::Response, tokio::task::JoinHandle<()>) {
-        let (url, server) = spawn_raw_http_response(raw_response, hold_open).await;
-        let response = reqwest::get(url).await.unwrap();
-        (response, server)
-    }
-
-    #[cfg(any(feature = "channel-mattermost", feature = "channel-qq"))]
-    #[tokio::test]
-    async fn bounded_response_body_rejects_declared_oversize() {
-        let (response, server) = response_from_raw_http(
-            b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n".to_vec(),
-            true,
-        )
-        .await;
-
-        let error = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            read_response_body_limited(response, 5),
-        )
-        .await
-        .expect("declared oversize must be rejected before reading the body")
-        .unwrap_err();
-        server.abort();
-
-        assert!(
-            error
-                .to_string()
-                .contains("content length 6 exceeds 5-byte limit")
-        );
-    }
-
-    #[cfg(any(feature = "channel-mattermost", feature = "channel-qq"))]
-    #[tokio::test]
-    async fn bounded_response_body_accepts_chunked_body_at_limit() {
-        let (response, server) = response_from_raw_http(
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n2\r\nab\r\n3\r\ncde\r\n0\r\n\r\n".to_vec(),
-            false,
-        )
-        .await;
-
-        let body = read_response_body_limited(response, 5).await.unwrap();
-        server.await.unwrap();
-
-        assert_eq!(body, b"abcde");
-    }
-
-    #[cfg(any(feature = "channel-mattermost", feature = "channel-qq"))]
-    #[tokio::test]
-    async fn bounded_response_body_rejects_chunked_body_over_limit() {
-        let (response, server) = response_from_raw_http(
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n3\r\ndef\r\n".to_vec(),
-            true,
-        )
-        .await;
-
-        let error = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            read_response_body_limited(response, 5),
-        )
-        .await
-        .expect("chunked oversize must be rejected before the response ends")
-        .unwrap_err();
-        server.abort();
-
-        assert!(error.to_string().contains("exceeds 5-byte limit"));
-    }
-
-    #[cfg(any(feature = "channel-slack", feature = "channel-telegram"))]
+    #[cfg(feature = "channel-telegram")]
     #[test]
     fn lifecycle_progress_maps_typed_events_to_fluent_keys() {
         assert_eq!(
@@ -1570,13 +1295,6 @@ mod tests {
         // literal-key typos in feature-gated sources.
         const SOURCES: &[&str] = &[
             include_str!("telegram.rs"),
-            include_str!("discord/mod.rs"),
-            include_str!("discord/approval.rs"),
-            include_str!("slack.rs"),
-            include_str!("matrix.rs"),
-            include_str!("signal.rs"),
-            include_str!("whatsapp.rs"),
-            include_str!("whatsapp_web.rs"),
             include_str!("acp_channel.rs"),
             include_str!("util.rs"),
         ];
