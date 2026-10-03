@@ -594,7 +594,6 @@ async fn handle_socket(
             Arc::clone(&state.config),
             &agent_alias,
             Some(&session_cwd),
-            true,
             false,
             // The gateway WebSocket turn does not transport ACP file attachments.
             false,

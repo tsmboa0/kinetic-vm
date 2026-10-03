@@ -1321,18 +1321,15 @@ impl DelegateTool {
                 skills: &skills,
                 runtime,
                 caller_allowed: None,
-                connect_mcp: true,
                 connect_peripherals: false,
                 exclude_memory: false,
                 acp_delivery: false,
-                list_deferred_mcp_specs: false,
                 emit_assembly_logs: true,
                 // Delegate: targets are short-lived independent chat
                 // sessions with no cross-turn reuse contract, so the
                 // per-call `connect_all` is the correct choice. The
                 // daemon heartbeat worker is the only `mcp_registry`
                 // supplier.
-                mcp_registry: None,
             },
         )
         .await;
@@ -1764,7 +1761,7 @@ impl DelegateTool {
         match policy.allowed_tools.as_ref() {
             None => true,
             Some(list) if list.is_empty() => false,
-            Some(list) => list.iter().any(|t| t == name) || name.contains("__"),
+            Some(list) => list.iter().any(|t| t == name),
         }
     }
 
@@ -4776,13 +4773,10 @@ impl DelegateTool {
                         skills: &[],
                         runtime: Arc::new(crate::platform::NativeRuntime::new()),
                         caller_allowed: None,
-                        connect_mcp: false,
                         connect_peripherals: false,
                         exclude_memory: false,
                         acp_delivery: false,
-                        list_deferred_mcp_specs: false,
                         emit_assembly_logs: false,
-                        mcp_registry: None,
                     },
                 )
                 .await;
@@ -10916,7 +10910,7 @@ mod tests {
     }
 
     #[test]
-    fn delegate_admits_with_mcp_auto_admits_double_underscore_mcp_names() {
+    fn delegate_admits_with_mcp_requires_an_explicit_allowlist_entry() {
         let tool = DelegateTool::new(HashMap::new(), None, test_security())
             .with_risk_profiles(agentic_risk_profiles(vec!["shell".to_string()]))
             .with_parent_tools(Arc::new(RwLock::new(Vec::new())));
@@ -10930,12 +10924,9 @@ mod tests {
             DelegateTool::delegate_admits_with_mcp(&policy, "shell"),
             "explicit allow-list entry must be admitted"
         );
-        // A runtime-discovered MCP wrapper (matching `<server>__<tool>`) is
-        // auto-admitted even though it is not in `allowed_tools`. This is
-        // the destructive capability the reviewer called out.
         assert!(
-            DelegateTool::delegate_admits_with_mcp(&policy, "filesystem__write_file"),
-            "double-underscore MCP name must be auto-admitted"
+            !DelegateTool::delegate_admits_with_mcp(&policy, "filesystem__write_file"),
+            "a name that is not on the allowlist is denied, including names that contain __"
         );
         // Non-MCP names outside the allow-list still get rejected.
         assert!(
@@ -10946,7 +10937,7 @@ mod tests {
 
     #[test]
     fn caller_allowed_narrowing_excludes_mcp_capability_tools() {
-        use zeroclaw_tools::tool_search::ToolAccessPolicy;
+        use zeroclaw_tools::tool_access::ToolAccessPolicy;
         let policy = ToolAccessPolicy::from_security(
             Some(&["shell".to_string()]),
             None,
@@ -10984,7 +10975,7 @@ mod tests {
         );
         assert!(
             !DelegateTool::delegate_admits_with_mcp(&policy, "filesystem__write_file"),
-            "excluded_tools must block auto-admitted MCP name"
+            "excluded_tools must block a name that is not on the allowlist"
         );
     }
 
@@ -11015,80 +11006,6 @@ mod tests {
         assert!(
             DelegateTool::delegate_admits_with_mcp(&policy, "memory_recall"),
             "non-excluded entry must be admitted"
-        );
-    }
-
-    #[tokio::test]
-    async fn deferred_mcp_activation_updates_delegate_parent_tools() {
-        let config = agentic_agent_config();
-        let parent_tools: Arc<RwLock<Vec<Arc<dyn Tool>>>> = Arc::new(RwLock::new(Vec::new()));
-        let delegate = DelegateTool::new(HashMap::new(), None, test_security())
-            .with_runtime_profiles(agentic_runtime_profiles(10))
-            .with_risk_profiles(agentic_risk_profiles(vec![
-                "mcp_service_a__list_projects".to_string(),
-            ]))
-            .with_parent_tools(Arc::clone(&parent_tools));
-
-        let activated = Arc::new(std::sync::Mutex::new(crate::tools::ActivatedToolSet::new()));
-        let deferred = crate::tools::DeferredMcpToolSet {
-            stubs: vec![{
-                let def = zeroclaw_tools::mcp_protocol::McpToolDef {
-                    name: "list_projects".to_string(),
-                    description: Some("List projects".to_string()),
-                    input_schema: serde_json::json!({"type": "object", "properties": {}}),
-                };
-                zeroclaw_tools::mcp_deferred::DeferredMcpToolStub::new(
-                    "mcp_service_a__list_projects".to_string(),
-                    def,
-                )
-            }],
-            registry: Arc::new(
-                zeroclaw_tools::mcp_client::McpRegistry::connect_all(&[])
-                    .await
-                    .unwrap(),
-            ),
-            security: Arc::new(zeroclaw_config::policy::SecurityPolicy::default()),
-        };
-        let handle = Arc::clone(&parent_tools);
-        let tool_search = crate::tools::ToolSearchTool::new(deferred, Arc::clone(&activated))
-            .with_activation_hook(Arc::new(move |tool| {
-                let mut tools = handle.write();
-                if !tools.iter().any(|existing| existing.name() == tool.name()) {
-                    tools.push(tool);
-                }
-            }));
-
-        let search = tool_search
-            .execute(serde_json::json!({"query": "select:mcp_service_a__list_projects"}))
-            .await
-            .unwrap();
-        assert!(search.success);
-
-        {
-            let tools = parent_tools.read();
-            assert_eq!(tools.len(), 1);
-            assert_eq!(tools[0].name(), "mcp_service_a__list_projects");
-        }
-
-        let model_provider = FinalOnlyModelProvider;
-        let result = delegate
-            .execute_agentic(
-                "agentic",
-                &config,
-                "openrouter",
-                "model-test",
-                &model_provider,
-                "run mcp",
-                Some(0.2),
-            )
-            .await
-            .unwrap();
-
-        assert!(result.success, "Expected success, got: {:?}", result.error);
-        assert!(
-            result.output.contains("delegate saw tool"),
-            "Expected final output from delegate loop, got: {}",
-            result.output
         );
     }
 

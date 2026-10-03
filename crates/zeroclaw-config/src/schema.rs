@@ -485,11 +485,6 @@ pub struct Config {
     #[nested]
     pub knowledge_bundles: HashMap<String, KnowledgeBundleConfig>,
 
-    /// Named MCP server bundles (`[mcp_bundles.<alias>]`).
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[nested]
-    pub mcp_bundles: HashMap<String, McpBundleConfig>,
-
     /// Named peer groups (`[peer_groups.<name>]`). Each entry binds a
     /// channel, a list of member agents, and optional non-agent
     /// (external) members and a per-group blocklist. Mutual opt-in:
@@ -522,11 +517,6 @@ pub struct Config {
     #[nested]
     #[group = "Tools"]
     pub tts: TtsConfig,
-
-    /// External MCP server connections (`[mcp]`).
-    #[serde(default, alias = "mcpServers")]
-    #[nested]
-    pub mcp: McpConfig,
 
     /// Dynamic node discovery configuration (`[nodes]`).
     #[serde(default)]
@@ -1757,28 +1747,6 @@ pub struct AliasedAgentConfig {
     #[tab(Bundles)]
     #[serde(default)]
     pub knowledge_bundles: Vec<String>,
-    /// MCP bundle aliases. Each entry references `mcp_bundles[key]`, a named
-    /// group of MCP servers. Secure by default: an agent is granted only the
-    /// servers named by its bundles. An agent with no `mcp_bundles` receives
-    /// no MCP servers (omission is not a grant). See
-    /// `Config::mcp_servers_for_agent`.
-    #[tab(Bundles)]
-    #[serde(default)]
-    pub mcp_bundles: Vec<String>,
-    /// Initialize this agent's `mcp_bundles` tools when it serves an ACP
-    /// (`session/new`) session.
-    ///
-    /// Off by default: MCP servers are external processes/services that can
-    /// block startup while they connect, and ACP `session/new` is expected to
-    /// return promptly. Enable it when this agent must call its `mcp_bundles`
-    /// tools over ACP; `session/new` then pays the one-time MCP connection cost
-    /// (bounded and non-fatal per server). Set per agent so each ACP profile
-    /// opts in independently; when this agent is the ACP default
-    /// (`acp.default_agent`, or the sole configured agent), the flag is picked
-    /// up automatically for sessions that omit `agentAlias`.
-    #[tab(Bundles)]
-    #[serde(default)]
-    pub acp_enable_mcp: bool,
     /// Cron job aliases. Each entry references `cron[key]`, a declarative
     /// scheduled job invoked by the scheduler on its configured trigger.
     /// When the cron fires, this agent is the actor that executes the job.
@@ -1928,8 +1896,6 @@ impl Default for AliasedAgentConfig {
             runtime_profile: crate::providers::RuntimeProfileRef::default(),
             skill_bundles: Vec::new(),
             knowledge_bundles: Vec::new(),
-            mcp_bundles: Vec::new(),
-            acp_enable_mcp: false,
             cron_jobs: Vec::new(),
             tts_provider: crate::providers::TtsProviderRef::default(),
             transcription_provider: crate::providers::TranscriptionProviderRef::default(),
@@ -2716,68 +2682,6 @@ impl Config {
             .join("workspace")
     }
 
-    /// Effective MCP servers granted to an agent by its `mcp_bundles`.
-    ///
-    /// Secure by default: omission is not a grant. An agent is reached via
-    /// `resolved_agent_config`; an unknown alias or one with no `mcp_bundles`
-    /// receives NO MCP servers. See [`Self::mcp_servers_for_bundles`] for how
-    /// a non-empty bundle list resolves to servers.
-    #[must_use]
-    pub fn mcp_servers_for_agent(&self, agent_alias: &str) -> Vec<McpServerConfig> {
-        match self.resolved_agent_config(agent_alias) {
-            Some(agent) => self.mcp_servers_for_bundles(&agent.mcp_bundles),
-            None => Vec::new(),
-        }
-    }
-
-    /// Resolve a set of `[mcp_bundles.<alias>]` references to the concrete
-    /// `[mcp.servers]` entries they grant.
-    ///
-    /// Secure by default: omission is not a grant.
-    /// - An empty `bundle_aliases` grants NO servers (`Vec::new()`).
-    /// - The grant is the union of each referenced bundle's `servers`, in
-    ///   first-seen order with duplicates dropped.
-    /// - Deny wins: a server name listed in ANY referenced bundle's `exclude`
-    ///   is removed from the grant, regardless of which bundle included it.
-    /// - An unknown bundle alias grants nothing (it is skipped, not an error)
-    ///   and a server name with no matching `[mcp.servers]` entry grants
-    ///   nothing. Both fail closed: a misconfiguration narrows access, never
-    ///   widens it.
-    #[must_use]
-    pub fn mcp_servers_for_bundles(&self, bundle_aliases: &[String]) -> Vec<McpServerConfig> {
-        if bundle_aliases.is_empty() {
-            return Vec::new();
-        }
-        // Deny wins: collect every excluded name across the referenced bundles
-        // first, so an include in one bundle cannot defeat an exclude in another.
-        let mut excluded: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for alias in bundle_aliases {
-            if let Some(bundle) = self.mcp_bundles.get(alias) {
-                for name in &bundle.exclude {
-                    excluded.insert(name.as_str());
-                }
-            }
-        }
-        // Union of granted names in first-seen order, skipping excludes.
-        let mut granted: Vec<&str> = Vec::new();
-        for alias in bundle_aliases {
-            if let Some(bundle) = self.mcp_bundles.get(alias) {
-                for name in &bundle.servers {
-                    let n = name.as_str();
-                    if !excluded.contains(n) && !granted.contains(&n) {
-                        granted.push(n);
-                    }
-                }
-            }
-        }
-        // Resolve names against the configured servers. A name that matches no
-        // `[mcp.servers]` entry is not granted.
-        granted
-            .into_iter()
-            .filter_map(|name| self.mcp.servers.iter().find(|s| s.name == name).cloned())
-            .collect()
-    }
-
     /// `<install>/shared/` — directory shared across every agent on this
     /// host. Holds skills, skill bundles, knowledge bundles, and any
     /// other content not scoped to a single agent's workspace. Distinct
@@ -3235,223 +3139,6 @@ impl Default for TranscriptionConfig {
             google: None,
             local_whisper: None,
             transcribe_non_ptt_audio: false,
-        }
-    }
-}
-
-// ── MCP ─────────────────────────────────────────────────────────
-
-/// Transport type for MCP server connections.
-#[derive(
-    Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, zeroclaw_macros::ConfigEnum,
-)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum McpTransport {
-    /// Spawn a local process and communicate over stdin/stdout.
-    #[default]
-    Stdio,
-    /// Connect via HTTP POST.
-    Http,
-    /// Connect via HTTP + Server-Sent Events.
-    Sse,
-}
-
-impl McpTransport {
-    /// Wire token for this transport, matching the `rename_all = "lowercase"`
-    /// serde representation (`stdio`/`http`/`sse`). The exhaustive match makes
-    /// a new variant a compile error here rather than a silent miss.
-    pub fn wire_name(self) -> &'static str {
-        match self {
-            McpTransport::Stdio => "stdio",
-            McpTransport::Http => "http",
-            McpTransport::Sse => "sse",
-        }
-    }
-
-    /// The `McpServerConfig` leaf this transport requires to be non-empty.
-    /// Single source of truth shared by `validate_mcp_config` (runtime
-    /// enforcement) and the config-form `x-required-by-transport` schema
-    /// metadata the Operator Console reads to mark the right field Required
-    /// per transport. Changing the relationship here updates both consumers.
-    pub fn required_leaf(self) -> &'static str {
-        match self {
-            McpTransport::Stdio => "command",
-            McpTransport::Http | McpTransport::Sse => "url",
-        }
-    }
-}
-
-/// Every transport, enumerated on-demand from the schema rather than a
-/// hand-maintained list, so the set is derived from the enum itself and a new
-/// variant shows up here automatically (its `required_leaf` arm then forces a
-/// decision). schemars emits a fieldless enum as a top-level `enum` array, or
-/// as `oneOf` of `const`s once the variants carry doc comments; handle both,
-/// matching the existing `enum_variants` helper. The wire tokens honor the
-/// serde rename, so they round-trip straight back to the enum.
-#[cfg(feature = "schema-export")]
-fn mcp_transports() -> Vec<McpTransport> {
-    let schema = serde_json::to_value(schemars::schema_for!(McpTransport)).unwrap_or_default();
-    let wire_values: Vec<serde_json::Value> =
-        if let Some(values) = schema.get("enum").and_then(serde_json::Value::as_array) {
-            values.clone()
-        } else if let Some(variants) = schema.get("oneOf").and_then(serde_json::Value::as_array) {
-            variants
-                .iter()
-                .filter_map(|variant| variant.get("const").cloned())
-                .collect()
-        } else {
-            Vec::new()
-        };
-    wire_values
-        .into_iter()
-        .filter_map(|value| serde_json::from_value::<McpTransport>(value).ok())
-        .collect()
-}
-
-/// Per-transport required-leaf map, projected from [`McpTransport::required_leaf`]
-/// onto the schema as the `x-required-by-transport` extension on
-/// `McpServerConfig`. The Operator Console config form reads it so the Required
-/// badge tracks the selected transport (`stdio` needs `command`, `http`/`sse`
-/// need `url`) instead of hardcoding the relationship in the web surface.
-#[cfg(feature = "schema-export")]
-fn mcp_required_by_transport() -> serde_json::Value {
-    let map: serde_json::Map<String, serde_json::Value> = mcp_transports()
-        .into_iter()
-        .map(|transport| {
-            (
-                transport.wire_name().to_string(),
-                serde_json::Value::String(transport.required_leaf().to_string()),
-            )
-        })
-        .collect();
-    serde_json::Value::Object(map)
-}
-
-/// Configuration for a single external MCP server.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[cfg_attr(
-    feature = "schema-export",
-    schemars(extend("x-required-by-transport" = mcp_required_by_transport()))
-)]
-#[prefix = "mcp.servers"]
-pub struct McpServerConfig {
-    /// Display name used as a tool prefix (`<server>__<tool>`). Filled in
-    /// from the supplied `map_key` when the entry is created via
-    /// `create_map_key("mcp.servers", "<name>")`; `#[serde(default)]` lets
-    /// the macro default-construct from `{}` before the name gets injected.
-    #[serde(default)]
-    pub name: String,
-    /// Transport type (default: stdio).
-    #[serde(default)]
-    pub transport: McpTransport,
-    /// URL for HTTP/SSE transports.
-    #[serde(default)]
-    pub url: Option<String>,
-    /// Executable to spawn for stdio transport.
-    #[serde(default)]
-    pub command: String,
-    /// Command arguments for stdio transport.
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// Optional environment variables for stdio transport.
-    #[serde(default)]
-    #[secret]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub env: HashMap<String, String>,
-    /// Optional HTTP headers for HTTP/SSE transports. Treated as secret:
-    /// the values commonly carry Bearer tokens for the upstream MCP server.
-    #[serde(default)]
-    #[secret]
-    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
-    pub headers: HashMap<String, String>,
-    /// Optional per-call timeout in seconds (hard capped in validation).
-    #[serde(default)]
-    pub tool_timeout_secs: Option<u64>,
-    /// Maximum bytes accepted for a single HTTP/SSE JSON-RPC response body,
-    /// enforced at read time before the body is parsed or any embedded resource
-    /// is materialized. A compromised or misbehaving server cannot force an
-    /// unbounded response-body allocation. This is the *encoded wire* cap, not
-    /// the decoded materialization budget: `None`/`0` uses the built-in default
-    /// of 16,078,168 bytes, sized so a full 10 MiB decoded embedded-resource blob
-    /// (its base64 expansion plus JSON-RPC envelope headroom) still fits. The
-    /// separate 10 MiB figure is the decoded aggregate blob budget applied after
-    /// parsing, not this wire cap.
-    #[serde(default)]
-    pub max_response_bytes: Option<u64>,
-    /// Resource URIs to read once at agent startup and inject into the system
-    /// prompt as untrusted, server-origin context. Each is read via
-    /// `resources/read` on this server; pins on a server that does not advertise
-    /// resources, or that the agent's tool policy denies, are skipped with a
-    /// warning. Read once per run (not refreshed; no subscriptions).
-    #[serde(default)]
-    pub pinned_resources: Vec<String>,
-    /// Absolute path to a PEM-encoded CA certificate or bundle to trust in
-    /// addition to the default roots for this server's HTTP/SSE transport.
-    ///
-    /// Certificate and hostname verification remain enabled. The path must
-    /// name a regular file no larger than 1 MiB; a missing, unreadable, empty,
-    /// oversized, non-regular, or invalid file is a hard connection error
-    /// rather than a fallback to the default trust store. When set, the
-    /// configured URL and any advertised SSE message endpoint must use HTTPS;
-    /// plaintext URLs and downgrade redirects are rejected. Ignored by stdio.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls_ca_cert_path: Option<String>,
-}
-
-/// External MCP client configuration (`[mcp]` section).
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "mcp"]
-pub struct McpConfig {
-    /// Enable MCP tool loading.
-    #[tab(Settings)]
-    #[serde(default = "default_mcp_enabled")]
-    pub enabled: bool,
-    /// Load MCP tool schemas on-demand via `tool_search` instead of eagerly
-    /// including them in the LLM context window. When enabled, only tool names
-    /// are listed in the system prompt; the LLM must call `tool_search` to fetch
-    /// full schemas before invoking a deferred tool.
-    #[tab(Settings)]
-    #[serde(default = "default_deferred_loading")]
-    pub deferred_loading: bool,
-    /// Configured MCP servers. The `#[nested]` annotation makes the macro
-    /// expose this as a List section in `map_key_sections()`, so the
-    /// dashboard's `+ Add MCP server` affordance and the `POST
-    /// /api/config/map-key?path=mcp.servers&key=<name>` endpoint pick it
-    /// up automatically (no hand-table on the gateway side).
-    ///
-    /// `#[natural_key = "name"]` opts the Vec into per-element property
-    /// routing (see `route_vec_path` and the `Configurable` derive's
-    /// `#[natural_key]` arm). With it, `set_prop("mcp.servers.<name>.url",
-    /// ...)` and `get_prop("mcp.servers.<name>.transport")` resolve to
-    /// the matching element's own `set_prop` / `get_prop`, and the
-    /// `mcp.servers` section behaves like a `HashMap<String,
-    /// McpServerConfig>` from the dashboard / TUI's point of view.
-    /// `name` itself becomes read-only via `set_prop`; rename goes
-    /// through `rename_map_key` which mutates the `name` field in place.
-    #[tab(Servers)]
-    #[serde(default, alias = "mcpServers")]
-    #[nested]
-    #[natural_key = "name"]
-    pub servers: Vec<McpServerConfig>,
-}
-
-fn default_mcp_enabled() -> bool {
-    true
-}
-
-fn default_deferred_loading() -> bool {
-    false
-}
-
-impl Default for McpConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_mcp_enabled(),
-            deferred_loading: default_deferred_loading(),
-            servers: Vec::new(),
         }
     }
 }
@@ -6846,8 +6533,7 @@ pub struct FileUploadConfig {
     #[serde(default = "default_file_upload_timeout_secs")]
     pub timeout_secs: u64,
 
-    /// Static HTTP headers attached to every upload request. Same shape as
-    /// `[mcp.servers.*.headers]`.
+    /// Static HTTP headers attached to every upload request.
     #[serde(default)]
     #[secret]
     #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
@@ -7023,8 +6709,7 @@ pub struct FileDownloadConfig {
     pub allowed_private_hosts: Vec<String>,
 
     /// Static HTTP headers attached to every download request — typically an
-    /// `Authorization: Bearer …` token for the upstream endpoint. Same shape as
-    /// `[mcp.servers.*.headers]`.
+    /// `Authorization: Bearer …` token for the upstream endpoint.
     #[serde(default)]
     #[secret]
     #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
@@ -7381,8 +7066,6 @@ fn service_selector_matches(selector: &str, service_key: &str) -> bool {
     false
 }
 
-const MCP_MAX_TOOL_TIMEOUT_SECS: u64 = 600;
-
 fn validate_plugin_entries(config: &PluginsConfig) -> Result<()> {
     let mut seen = std::collections::HashSet::new();
     for (index, entry) in config.entries.iter().enumerate() {
@@ -7425,101 +7108,6 @@ fn validate_plugin_channel_instances(config: &ChannelsConfig) -> Result<()> {
         zeroclaw_api::plugin::validate_plugin_package_name(&declaration.package).map_err(
             |error| anyhow::Error::msg(format!("channels.plugin.{alias}.package: {error}")),
         )?;
-    }
-    Ok(())
-}
-
-fn validate_mcp_config(config: &McpConfig) -> Result<()> {
-    let mut seen_names = std::collections::HashSet::new();
-    for (i, server) in config.servers.iter().enumerate() {
-        let name = server.name.trim();
-        if name.is_empty() {
-            validation_bail!(
-                RequiredFieldEmpty,
-                format!("mcp.servers[{i}].name"),
-                "mcp.servers[{i}].name must not be empty"
-            );
-        }
-        if !seen_names.insert(name.to_ascii_lowercase()) {
-            anyhow::bail!("mcp.servers contains duplicate name: {name}");
-        }
-
-        if let Some(timeout) = server.tool_timeout_secs {
-            if timeout == 0 {
-                validation_bail!(
-                    InvalidNumericRange,
-                    format!("mcp.servers[{i}].tool_timeout_secs"),
-                    "mcp.servers[{i}].tool_timeout_secs must be greater than 0"
-                );
-            }
-            if timeout > MCP_MAX_TOOL_TIMEOUT_SECS {
-                anyhow::bail!(
-                    "mcp.servers[{i}].tool_timeout_secs exceeds max {MCP_MAX_TOOL_TIMEOUT_SECS}"
-                );
-            }
-        }
-
-        // The transport -> required-leaf relationship is owned by
-        // `McpTransport::required_leaf`, which feeds the `x-required-by-transport`
-        // schema metadata. The validator matches on the `McpTransport` enum so a
-        // new variant is a compile error here rather than a runtime fall-through.
-        match server.transport {
-            McpTransport::Stdio => {
-                if server.command.trim().is_empty() {
-                    anyhow::bail!(
-                        "mcp.servers[{i}] with transport=stdio requires non-empty command"
-                    );
-                }
-            }
-            McpTransport::Http | McpTransport::Sse => {
-                let url = server
-                    .url
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(|| {
-                        let transport_str = server.transport.wire_name();
-                        ::zeroclaw_log::record!(
-                            WARN,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Reject
-                            )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({
-                                "index": i,
-                                "transport": transport_str,
-                            })),
-                            "mcp.servers entry rejected: transport requires url"
-                        );
-                        anyhow::Error::msg(format!(
-                            "mcp.servers[{i}] with transport={transport_str} requires url"
-                        ))
-                    })?;
-                let parsed = reqwest::Url::parse(url)
-                    .with_context(|| format!("mcp.servers[{i}].url is not a valid URL"))?;
-                if !matches!(parsed.scheme(), "http" | "https") {
-                    anyhow::bail!("mcp.servers[{i}].url must use http/https");
-                }
-                if let Some(ca_path) = server.tls_ca_cert_path.as_deref() {
-                    if ca_path.trim().is_empty() {
-                        validation_bail!(
-                            RequiredFieldEmpty,
-                            format!("mcp.servers[{i}].tls_ca_cert_path"),
-                            "mcp.servers[{i}].tls_ca_cert_path must not be empty"
-                        );
-                    }
-                    if !std::path::Path::new(ca_path).is_absolute() {
-                        anyhow::bail!("mcp.servers[{i}].tls_ca_cert_path must be an absolute path");
-                    }
-                    if parsed.scheme() != "https" {
-                        anyhow::bail!(
-                            "mcp.servers[{i}].url must use https when tls_ca_cert_path is set"
-                        );
-                    }
-                }
-            }
-        }
     }
     Ok(())
 }
@@ -10647,25 +10235,10 @@ pub struct RiskProfileConfig {
     /// Tools the agent may call in agentic mode. An omitted field and an
     /// explicit `allowed_tools = []` are the same legacy state: no
     /// authorization constraint (unrestricted). A non-empty list is an
-    /// explicit closed set for built-ins and MCP; skill tools remain
-    /// registered unless listed in `excluded_tools`. For an explicit
-    /// deny-all gate, set [`Self::deny_all_tools`] — an empty list does
-    /// NOT mean deny-all.
-    ///
-    /// MCP exception: when the list is non-empty, runtime-discovered MCP
-    /// tools (any name containing `__`, which is the `<server>__<tool>`
-    /// convention used by the MCP wrapper) are auto-admitted into the
-    /// effective allow-list without needing to be listed here individually.
-    /// This keeps the post-change eager-MCP default usable for agents with an
-    /// explicit allow-list. Block individual MCP tools via `excluded_tools`.
-    ///
-    /// Scope of the exception: the `__` auto-admit applies only to this
-    /// risk-profile allow-list, **not** to caller-supplied per-run
-    /// `allowed_tools` (cron job `allowed_tools`, narrowed delegate
-    /// invocations, etc.). Per-run lists are still strict explicit-list
-    /// intersections, so a job that narrows `allowed_tools = ["cron_add"]`
-    /// will not see runtime-discovered MCP tools unless it names them.
-    ///
+    /// explicit closed set: a tool runs only when its name is listed.
+    /// Skill tools remain registered unless listed in `excluded_tools`.
+    /// For an explicit deny-all gate, set [`Self::deny_all_tools`] — an
+    /// empty list does NOT mean deny-all.
     pub allowed_tools: Vec<String>,
     /// Explicit deny-all for this profile: no tool may be invoked under it
     /// (built-ins, MCP tools, and skill-defined tools alike — there is no
@@ -10678,9 +10251,7 @@ pub struct RiskProfileConfig {
     /// Tools excluded from non-CLI channels under this profile.
     ///
     /// Also subtracts from the agentic-delegate allow-list resolved at
-    /// runtime, which is the only way to block individual
-    /// `<server>__<tool>` MCP names that would otherwise be auto-admitted
-    /// by the `allowed_tools` MCP exception described above.
+    /// runtime.
     pub excluded_tools: Vec<String>,
     // ── Sandbox (from security.sandbox) ─────────────────────────────
     /// Whether the sandbox is enabled for this profile. `None` inherits global.
@@ -10898,26 +10469,6 @@ pub struct KnowledgeBundleConfig {
     pub sources: Vec<String>,
     /// Tags for filtering or categorising sources within the bundle.
     pub tags: Vec<String>,
-}
-
-/// Named MCP server bundle (`[mcp_bundles.<alias>]`).
-///
-/// A reusable group of MCP servers granted to an agent that references the
-/// bundle by alias in `agents.<alias>.mcp_bundles`. Server IDs are matched
-/// against `[mcp.servers]` by `name`. Resolution is secure by default (see
-/// `Config::mcp_servers_for_bundles`): an ID with no matching server grants
-/// nothing, and `exclude` wins over `servers` across every bundle an agent
-/// references.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "mcp_bundle"]
-#[serde(default)]
-pub struct McpBundleConfig {
-    /// MCP server IDs (`[mcp.servers].name`) granted by this bundle.
-    pub servers: Vec<String>,
-    /// MCP server IDs removed from the grant. Deny wins: a name listed here is
-    /// excluded even if another referenced bundle includes it.
-    pub exclude: Vec<String>,
 }
 
 // ── Runtime ──────────────────────────────────────────────────────
@@ -16870,14 +16421,12 @@ impl Default for Config {
             runtime_profiles: HashMap::new(),
             skill_bundles: HashMap::new(),
             knowledge_bundles: HashMap::new(),
-            mcp_bundles: HashMap::new(),
             peer_groups: HashMap::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             query_classification: QueryClassificationConfig::default(),
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
-            mcp: McpConfig::default(),
             nodes: NodesConfig::default(),
             onboard_state: OnboardStateConfig::default(),
             knowledge: KnowledgeConfig::default(),
@@ -19917,77 +19466,6 @@ impl Config {
             }
         }
 
-        // MCP bundles: resolution is secure by default, so a dangling
-        // reference fails closed (the agent is granted fewer servers, never
-        // more). Surface the misconfiguration as a warning so an operator is
-        // not left wondering why an agent's MCP tools vanished, without
-        // turning a typo into a hard startup failure.
-        {
-            // Operator UX: secure-by-default means an agent with no
-            // `mcp_bundles` grant connects to ZERO MCP servers. When MCP is
-            // enabled and `[[mcp.servers]]` is non-empty but no
-            // `[mcp_bundles.*]` exists at all, every agent silently gets
-            // nothing. That is the inverse of the original silent
-            // no-op and surprises operators upgrading from <0.8.3. Warn
-            // once at startup so this surfaces via `doctor` and the
-            // standard startup warning stream.
-            if self.mcp.enabled && !self.mcp.servers.is_empty() && self.mcp_bundles.is_empty() {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note,)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({
-                            "mcp_servers_configured": self.mcp.servers.len(),
-                        })),
-                    "[[mcp.servers]] is configured but no [mcp_bundles.*] bundles exist; no agent will receive any MCP tools. Add a [mcp_bundles.<alias>] entry and reference it from agents.<alias>.mcp_bundles to grant access."
-                );
-            }
-
-            let known_servers: std::collections::HashSet<&str> =
-                self.mcp.servers.iter().map(|s| s.name.as_str()).collect();
-            for (bundle_alias, bundle) in &self.mcp_bundles {
-                for server in bundle.servers.iter().chain(bundle.exclude.iter()) {
-                    if !known_servers.contains(server.as_str()) {
-                        ::zeroclaw_log::record!(
-                            WARN,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Note
-                            )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(::serde_json::json!({
-                                "mcp_bundle": bundle_alias,
-                                "server": server,
-                            })),
-                            "mcp_bundles.<alias> references an MCP server name not in [mcp.servers]; it grants nothing"
-                        );
-                    }
-                }
-            }
-            for agent_alias in self.agents.keys() {
-                let Some(agent) = self.resolved_agent_config(agent_alias) else {
-                    continue;
-                };
-                for bundle_alias in &agent.mcp_bundles {
-                    if !self.mcp_bundles.contains_key(bundle_alias) {
-                        ::zeroclaw_log::record!(
-                            WARN,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Note
-                            )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                            .with_attrs(::serde_json::json!({
-                                "agent": agent_alias,
-                                "mcp_bundle": bundle_alias,
-                            })),
-                            "agents.<alias>.mcp_bundles references an undefined [mcp_bundles.<alias>]; the agent is granted no servers from it"
-                        );
-                    }
-                }
-            }
-        }
-
         // Validate every configured risk profile. Each profile stands on
         // its own — there is no "active" or "default" risk profile concept;
         // an agent's `risk_profile` field names exactly which one applies.
@@ -20351,11 +19829,6 @@ impl Config {
         validate_plugin_entries(&self.plugins)?;
         validate_plugin_channel_instances(&self.channels)?;
 
-        // MCP
-        if self.mcp.enabled {
-            validate_mcp_config(&self.mcp)?;
-        }
-
         // Knowledge graph
         if self.knowledge.enabled {
             if self.knowledge.max_nodes == 0 {
@@ -20643,7 +20116,6 @@ impl Config {
                     "knowledge_bundles",
                     &agent.knowledge_bundles,
                 ),
-                ("mcp_bundles", "mcp_bundles", &agent.mcp_bundles),
             ];
             for (section, field, values) in bare_multi {
                 for (i, key) in values.iter().enumerate() {
@@ -22514,7 +21986,7 @@ fn delete_array_of_tables_entry(
 /// Drop empty arrays / tables / strings from a value before writing it
 /// to the doc. HashMap entries serialize every default field (no
 /// `skip_serializing_if` on individual `Vec<String>` fields), so without
-/// this pass an `mcp_bundles.<alias>` write produces `servers = []`,
+/// this pass a `skill_bundles.<alias>` write produces `include = []`,
 /// `exclude = []`, etc. The pruned form round-trips identically because
 /// each dropped field's serde default IS the dropped value.
 fn prune_empty_leaves(value: &mut toml::Value) {
@@ -24251,46 +23723,6 @@ mod tests {
     }
 
     #[::core::prelude::v1::test]
-    fn mcp_server_config_pinned_resources_defaults_empty_and_round_trips() {
-        // Absent field defaults to empty.
-        let cfg: McpServerConfig = serde_json::from_str(r#"{"name":"s","command":"x"}"#).unwrap();
-        assert!(cfg.pinned_resources.is_empty());
-
-        // Present field round-trips.
-        let cfg: McpServerConfig = serde_json::from_str(
-            r#"{"name":"s","command":"x","pinned_resources":["file:///a","file:///b"]}"#,
-        )
-        .unwrap();
-        assert_eq!(cfg.pinned_resources, vec!["file:///a", "file:///b"]);
-    }
-
-    #[::core::prelude::v1::test]
-    fn mcp_server_config_tls_ca_cert_path_defaults_none_and_round_trips() {
-        let cfg: McpServerConfig = serde_json::from_str(r#"{"name":"s","command":"x"}"#).unwrap();
-        assert!(cfg.tls_ca_cert_path.is_none());
-        assert!(
-            !serde_json::to_value(&cfg)
-                .unwrap()
-                .as_object()
-                .unwrap()
-                .contains_key("tls_ca_cert_path")
-        );
-
-        let cfg: McpServerConfig = serde_json::from_str(
-            r#"{"name":"s","transport":"http","url":"https://example.invalid/mcp","tls_ca_cert_path":"/etc/zeroclaw/internal-ca.pem"}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            cfg.tls_ca_cert_path.as_deref(),
-            Some("/etc/zeroclaw/internal-ca.pem")
-        );
-        assert_eq!(
-            serde_json::to_value(&cfg).unwrap()["tls_ca_cert_path"],
-            "/etc/zeroclaw/internal-ca.pem"
-        );
-    }
-
-    #[::core::prelude::v1::test]
     fn tool_filter_group_legacy_filter_builtins_key_still_parses() {
         // `filter_builtins` was declared-but-never-read and is removed.
         // `ToolFilterGroup` has no `deny_unknown_fields`, so configs
@@ -25462,27 +24894,6 @@ zeroclaw-operators = "operator"
             .any(|line| line == exact || line.starts_with(&nested))
     }
 
-    fn mcp_server(name: &str) -> McpServerConfig {
-        McpServerConfig {
-            name: name.to_string(),
-            ..McpServerConfig::default()
-        }
-    }
-
-    /// A config with three configured servers (`a`, `b`, `c`) plus the given
-    /// `[mcp_bundles.<alias>]` entries. Uses `push`/`insert` (not field
-    /// assignment) to avoid `clippy::field_reassign_with_default`.
-    fn config_with_mcp_bundles(bundles: Vec<(&str, McpBundleConfig)>) -> Config {
-        let mut config = Config::default();
-        config.mcp.servers.push(mcp_server("a"));
-        config.mcp.servers.push(mcp_server("b"));
-        config.mcp.servers.push(mcp_server("c"));
-        for (alias, bundle) in bundles {
-            config.mcp_bundles.insert(alias.to_string(), bundle);
-        }
-        config
-    }
-
     #[test]
     async fn sop_untrusted_payload_defaults_are_back_compat() {
         let config: SopConfig = toml::from_str("").expect("empty SOP config should deserialize");
@@ -25593,196 +25004,6 @@ untrusted_outbound_redact = false
         assert_eq!(config.untrusted_guard_sensitivity, 0.9);
         assert!(!config.untrusted_frame_warning);
         assert!(!config.untrusted_outbound_redact);
-    }
-
-    #[test]
-    async fn mcp_bundles_empty_grants_no_servers() {
-        // Secure by default: omission is not a grant.
-        let config = config_with_mcp_bundles(vec![]);
-        assert!(config.mcp_servers_for_bundles(&[]).is_empty());
-    }
-
-    #[test]
-    async fn mcp_bundles_union_resolves_and_dedups() {
-        let config = config_with_mcp_bundles(vec![
-            (
-                "x",
-                McpBundleConfig {
-                    servers: vec!["a".into(), "b".into()],
-                    exclude: vec![],
-                },
-            ),
-            (
-                "y",
-                McpBundleConfig {
-                    servers: vec!["b".into(), "c".into()],
-                    exclude: vec![],
-                },
-            ),
-        ]);
-        let names: Vec<String> = config
-            .mcp_servers_for_bundles(&["x".to_string(), "y".to_string()])
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        assert_eq!(
-            names,
-            vec!["a", "b", "c"],
-            "union across bundles, first-seen order, deduplicated"
-        );
-    }
-
-    #[test]
-    async fn mcp_bundles_exclude_wins_across_bundles() {
-        // `b` is included by bundle `x` but excluded by bundle `y`; deny wins.
-        let config = config_with_mcp_bundles(vec![
-            (
-                "x",
-                McpBundleConfig {
-                    servers: vec!["a".into(), "b".into()],
-                    exclude: vec![],
-                },
-            ),
-            (
-                "y",
-                McpBundleConfig {
-                    servers: vec!["c".into()],
-                    exclude: vec!["b".into()],
-                },
-            ),
-        ]);
-        let names: Vec<String> = config
-            .mcp_servers_for_bundles(&["x".to_string(), "y".to_string()])
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        assert_eq!(
-            names,
-            vec!["a", "c"],
-            "an excluded server is denied even when another referenced bundle includes it"
-        );
-    }
-
-    #[test]
-    async fn mcp_bundles_unknown_bundle_and_dangling_name_grant_nothing() {
-        // An unknown bundle alias and a server name with no `[mcp.servers]`
-        // entry both fail closed (grant nothing).
-        let config = config_with_mcp_bundles(vec![(
-            "x",
-            McpBundleConfig {
-                servers: vec!["a".into(), "ghost".into()],
-                exclude: vec![],
-            },
-        )]);
-        let names: Vec<String> = config
-            .mcp_servers_for_bundles(&["x".to_string(), "missing".to_string()])
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        assert_eq!(
-            names,
-            vec!["a"],
-            "a dangling server name and an unknown bundle alias grant nothing"
-        );
-    }
-
-    #[test]
-    async fn mcp_servers_for_agent_grants_only_via_agent_bundles() {
-        let mut config = config_with_mcp_bundles(vec![(
-            "aa",
-            McpBundleConfig {
-                servers: vec!["a".into()],
-                exclude: vec![],
-            },
-        )]);
-        config.agents.insert(
-            "aaatools".to_string(),
-            AliasedAgentConfig {
-                mcp_bundles: vec!["aa".to_string()],
-                ..AliasedAgentConfig::default()
-            },
-        );
-        config
-            .agents
-            .insert("defzc".to_string(), AliasedAgentConfig::default());
-
-        let granted: Vec<String> = config
-            .mcp_servers_for_agent("aaatools")
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        assert_eq!(granted, vec!["a"], "agent is granted its bundle's servers");
-        assert!(
-            config.mcp_servers_for_agent("defzc").is_empty(),
-            "an agent with no mcp_bundles is granted no MCP servers (omission is not a grant)"
-        );
-        assert!(
-            config.mcp_servers_for_agent("ghost").is_empty(),
-            "an unknown agent is granted no MCP servers"
-        );
-    }
-
-    /// Regression test for the operator-UX warning added alongside:
-    /// when MCP is enabled and `[[mcp.servers]]` is non-empty but no
-    /// `[mcp_bundles.*]` exists, validate() must still succeed (warnings
-    /// are non-fatal) AND every agent must resolve to zero servers
-    /// (proving the secure-by-default semantics that motivate the warning
-    /// are still in force).
-    #[test]
-    async fn validate_warns_when_servers_configured_but_no_bundles() {
-        use crate::schema::{McpServerConfig, McpTransport};
-        let mut config = Config::default();
-        config.mcp.enabled = true;
-        config.mcp.servers = vec![McpServerConfig {
-            name: "fs".into(),
-            transport: McpTransport::Stdio,
-            command: "/usr/bin/mcp-fs".into(),
-            ..Default::default()
-        }];
-        assert!(
-            config.mcp_bundles.is_empty(),
-            "test precondition: no bundles configured"
-        );
-
-        // validate() must succeed (warnings are non-fatal).
-        assert!(config.validate().is_ok());
-
-        // Behavioral assertion that motivates the warning: every agent
-        // resolves to zero servers under these conditions.
-        for alias in config.agents.keys() {
-            assert!(
-                config.mcp_servers_for_agent(alias).is_empty(),
-                "every agent must get zero servers when no bundles exist"
-            );
-        }
-    }
-
-    /// Counterpart to `validate_warns_when_servers_configured_but_no_bundles`:
-    /// once at least one `[mcp_bundles.*]` exists, the warning's
-    /// precondition no longer holds. validate() still succeeds and the
-    /// granted agent resolves to its bundled server.
-    #[test]
-    async fn validate_does_not_warn_when_a_bundle_exists() {
-        use crate::schema::{McpBundleConfig, McpServerConfig, McpTransport};
-        let mut config = Config::default();
-        config.mcp.enabled = true;
-        config.mcp.servers = vec![McpServerConfig {
-            name: "fs".into(),
-            transport: McpTransport::Stdio,
-            command: "/usr/bin/mcp-fs".into(),
-            ..Default::default()
-        }];
-        config.mcp_bundles.insert(
-            "default".into(),
-            McpBundleConfig {
-                servers: vec!["fs".into()],
-                exclude: vec![],
-            },
-        );
-
-        assert!(config.validate().is_ok());
-        // Precondition check: the warning's trigger condition is now false.
-        assert!(!config.mcp_bundles.is_empty());
     }
 
     fn parse_test_config(raw: &str) -> Config {
@@ -28178,13 +27399,11 @@ auto_save = true
             runtime_profiles: HashMap::new(),
             skill_bundles: HashMap::new(),
             knowledge_bundles: HashMap::new(),
-            mcp_bundles: HashMap::new(),
             peer_groups: HashMap::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
-            mcp: McpConfig::default(),
             nodes: NodesConfig::default(),
             onboard_state: OnboardStateConfig::default(),
             knowledge: KnowledgeConfig::default(),
@@ -29310,13 +28529,11 @@ default_temperature = 0.7
             runtime_profiles: HashMap::new(),
             skill_bundles: HashMap::new(),
             knowledge_bundles: HashMap::new(),
-            mcp_bundles: HashMap::new(),
             peer_groups: HashMap::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
-            mcp: McpConfig::default(),
             nodes: NodesConfig::default(),
             onboard_state: OnboardStateConfig::default(),
             knowledge: KnowledgeConfig::default(),
@@ -29481,21 +28698,6 @@ default_temperature = 0.7
         );
         config.gateway.webhook_secret = Some("gateway-ingress-credential".into());
 
-        // MCP server: HTTP headers map carries an Authorization Bearer
-        // token; the new `#[secret]` on `HashMap<String, String>` must
-        // encrypt every value (and only every value — keys stay plain).
-        config.mcp.servers.push(McpServerConfig {
-            name: "primary".into(),
-            transport: McpTransport::Sse,
-            url: Some("https://mcp.example.invalid/sse".into()),
-            env: HashMap::from([("MCP_API_KEY".to_string(), "mcp-env-credential".to_string())]),
-            headers: HashMap::from([
-                ("Authorization".to_string(), "Bearer mcp-cred".to_string()),
-                ("X-Tenant".to_string(), "tenant-42".to_string()),
-            ]),
-            ..Default::default()
-        });
-
         config.save().await.unwrap();
 
         let contents = tokio::fs::read_to_string(config.config_path.clone())
@@ -29518,9 +28720,6 @@ default_temperature = 0.7
             "Bearer upload-credential",
             "Bearer http-request-credential",
             "gateway-ingress-credential",
-            "mcp-env-credential",
-            "Bearer mcp-cred",
-            "tenant-42",
         ] {
             assert!(
                 !contents.contains(plaintext),
@@ -29699,31 +28898,6 @@ default_temperature = 0.7
             store.decrypt(gateway_webhook_secret).unwrap(),
             "gateway-ingress-credential"
         );
-
-        // MCP server headers — every value must be encrypted; the keys
-        // stay plaintext (TOML table headers are not secret).
-        let mcp_server = stored
-            .mcp
-            .servers
-            .iter()
-            .find(|s| s.name == "primary")
-            .expect("mcp server `primary` round-trips through save");
-        for (key, value) in &mcp_server.headers {
-            assert!(
-                crate::secrets::SecretStore::is_encrypted(value),
-                "mcp.servers.primary.headers.{key} must be encrypted on save"
-            );
-        }
-        let mcp_env = mcp_server.env.get("MCP_API_KEY").unwrap();
-        assert!(
-            crate::secrets::SecretStore::is_encrypted(mcp_env),
-            "mcp.servers.primary.env.MCP_API_KEY must be encrypted on save"
-        );
-        let auth = mcp_server.headers.get("Authorization").unwrap();
-        let tenant = mcp_server.headers.get("X-Tenant").unwrap();
-        assert_eq!(store.decrypt(mcp_env).unwrap(), "mcp-env-credential");
-        assert_eq!(store.decrypt(auth).unwrap(), "Bearer mcp-cred");
-        assert_eq!(store.decrypt(tenant).unwrap(), "tenant-42");
 
         let _ = fs::remove_dir_all(&dir).await;
     }
@@ -33617,81 +32791,6 @@ group_policy = "disabled"
         );
     }
 
-    /// Regression for the per-field `[[mcp.servers]]` editor: after
-    /// `d06ed25` shipped the natural-key arm, in-memory edits succeed
-    /// (the TUI / dashboard show the new value) but `save_dirty` is
-    /// silently a no-op because `apply_dirty_path` walks the serialized
-    /// TOML as if every segment is a `Table` — `mcp.servers` is an
-    /// array of tables, so `lookup_path_in_table` returns `None` at the
-    /// natural-key segment, the path is misclassified as
-    /// `should_delete`, and `delete_path_in_doc` bails when it hits the
-    /// array too. Net effect: the on-disk file keeps its stale value.
-    #[test]
-    async fn save_dirty_persists_mcp_server_field_via_natural_key() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_path = tmp.path().join("config.toml");
-
-        // Seed an on-disk file with a single MCP server so the
-        // incremental path (not the new-file fallback to full `save`)
-        // runs. Schema version is stamped to current so the writer
-        // doesn't have to migrate anything.
-        let seed = format!(
-            "schema_version = {}\n\n\
-             [[mcp.servers]]\n\
-             name = \"fs\"\n\
-             transport = \"stdio\"\n\
-             command = \"/usr/bin/mcp-fs\"\n",
-            crate::migration::CURRENT_SCHEMA_VERSION
-        );
-        std::fs::write(&config_path, &seed).unwrap();
-
-        // Build the in-memory config to match the seeded file. We
-        // don't need to round-trip through deserialization — the bug
-        // is purely on the save side, and the on-disk seed gives
-        // `save_dirty` an existing file to do an incremental write
-        // into (the new-file fallback to full `save` would mask the
-        // dirty-path bug because it serializes the whole struct).
-        let mut config = Config {
-            config_path: config_path.clone(),
-            ..Default::default()
-        };
-        config.mcp.servers.push(McpServerConfig {
-            name: "fs".into(),
-            transport: McpTransport::Stdio,
-            command: "/usr/bin/mcp-fs".into(),
-            ..Default::default()
-        });
-        assert_eq!(config.mcp.servers[0].command, "/usr/bin/mcp-fs");
-
-        // The same call site the dashboard / TUI use: set_prop_persistent
-        // on a natural-key-routed inner path, then flush via save_dirty.
-        config
-            .set_prop_persistent("mcp.servers.fs.command", "/usr/local/bin/mcp-fs")
-            .expect("set_prop_persistent must route through the natural-key arm");
-        // The in-memory mutation must land — this is what the UI sees.
-        assert_eq!(config.mcp.servers[0].command, "/usr/local/bin/mcp-fs");
-
-        config.save_dirty().await.unwrap();
-
-        let written = std::fs::read_to_string(&config_path).unwrap();
-        assert!(
-            written.contains("/usr/local/bin/mcp-fs"),
-            "save_dirty must write the new command for `mcp.servers.fs.command`; \
-             on-disk file still reads:\n{written}"
-        );
-        assert!(
-            !written.contains("/usr/bin/mcp-fs"),
-            "stale command must be overwritten; got:\n{written}"
-        );
-        // The natural-key field itself must stay on disk — losing
-        // `name` would orphan every other field in the [[mcp.servers]]
-        // entry and break subsequent loads.
-        assert!(
-            written.contains("name = \"fs\""),
-            "natural-key `name` must survive the incremental save; got:\n{written}"
-        );
-    }
-
     fn validate_config_with_cost_rates(rates: CostRatesConfig) -> Result<()> {
         let mut config = Config::default();
         config.cost.rates = rates;
@@ -34331,305 +33430,6 @@ group_policy = "disabled"
         );
     }
 
-    /// `create_map_key("mcp.servers", "new")` followed by per-field
-    /// edits must produce a complete `[[mcp.servers]]` table on disk —
-    /// including the seeded natural-key field. This is the path the
-    /// dashboard's `+ Add MCP server` affordance walks: insert, then
-    /// edit `command` / `transport` etc.
-    #[test]
-    async fn save_dirty_writes_new_mcp_server_added_via_create_map_key() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_path = tmp.path().join("config.toml");
-
-        // Seed an unrelated existing entry so we exercise the
-        // append-into-existing-array path (not the create-array-from-
-        // scratch path). Both matter; the empty-doc case is covered by
-        // `save` instead of `save_dirty` (see the `!config_path.exists()`
-        // branch at the top of `save_dirty`).
-        let seed = format!(
-            "schema_version = {}\n\n\
-             [[mcp.servers]]\n\
-             name = \"fs\"\n\
-             transport = \"stdio\"\n\
-             command = \"/usr/bin/mcp-fs\"\n",
-            crate::migration::CURRENT_SCHEMA_VERSION
-        );
-        std::fs::write(&config_path, &seed).unwrap();
-
-        let mut config = Config {
-            config_path: config_path.clone(),
-            ..Default::default()
-        };
-        config.mcp.servers.push(McpServerConfig {
-            name: "fs".into(),
-            transport: McpTransport::Stdio,
-            command: "/usr/bin/mcp-fs".into(),
-            ..Default::default()
-        });
-
-        // The handle_config_map_key_create dispatch path runs
-        // create_map_key + mark_dirty(`<section>.<key>`). Replicate
-        // that here so we're testing the same wire sequence.
-        let created = config
-            .create_map_key("mcp.servers", "github")
-            .expect("create_map_key on a natural-key section must succeed");
-        assert!(created);
-        config.mark_dirty("mcp.servers.github");
-
-        // Per-field edit on the freshly-added entry.
-        config
-            .set_prop_persistent("mcp.servers.github.transport", "http")
-            .expect("set transport on freshly-added entry must route");
-        config
-            .set_prop_persistent("mcp.servers.github.url", "https://mcp.example/")
-            .expect("set url on freshly-added entry must route");
-
-        config.save_dirty().await.unwrap();
-
-        let written = std::fs::read_to_string(&config_path).unwrap();
-        // Both entries survive, with their distinct fields.
-        assert!(
-            written.contains("name = \"fs\""),
-            "pre-existing entry must survive; got:\n{written}"
-        );
-        assert!(
-            written.contains("name = \"github\""),
-            "new entry's natural-key field must land on disk; got:\n{written}"
-        );
-        assert!(
-            written.contains("transport = \"http\""),
-            "per-field edit on the new entry must land; got:\n{written}"
-        );
-        assert!(
-            written.contains("url = \"https://mcp.example/\""),
-            "second per-field edit on the new entry must land; got:\n{written}"
-        );
-        // Round-trip: parsing the written file must yield exactly the
-        // shape we built up in memory. Catches mis-shaped output (e.g.
-        // a nested `mcp.servers.github` inline table sneaking in instead
-        // of a second `[[mcp.servers]]`).
-        let reparsed: Config = toml::from_str(&written).unwrap();
-        assert_eq!(reparsed.mcp.servers.len(), 2);
-        let gh = reparsed
-            .mcp
-            .servers
-            .iter()
-            .find(|s| s.name == "github")
-            .expect("reparse must surface the new entry by natural key");
-        assert_eq!(gh.transport, McpTransport::Http);
-        assert_eq!(gh.url.as_deref(), Some("https://mcp.example/"));
-    }
-
-    /// `rename_map_key("mcp.servers", "fs", "filesystem")` rewrites the
-    /// in-memory entry's `name` field in place and marks BOTH aliases
-    /// dirty. The incremental writer must update the matching
-    /// `[[mcp.servers]]` entry's `name` to the new value without
-    /// leaving a stale duplicate behind.
-    #[test]
-    async fn save_dirty_persists_mcp_server_rename_via_natural_key() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_path = tmp.path().join("config.toml");
-
-        let seed = format!(
-            "schema_version = {}\n\n\
-             [[mcp.servers]]\n\
-             name = \"fs\"\n\
-             transport = \"stdio\"\n\
-             command = \"/usr/bin/mcp-fs\"\n",
-            crate::migration::CURRENT_SCHEMA_VERSION
-        );
-        std::fs::write(&config_path, &seed).unwrap();
-
-        let mut config = Config {
-            config_path: config_path.clone(),
-            ..Default::default()
-        };
-        config.mcp.servers.push(McpServerConfig {
-            name: "fs".into(),
-            transport: McpTransport::Stdio,
-            command: "/usr/bin/mcp-fs".into(),
-            ..Default::default()
-        });
-
-        // Mirror handle_config_map_key_rename: rename, then mark both
-        // the old and new aliases dirty.
-        let renamed = config
-            .rename_map_key("mcp.servers", "fs", "filesystem")
-            .expect("rename of a unique alias must succeed");
-        assert!(renamed);
-        config.mark_dirty("mcp.servers.fs");
-        config.mark_dirty("mcp.servers.filesystem");
-
-        config.save_dirty().await.unwrap();
-
-        let written = std::fs::read_to_string(&config_path).unwrap();
-        assert!(
-            written.contains("name = \"filesystem\""),
-            "rename target must land on disk; got:\n{written}"
-        );
-        assert!(
-            !written.contains("name = \"fs\""),
-            "stale rename source must NOT remain on disk; got:\n{written}"
-        );
-        // Other fields on the renamed entry are preserved.
-        assert!(
-            written.contains("command = \"/usr/bin/mcp-fs\""),
-            "rename must preserve sibling fields on the entry; got:\n{written}"
-        );
-
-        let reparsed: Config = toml::from_str(&written).unwrap();
-        assert_eq!(reparsed.mcp.servers.len(), 1);
-        assert_eq!(reparsed.mcp.servers[0].name, "filesystem");
-        assert_eq!(reparsed.mcp.servers[0].command, "/usr/bin/mcp-fs");
-    }
-
-    /// `delete_map_key("mcp.servers", "fs")` removes the in-memory
-    /// entry and marks the alias dirty. The incremental writer must
-    /// drop the corresponding `[[mcp.servers]]` entry from disk,
-    /// dropping the array slot entirely when no entries remain so the
-    /// file doesn't carry a dangling `[[mcp.servers]]` section header.
-    #[test]
-    async fn save_dirty_removes_mcp_server_deleted_via_natural_key() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_path = tmp.path().join("config.toml");
-
-        // Two entries on disk; we'll delete one and assert the other
-        // survives.
-        let seed = format!(
-            "schema_version = {}\n\n\
-             [[mcp.servers]]\n\
-             name = \"fs\"\n\
-             transport = \"stdio\"\n\
-             command = \"/usr/bin/mcp-fs\"\n\n\
-             [[mcp.servers]]\n\
-             name = \"github\"\n\
-             transport = \"http\"\n\
-             url = \"https://mcp.example/\"\n",
-            crate::migration::CURRENT_SCHEMA_VERSION
-        );
-        std::fs::write(&config_path, &seed).unwrap();
-
-        let mut config = Config {
-            config_path: config_path.clone(),
-            ..Default::default()
-        };
-        config.mcp.servers.push(McpServerConfig {
-            name: "fs".into(),
-            transport: McpTransport::Stdio,
-            command: "/usr/bin/mcp-fs".into(),
-            ..Default::default()
-        });
-        config.mcp.servers.push(McpServerConfig {
-            name: "github".into(),
-            transport: McpTransport::Http,
-            url: Some("https://mcp.example/".to_string()),
-            ..Default::default()
-        });
-
-        let deleted = config
-            .delete_map_key("mcp.servers", "fs")
-            .expect("delete by natural key must resolve");
-        assert!(deleted);
-        config.mark_dirty("mcp.servers.fs");
-
-        config.save_dirty().await.unwrap();
-
-        let written = std::fs::read_to_string(&config_path).unwrap();
-        assert!(
-            !written.contains("name = \"fs\""),
-            "deleted entry must not survive incremental save; got:\n{written}"
-        );
-        assert!(
-            written.contains("name = \"github\""),
-            "untouched sibling entry must survive; got:\n{written}"
-        );
-
-        let reparsed: Config = toml::from_str(&written).unwrap();
-        assert_eq!(reparsed.mcp.servers.len(), 1);
-        assert_eq!(reparsed.mcp.servers[0].name, "github");
-    }
-
-    /// Deleting the last `[[mcp.servers]]` entry drops the array slot
-    /// entirely. A vestigial empty `[[mcp.servers]]` header would
-    /// reparse as a single default-shaped element with an empty
-    /// natural-key field, which the validator then rejects on next
-    /// load — actively breaking the file the writer just produced.
-    #[test]
-    async fn save_dirty_drops_array_header_when_last_mcp_server_removed() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_path = tmp.path().join("config.toml");
-
-        let seed = format!(
-            "schema_version = {}\n\n\
-             [[mcp.servers]]\n\
-             name = \"fs\"\n\
-             transport = \"stdio\"\n\
-             command = \"/usr/bin/mcp-fs\"\n",
-            crate::migration::CURRENT_SCHEMA_VERSION
-        );
-        std::fs::write(&config_path, &seed).unwrap();
-
-        let mut config = Config {
-            config_path: config_path.clone(),
-            ..Default::default()
-        };
-        config.mcp.servers.push(McpServerConfig {
-            name: "fs".into(),
-            transport: McpTransport::Stdio,
-            command: "/usr/bin/mcp-fs".into(),
-            ..Default::default()
-        });
-
-        config.delete_map_key("mcp.servers", "fs").unwrap();
-        config.mark_dirty("mcp.servers.fs");
-        config.save_dirty().await.unwrap();
-
-        let written = std::fs::read_to_string(&config_path).unwrap();
-        assert!(
-            !written.contains("[[mcp.servers]]"),
-            "empty array header must be dropped, otherwise it reparses as a default entry; got:\n{written}"
-        );
-        let reparsed: Config = toml::from_str(&written).unwrap();
-        assert!(reparsed.mcp.servers.is_empty());
-    }
-
-    /// `Config::map_key_sections()` must surface the natural-key field
-    /// for `mcp.servers`. This is the metadata `apply_dirty_path` reads
-    /// to decide whether to take the array-of-tables branch; if the
-    /// derive ever stops emitting it for `#[natural_key = "..."]` Vec
-    /// fields, the dirty-path writer falls back to the broken
-    /// Table-only walker and silently drops MCP edits on the floor
-    /// again. Lock the contract here.
-    #[test]
-    async fn map_key_sections_exposes_natural_key_for_mcp_servers() {
-        let sections = Config::map_key_sections();
-        let entry = sections
-            .iter()
-            .find(|s| s.path == "mcp.servers")
-            .expect("mcp.servers must be discoverable in map_key_sections()");
-        assert_eq!(entry.kind, crate::traits::MapKeyKind::List);
-        assert_eq!(
-            entry.natural_key,
-            Some("name"),
-            "natural_key must mirror the `#[natural_key = \"name\"]` attribute \
-             on McpConfig::servers; the dirty-path writer keys off this to take \
-             the array-of-tables branch"
-        );
-
-        // Sanity: a representative HashMap section (alias IS the TOML
-        // key) carries `natural_key: None`. The dirty-path writer's
-        // branch decision falls through to the generic Table walker
-        // for these.
-        let anthropic = sections
-            .iter()
-            .find(|s| s.path == "providers.models.anthropic")
-            .expect(
-                "providers.models.anthropic must surface as a HashMap-backed map-keyed section",
-            );
-        assert_eq!(anthropic.kind, crate::traits::MapKeyKind::Map);
-        assert_eq!(anthropic.natural_key, None);
-    }
-
     /// `model_routes` and `embedding_routes` are `#[nested]` Vec fields
     /// with `#[natural_key = "hint"]` — they must surface in
     /// `map_key_sections()` as `List` entries so the dashboard and the
@@ -34665,219 +33465,6 @@ group_policy = "disabled"
             "natural_key must mirror the `#[natural_key = \"hint\"]` attribute \
              on Config::embedding_routes; the dirty-path writer keys off this to take \
              the array-of-tables branch"
-        );
-    }
-
-    /// A dirty path with a kebab-shaped inner field (e.g.
-    /// `mcp.servers.fs.tool-timeout-secs`) must resolve through the
-    /// shared `resolve_dirty_segments` helper inside the natural-key
-    /// branch the same way the top-level Table walker does — landing
-    /// on the snake `tool_timeout_secs` field on disk. This pins the
-    /// dash-aware resolution that's load-bearing for any future
-    /// natural-key struct field whose snake_case name is multi-word.
-    /// Without this, a UI client that emits kebab field names would
-    /// recreate the exact symptom the PR fixes (memory updates, disk
-    /// stays stale) for any such field.
-    #[test]
-    async fn save_dirty_persists_mcp_server_kebab_inner_field_via_natural_key() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_path = tmp.path().join("config.toml");
-
-        let seed = format!(
-            "schema_version = {}\n\n\
-             [[mcp.servers]]\n\
-             name = \"fs\"\n\
-             transport = \"stdio\"\n\
-             command = \"/usr/bin/mcp-fs\"\n",
-            crate::migration::CURRENT_SCHEMA_VERSION
-        );
-        std::fs::write(&config_path, &seed).unwrap();
-
-        let mut config = Config {
-            config_path: config_path.clone(),
-            ..Default::default()
-        };
-        config.mcp.servers.push(McpServerConfig {
-            name: "fs".into(),
-            transport: McpTransport::Stdio,
-            command: "/usr/bin/mcp-fs".into(),
-            tool_timeout_secs: Some(45),
-            ..Default::default()
-        });
-
-        // mark_dirty directly with a kebab leaf segment so the
-        // dash-aware resolver inside `resolve_dirty_segments` is the
-        // only thing that can possibly land this on disk. set_prop /
-        // set_prop_persistent route through the macro which has its
-        // own snake-only field-name lookup; this test isolates the
-        // writer-side resolution. The in-memory mutation above
-        // simulates the dispatcher having already routed the
-        // set_prop side; what we're testing here is the save side.
-        config.mark_dirty("mcp.servers.fs.tool-timeout-secs");
-        config.save_dirty().await.unwrap();
-
-        let written = std::fs::read_to_string(&config_path).unwrap();
-        assert!(
-            written.contains("tool_timeout_secs = 45"),
-            "kebab dirty segment must resolve to the snake on-disk field; \
-             got:\n{written}"
-        );
-        assert!(
-            !written.contains("tool-timeout-secs"),
-            "kebab field name must never appear on disk; got:\n{written}"
-        );
-        // Other fields on the entry survive the targeted edit.
-        let reparsed: Config = toml::from_str(&written).unwrap();
-        assert_eq!(reparsed.mcp.servers.len(), 1);
-        assert_eq!(reparsed.mcp.servers[0].name, "fs");
-        assert_eq!(reparsed.mcp.servers[0].command, "/usr/bin/mcp-fs");
-        assert_eq!(reparsed.mcp.servers[0].tool_timeout_secs, Some(45));
-    }
-
-    /// An explicit per-field unset (the in-memory field reverts to
-    /// `None`, but the dirty path still names that specific inner
-    /// field rather than the whole element) must drive the case-1
-    /// `mem missing → delete` branch — removing the field from the
-    /// `[[mcp.servers]]` entry on disk without touching its siblings.
-    /// The pre-existing whole-element delete test covers a different
-    /// path (the rename source / `delete_map_key`); this one pins
-    /// the per-field delete branch independently. Without it, a
-    /// future refactor that collapses case-1's `None` branch into
-    /// the whole-element path would silently break "clear this field"
-    /// edits — the field would survive on disk while showing as
-    /// unset in the UI.
-    #[test]
-    async fn save_dirty_unset_per_field_drops_field_from_mcp_server_entry() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_path = tmp.path().join("config.toml");
-
-        // Seed an entry with tool_timeout_secs set — this is the
-        // field we'll unset via a per-field dirty path.
-        let seed = format!(
-            "schema_version = {}\n\n\
-             [[mcp.servers]]\n\
-             name = \"fs\"\n\
-             transport = \"stdio\"\n\
-             command = \"/usr/bin/mcp-fs\"\n\
-             tool_timeout_secs = 45\n",
-            crate::migration::CURRENT_SCHEMA_VERSION
-        );
-        std::fs::write(&config_path, &seed).unwrap();
-
-        let mut config = Config {
-            config_path: config_path.clone(),
-            ..Default::default()
-        };
-        // In-memory mirror without the optional field set — i.e. the
-        // UI user just cleared `tool_timeout_secs`.
-        config.mcp.servers.push(McpServerConfig {
-            name: "fs".into(),
-            transport: McpTransport::Stdio,
-            command: "/usr/bin/mcp-fs".into(),
-            tool_timeout_secs: None,
-            ..Default::default()
-        });
-        // Per-field dirty path — exactly what a UI "clear this
-        // field" affordance emits. The whole-element bare alias
-        // `mcp.servers.fs` is intentionally NOT marked: the bare
-        // alias is the rename/delete shape; the bug-prone case is
-        // the per-field one.
-        config.mark_dirty("mcp.servers.fs.tool_timeout_secs");
-        config.save_dirty().await.unwrap();
-
-        let written = std::fs::read_to_string(&config_path).unwrap();
-        assert!(
-            !written.contains("tool_timeout_secs"),
-            "explicit per-field unset must drop the field from disk; got:\n{written}"
-        );
-        // Siblings survive: the entry isn't deleted, just the one
-        // field, and the natural-key field itself must stay so
-        // subsequent loads still know which alias this entry is.
-        assert!(
-            written.contains("name = \"fs\""),
-            "natural-key field must survive a per-field unset; got:\n{written}"
-        );
-        assert!(
-            written.contains("command = \"/usr/bin/mcp-fs\""),
-            "sibling fields must survive a per-field unset; got:\n{written}"
-        );
-
-        let reparsed: Config = toml::from_str(&written).unwrap();
-        assert_eq!(reparsed.mcp.servers.len(), 1);
-        assert_eq!(reparsed.mcp.servers[0].name, "fs");
-        assert_eq!(reparsed.mcp.servers[0].tool_timeout_secs, None);
-    }
-
-    /// When the on-disk node at `mcp.servers` exists but has the
-    /// wrong kind — e.g. a hand-edited `mcp.servers = "foo"`, or an
-    /// inline-array-of-tables literal `servers = [{ ... }]` that
-    /// `toml_edit` parses as `Item::Value(Value::Array)` rather than
-    /// `Item::ArrayOfTables` — the writer must refuse to clobber
-    /// rather than data-loss the user's hand-edit. The bail is
-    /// observable (a `WARN`-level log event), but here we just pin
-    /// the don't-clobber behavior at the disk level: the original
-    /// shape survives the save unchanged. This is the explicit
-    /// contract test for the wrong-kind bail surface; without it,
-    /// a refactor that "fixes" the bail by overwriting silently
-    /// would corrupt every operator who has either of these
-    /// (otherwise valid) TOML shapes in their config.
-    #[test]
-    async fn save_dirty_refuses_to_clobber_wrong_kind_mcp_servers_node() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let config_path = tmp.path().join("config.toml");
-
-        // Hand-edited file: operator wrote `mcp.servers` as a scalar.
-        // This is invalid against the schema but is what
-        // `Item::Value(Value::String)` looks like in toml_edit, and
-        // it's representative of the wrong-kind case (the same bail
-        // path also fires for `Item::Value(Value::Array)` inline
-        // arrays). Schema validation would reject this on load; the
-        // test forces the writer to face the shape regardless.
-        let seed = format!(
-            "schema_version = {}\n\n\
-             [mcp]\n\
-             servers = \"hand-edited-scalar\"\n",
-            crate::migration::CURRENT_SCHEMA_VERSION
-        );
-        std::fs::write(&config_path, &seed).unwrap();
-
-        let mut config = Config {
-            config_path: config_path.clone(),
-            ..Default::default()
-        };
-        // In-memory has a real server; the per-field edit would
-        // normally land on `[[mcp.servers]]` on disk.
-        config.mcp.servers.push(McpServerConfig {
-            name: "fs".into(),
-            transport: McpTransport::Stdio,
-            command: "/usr/bin/mcp-fs".into(),
-            ..Default::default()
-        });
-        config.mark_dirty("mcp.servers.fs.command");
-
-        // The save itself must succeed — bail is a no-op for the
-        // wrong-kind node, not an error.
-        config.save_dirty().await.unwrap();
-
-        let written = std::fs::read_to_string(&config_path).unwrap();
-        // The hand-edited scalar shape survives untouched: we'd
-        // rather a load-time validation error the operator sees than
-        // a silent overwrite of their (possibly intentional) file
-        // surgery.
-        assert!(
-            written.contains("servers = \"hand-edited-scalar\""),
-            "wrong-kind `mcp.servers` node must survive the save unchanged; \
-             got:\n{written}"
-        );
-        assert!(
-            !written.contains("[[mcp.servers]]"),
-            "writer must not synthesize an array-of-tables next to a scalar \
-             hand-edit; got:\n{written}"
-        );
-        assert!(
-            !written.contains("/usr/bin/mcp-fs"),
-            "in-memory command must not leak past a wrong-kind bail; \
-             got:\n{written}"
         );
     }
 
@@ -35331,490 +33918,6 @@ high_entropy_tokens = false
     }
 
     // ── MCP config validation ─────────────────────────────────────────────
-
-    fn stdio_server(name: &str, command: &str) -> McpServerConfig {
-        McpServerConfig {
-            name: name.to_string(),
-            transport: McpTransport::Stdio,
-            command: command.to_string(),
-            ..Default::default()
-        }
-    }
-
-    fn http_server(name: &str, url: &str) -> McpServerConfig {
-        McpServerConfig {
-            name: name.to_string(),
-            transport: McpTransport::Http,
-            url: Some(url.to_string()),
-            ..Default::default()
-        }
-    }
-
-    fn sse_server(name: &str, url: &str) -> McpServerConfig {
-        McpServerConfig {
-            name: name.to_string(),
-            transport: McpTransport::Sse,
-            url: Some(url.to_string()),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    async fn validate_mcp_config_empty_servers_ok() {
-        let cfg = McpConfig::default();
-        assert!(validate_mcp_config(&cfg).is_ok());
-    }
-
-    #[test]
-    async fn validate_mcp_config_valid_stdio_ok() {
-        let cfg = McpConfig {
-            enabled: true,
-            servers: vec![stdio_server("fs", "/usr/bin/mcp-fs")],
-            ..Default::default()
-        };
-        assert!(validate_mcp_config(&cfg).is_ok());
-    }
-
-    #[test]
-    async fn validate_mcp_config_valid_http_ok() {
-        let cfg = McpConfig {
-            enabled: true,
-            servers: vec![http_server("svc", "http://localhost:8080/mcp")],
-            ..Default::default()
-        };
-        assert!(validate_mcp_config(&cfg).is_ok());
-    }
-
-    #[test]
-    async fn validate_mcp_config_valid_sse_ok() {
-        let cfg = McpConfig {
-            enabled: true,
-            servers: vec![sse_server("svc", "https://example.com/events")],
-            ..Default::default()
-        };
-        assert!(validate_mcp_config(&cfg).is_ok());
-    }
-
-    #[test]
-    async fn validate_mcp_config_enforces_custom_ca_invariants_through_config() {
-        let absolute_ca = std::env::temp_dir().join("zeroclaw-test-ca.pem");
-        let absolute_ca_string = absolute_ca.to_string_lossy().into_owned();
-
-        let mut config = Config::default();
-        config.mcp.servers = vec![
-            http_server("public", "http://localhost:8080/mcp"),
-            McpServerConfig {
-                name: "private".into(),
-                transport: McpTransport::Sse,
-                url: Some("https://internal.example.invalid/sse".into()),
-                tls_ca_cert_path: Some(absolute_ca_string.clone()),
-                ..Default::default()
-            },
-        ];
-        config
-            .validate()
-            .expect("unset and valid custom-CA configurations should validate");
-
-        for (path, url, expected) in [
-            (
-                String::new(),
-                "https://internal.example.invalid/mcp",
-                "must not be empty",
-            ),
-            (
-                "relative-ca.pem".to_string(),
-                "https://internal.example.invalid/mcp",
-                "must be an absolute path",
-            ),
-            (
-                absolute_ca_string,
-                "http://internal.example.invalid/mcp",
-                "must use https when tls_ca_cert_path is set",
-            ),
-        ] {
-            let mut config = Config::default();
-            config.mcp.servers = vec![McpServerConfig {
-                name: "private".into(),
-                transport: McpTransport::Http,
-                url: Some(url.into()),
-                tls_ca_cert_path: Some(path),
-                ..Default::default()
-            }];
-            let error = config
-                .validate()
-                .expect_err("invalid custom-CA configuration must fail validation");
-            assert!(
-                error.to_string().contains(expected),
-                "expected {expected:?}, got: {error}"
-            );
-        }
-    }
-
-    #[test]
-    async fn mcp_custom_ca_configured_and_unset_survive_save_and_reload() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let absolute_ca = dir.path().join("internal-ca.pem");
-        let mut config = Config {
-            config_path: dir.path().join("config.toml"),
-            data_dir: dir.path().join("workspace"),
-            ..Default::default()
-        };
-        config.mcp.servers = vec![
-            http_server("public", "https://public.example.invalid/mcp"),
-            McpServerConfig {
-                name: "private".into(),
-                transport: McpTransport::Sse,
-                url: Some("https://private.example.invalid/sse".into()),
-                tls_ca_cert_path: Some(absolute_ca.to_string_lossy().into_owned()),
-                ..Default::default()
-            },
-        ];
-
-        config.save().await.unwrap();
-        let raw = tokio::fs::read_to_string(&config.config_path)
-            .await
-            .unwrap();
-        let loaded: Config = crate::migration::migrate_to_current(&raw).unwrap();
-        loaded
-            .validate()
-            .expect("saved custom-CA configuration should validate after reload");
-        assert_eq!(loaded.mcp.servers.len(), 2);
-        assert!(loaded.mcp.servers[0].tls_ca_cert_path.is_none());
-        assert_eq!(
-            loaded.mcp.servers[1].tls_ca_cert_path.as_deref(),
-            Some(absolute_ca.to_string_lossy().as_ref())
-        );
-    }
-
-    #[test]
-    async fn validate_mcp_config_rejects_empty_name() {
-        let cfg = McpConfig {
-            enabled: true,
-            servers: vec![stdio_server("", "/usr/bin/tool")],
-            ..Default::default()
-        };
-        let err = validate_mcp_config(&cfg).expect_err("empty name should fail");
-        assert!(
-            err.to_string().contains("name must not be empty"),
-            "got: {err}"
-        );
-    }
-
-    #[test]
-    async fn validate_mcp_config_rejects_whitespace_name() {
-        let cfg = McpConfig {
-            enabled: true,
-            servers: vec![stdio_server("   ", "/usr/bin/tool")],
-            ..Default::default()
-        };
-        let err = validate_mcp_config(&cfg).expect_err("whitespace name should fail");
-        assert!(
-            err.to_string().contains("name must not be empty"),
-            "got: {err}"
-        );
-    }
-
-    #[test]
-    async fn validate_mcp_config_rejects_duplicate_names() {
-        let cfg = McpConfig {
-            enabled: true,
-            servers: vec![
-                stdio_server("fs", "/usr/bin/mcp-a"),
-                stdio_server("fs", "/usr/bin/mcp-b"),
-            ],
-            ..Default::default()
-        };
-        let err = validate_mcp_config(&cfg).expect_err("duplicate name should fail");
-        assert!(err.to_string().contains("duplicate name"), "got: {err}");
-    }
-
-    #[test]
-    async fn validate_mcp_config_rejects_zero_timeout() {
-        let mut server = stdio_server("fs", "/usr/bin/mcp-fs");
-        server.tool_timeout_secs = Some(0);
-        let cfg = McpConfig {
-            enabled: true,
-            servers: vec![server],
-            ..Default::default()
-        };
-        let err = validate_mcp_config(&cfg).expect_err("zero timeout should fail");
-        assert!(err.to_string().contains("greater than 0"), "got: {err}");
-    }
-
-    #[test]
-    async fn validate_mcp_config_rejects_timeout_exceeding_max() {
-        let mut server = stdio_server("fs", "/usr/bin/mcp-fs");
-        server.tool_timeout_secs = Some(MCP_MAX_TOOL_TIMEOUT_SECS + 1);
-        let cfg = McpConfig {
-            enabled: true,
-            servers: vec![server],
-            ..Default::default()
-        };
-        let err = validate_mcp_config(&cfg).expect_err("oversized timeout should fail");
-        assert!(err.to_string().contains("exceeds max"), "got: {err}");
-    }
-
-    #[test]
-    async fn validate_mcp_config_allows_max_timeout_exactly() {
-        let mut server = stdio_server("fs", "/usr/bin/mcp-fs");
-        server.tool_timeout_secs = Some(MCP_MAX_TOOL_TIMEOUT_SECS);
-        let cfg = McpConfig {
-            enabled: true,
-            servers: vec![server],
-            ..Default::default()
-        };
-        assert!(validate_mcp_config(&cfg).is_ok());
-    }
-
-    #[test]
-    async fn validate_mcp_config_rejects_stdio_with_empty_command() {
-        let cfg = McpConfig {
-            enabled: true,
-            servers: vec![stdio_server("fs", "")],
-            ..Default::default()
-        };
-        let err = validate_mcp_config(&cfg).expect_err("empty command should fail");
-        assert!(
-            err.to_string().contains("requires non-empty command"),
-            "got: {err}"
-        );
-    }
-
-    #[test]
-    async fn validate_mcp_config_rejects_http_without_url() {
-        let cfg = McpConfig {
-            enabled: true,
-            servers: vec![McpServerConfig {
-                name: "svc".to_string(),
-                transport: McpTransport::Http,
-                url: None,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let err = validate_mcp_config(&cfg).expect_err("http without url should fail");
-        assert!(err.to_string().contains("requires url"), "got: {err}");
-    }
-
-    #[test]
-    async fn validate_mcp_config_rejects_sse_without_url() {
-        let cfg = McpConfig {
-            enabled: true,
-            servers: vec![McpServerConfig {
-                name: "svc".to_string(),
-                transport: McpTransport::Sse,
-                url: None,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let err = validate_mcp_config(&cfg).expect_err("sse without url should fail");
-        assert!(err.to_string().contains("requires url"), "got: {err}");
-    }
-
-    #[test]
-    async fn validate_mcp_config_rejects_non_http_scheme() {
-        let cfg = McpConfig {
-            enabled: true,
-            servers: vec![http_server("svc", "ftp://example.com/mcp")],
-            ..Default::default()
-        };
-        let err = validate_mcp_config(&cfg).expect_err("non-http scheme should fail");
-        assert!(err.to_string().contains("http/https"), "got: {err}");
-    }
-
-    #[test]
-    async fn validate_mcp_config_rejects_invalid_url() {
-        let cfg = McpConfig {
-            enabled: true,
-            servers: vec![http_server("svc", "not a url at all !!!")],
-            ..Default::default()
-        };
-        let err = validate_mcp_config(&cfg).expect_err("invalid url should fail");
-        assert!(err.to_string().contains("valid URL"), "got: {err}");
-    }
-
-    #[test]
-    async fn mcp_transport_required_leaf_is_the_single_source() {
-        // The relationship every consumer reads. Wire names must match the
-        // `rename_all = "lowercase"` serde representation.
-        assert_eq!(McpTransport::Stdio.required_leaf(), "command");
-        assert_eq!(McpTransport::Http.required_leaf(), "url");
-        assert_eq!(McpTransport::Sse.required_leaf(), "url");
-        assert_eq!(McpTransport::Stdio.wire_name(), "stdio");
-        assert_eq!(McpTransport::Http.wire_name(), "http");
-        assert_eq!(McpTransport::Sse.wire_name(), "sse");
-        // The schema-derived enumerator must surface every variant, and
-        // `wire_name` must agree with serde for each, or the emitted metadata
-        // desyncs from the wire representation the form reads.
-        let transports = mcp_transports();
-        assert_eq!(
-            transports,
-            vec![McpTransport::Stdio, McpTransport::Http, McpTransport::Sse]
-        );
-        for transport in transports {
-            let wire = serde_json::to_value(transport).expect("transport serializes");
-            assert_eq!(
-                wire,
-                serde_json::Value::String(transport.wire_name().into())
-            );
-        }
-    }
-
-    #[test]
-    async fn validate_mcp_config_enforces_required_leaf_for_every_transport() {
-        // Drift guard: whatever `required_leaf` declares, the validator must
-        // actually enforce, so the schema metadata and the runtime check can
-        // never disagree about which field a transport needs.
-        for transport in mcp_transports() {
-            let mut server = McpServerConfig {
-                name: "svc".to_string(),
-                transport,
-                ..Default::default()
-            };
-            // Populate every required leaf except the one under test, leaving
-            // the declared `required_leaf` empty, and confirm rejection.
-            match transport.required_leaf() {
-                "command" => server.command = String::new(),
-                "url" => {
-                    server.command = "echo".to_string();
-                    server.url = None;
-                }
-                other => panic!("unhandled required leaf {other} for {transport:?}"),
-            }
-            let cfg = McpConfig {
-                enabled: true,
-                servers: vec![server],
-                ..Default::default()
-            };
-            validate_mcp_config(&cfg).expect_err(&format!(
-                "{transport:?} must reject an empty {}",
-                transport.required_leaf()
-            ));
-        }
-    }
-
-    #[test]
-    async fn mcp_server_schema_emits_required_by_transport_metadata() {
-        // The config form reads `x-required-by-transport` off the
-        // `McpServerConfig` element schema; assert it is present and projects
-        // exactly `McpTransport::required_leaf` for every variant.
-        #[cfg(feature = "schema-export")]
-        let schema = schemars::schema_for!(McpServerConfig);
-        let schema_json = serde_json::to_value(&schema).expect("schema serializes to json");
-        let map = schema_json
-            .get("x-required-by-transport")
-            .and_then(serde_json::Value::as_object)
-            .expect("schema should carry the x-required-by-transport extension");
-        let transports = mcp_transports();
-        assert_eq!(map.len(), transports.len());
-        for transport in transports {
-            assert_eq!(
-                map.get(transport.wire_name())
-                    .and_then(serde_json::Value::as_str),
-                Some(transport.required_leaf()),
-                "metadata for {transport:?} must match required_leaf",
-            );
-        }
-    }
-
-    #[test]
-    async fn full_config_schema_nests_required_by_transport_on_mcp_server_def() {
-        // The gateway serves `schema_for!(Config)` to the Operator Console; the
-        // extension must survive into that full document (under `$defs`) where
-        // the form resolves the `mcp.servers` element type, not just on the
-        // standalone struct schema.
-        #[cfg(feature = "schema-export")]
-        let schema = schemars::schema_for!(Config);
-        let schema_json = serde_json::to_value(&schema).expect("schema serializes to json");
-
-        fn find_extension(
-            value: &serde_json::Value,
-        ) -> Option<&serde_json::Map<String, serde_json::Value>> {
-            match value {
-                serde_json::Value::Object(obj) => {
-                    if let Some(found) = obj
-                        .get("x-required-by-transport")
-                        .and_then(serde_json::Value::as_object)
-                    {
-                        return Some(found);
-                    }
-                    obj.values().find_map(find_extension)
-                }
-                serde_json::Value::Array(items) => items.iter().find_map(find_extension),
-                _ => None,
-            }
-        }
-
-        let map = find_extension(&schema_json).expect(
-            "full Config schema should carry x-required-by-transport on the mcp server def",
-        );
-        for transport in mcp_transports() {
-            assert_eq!(
-                map.get(transport.wire_name())
-                    .and_then(serde_json::Value::as_str),
-                Some(transport.required_leaf()),
-            );
-        }
-    }
-
-    #[test]
-    async fn mcp_config_defaults_enabled_eager_loading_with_empty_servers() {
-        let cfg = McpConfig::default();
-        assert!(cfg.enabled);
-        assert!(!cfg.deferred_loading);
-        assert!(cfg.servers.is_empty());
-    }
-
-    #[test]
-    async fn mcp_config_parsed_missing_flags_uses_enabled_eager_defaults() {
-        let raw = r#"
-[mcp]
-
-[[mcp.servers]]
-name = "svc"
-transport = "http"
-url = "http://localhost:8080/mcp"
-"#;
-        let parsed = parse_test_config(raw);
-        assert!(parsed.mcp.enabled);
-        assert!(!parsed.mcp.deferred_loading);
-        assert_eq!(parsed.mcp.servers.len(), 1);
-    }
-
-    #[test]
-    async fn mcp_config_explicit_disable_and_deferred_loading_are_respected() {
-        let raw = r#"
-[mcp]
-enabled = false
-deferred_loading = true
-
-[[mcp.servers]]
-name = "svc"
-transport = "http"
-url = "http://localhost:8080/mcp"
-"#;
-        let parsed = parse_test_config(raw);
-        assert!(!parsed.mcp.enabled);
-        assert!(parsed.mcp.deferred_loading);
-        assert_eq!(parsed.mcp.servers.len(), 1);
-    }
-
-    #[test]
-    async fn mcp_transport_serde_roundtrip_lowercase() {
-        let cases = [
-            (McpTransport::Stdio, "\"stdio\""),
-            (McpTransport::Http, "\"http\""),
-            (McpTransport::Sse, "\"sse\""),
-        ];
-        for (variant, expected_json) in &cases {
-            let serialized = serde_json::to_string(variant).expect("serialize");
-            assert_eq!(&serialized, expected_json, "variant: {variant:?}");
-            let deserialized: McpTransport =
-                serde_json::from_str(expected_json).expect("deserialize");
-            assert_eq!(&deserialized, variant);
-        }
-    }
 
     #[test]
     async fn legacy_nevis_table_parses_and_is_ignored() {
@@ -37452,9 +35555,6 @@ stream_tool_arguments = [
         assert!(Config::prop_is_secret(
             "file_upload_bundle.headers.Authorization"
         ));
-        assert!(Config::prop_is_secret(
-            "mcp.servers.acme.headers.Authorization"
-        ));
         assert!(!Config::prop_is_secret("file_download.timeout_secs"));
         assert!(!Config::prop_is_secret("file_download.headers"));
     }
@@ -37895,38 +35995,6 @@ api_key = "op://zeroclaw/provider/openai-api-key"
         assert!(
             sections.iter().any(|s| s.path == "agents"),
             "agents map should be discoverable"
-        );
-
-        // mcp.servers is a Vec<McpServerConfig> with #[nested] — should
-        // surface as a List-kind section so the dashboard's "+ Add MCP
-        // server" affordance picks it up. Without this, dashboard users
-        // hit a silent dead-end and have to hand-edit config.toml. Pinned
-        // here so a regression that drops the #[nested] annotation or the
-        // Configurable derive on McpServerConfig fails CI.
-        let mcp_servers = sections
-            .iter()
-            .find(|s| s.path == "mcp.servers")
-            .expect("mcp.servers must be discoverable as a list-shaped section");
-        assert_eq!(mcp_servers.kind, crate::traits::MapKeyKind::List);
-        assert_eq!(mcp_servers.value_type, "McpServerConfig");
-    }
-
-    #[test]
-    async fn create_map_key_inserts_default_mcp_server() {
-        // Round-trip: `POST /api/config/map-key?path=mcp.servers&key=github`.
-        // The new entry's `name` field is initialized to the supplied key
-        // by the macro's List-kind insertion logic.
-        let mut config = Config::default();
-        assert!(config.mcp.servers.is_empty());
-
-        let created = config
-            .create_map_key("mcp.servers", "github")
-            .expect("mcp.servers should accept new list entries");
-        assert!(created, "first add should report created=true");
-        assert_eq!(config.mcp.servers.len(), 1);
-        assert_eq!(
-            config.mcp.servers[0].name, "github",
-            "new entry must carry the supplied key as its name field"
         );
     }
 
@@ -39003,282 +37071,6 @@ allowed_users = []
         assert_eq!(
             config.channels.matrix.get("default").unwrap().allowed_rooms,
             vec!["alice".to_string(), "bob".to_string()],
-        );
-    }
-
-    #[test]
-    async fn mcp_servers_addable_via_create_map_key_and_per_entry_props() {
-        // `mcp.servers` is a `Vec<McpServerConfig>` with `#[nested]`, so the
-        // `Configurable` derive surfaces it as a List section (not an
-        // ObjectArray prop) — operators add servers via
-        // `POST /api/config/map-key?path=mcp.servers&key=<name>` and edit
-        // each server's fields via per-prop GET/PUT.
-        //
-        // This replaces the prior model where the entire Vec round-tripped
-        // through set_prop("mcp.servers", "<json-array>"). The List model
-        // matches the rest of the schema (`providers.models`, `agents`,
-        // etc.) and gives the dashboard a per-field editor instead of a
-        // monolithic JSON blob.
-        let mut config = Config::default();
-
-        // The List section is discoverable.
-        let sections = Config::map_key_sections();
-        assert!(
-            sections
-                .iter()
-                .any(|s| s.path == "mcp.servers" && s.kind == crate::traits::MapKeyKind::List),
-            "mcp.servers should surface as a List section in map_key_sections()"
-        );
-
-        // create_map_key inserts a default-valued entry and seeds its
-        // `name` field from the supplied key.
-        config
-            .create_map_key("mcp.servers", "fs")
-            .expect("mcp.servers should accept new list entries via create_map_key");
-        assert_eq!(config.mcp.servers.len(), 1);
-        assert_eq!(config.mcp.servers[0].name, "fs");
-
-        // Per-entry fields are mutated via standard set_prop on the inner
-        // path; routing goes through the `#[natural_key = "name"]` arm
-        // on `McpConfig::servers` (see `route_vec_path` and the
-        // `Configurable` derive's natural-key arm for the wiring).
-        config
-            .set_prop("mcp.servers.fs.command", "/usr/bin/mcp-fs")
-            .expect("set_prop on mcp.servers.fs.command should route through natural-key arm");
-        assert_eq!(config.mcp.servers[0].command, "/usr/bin/mcp-fs");
-
-        // Round-trip via get_prop.
-        let got = config.get_prop("mcp.servers.fs.command").expect(
-            "get_prop on mcp.servers.fs.command should resolve through the natural-key arm",
-        );
-        assert_eq!(got, "/usr/bin/mcp-fs");
-
-        // Enum-typed fields (transport) parse from their wire form.
-        config
-            .set_prop("mcp.servers.fs.transport", "http")
-            .expect("transport should accept its enum variants as strings");
-        assert_eq!(
-            config.mcp.servers[0].transport,
-            crate::schema::McpTransport::Http
-        );
-
-        // The natural-key field itself is read-only via set_prop — the
-        // routing arm returns an explicit error pointing at
-        // config_map_key_rename rather than mutating `name` in place
-        // (which would silently re-key the entry and strand any
-        // in-flight references to the old key).
-        let err = config
-            .set_prop("mcp.servers.fs.name", "filesystem")
-            .expect_err("set_prop on the natural-key field must refuse");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("natural key")
-                && msg.contains("read-only")
-                && msg.contains("config_map_key_rename"),
-            "unexpected error message for read-only natural-key set: {msg}"
-        );
-
-        // Rename via the dedicated path. The element's `name` field
-        // changes in place; subsequent prop access uses the new key.
-        let renamed = config
-            .rename_map_key("mcp.servers", "fs", "filesystem")
-            .expect("rename should succeed when the new key is free");
-        assert!(renamed, "rename_map_key should report Ok(true) on success");
-        assert_eq!(config.mcp.servers[0].name, "filesystem");
-        assert_eq!(
-            config.get_prop("mcp.servers.filesystem.command").unwrap(),
-            "/usr/bin/mcp-fs"
-        );
-
-        // The old key no longer resolves — confirming the rename was
-        // not just an alias add.
-        assert!(
-            config.get_prop("mcp.servers.fs.command").is_err(),
-            "old natural key should stop resolving after rename"
-        );
-
-        // prop_fields enumerates the per-element fields under the
-        // current natural key, and filters out the natural-key field
-        // itself (no editable `name` row in the TUI).
-        let paths: Vec<String> = config
-            .prop_fields()
-            .into_iter()
-            .map(|f| f.name)
-            .filter(|n| n.starts_with("mcp.servers."))
-            .collect();
-        assert!(
-            paths.iter().any(|n| n == "mcp.servers.filesystem.command"),
-            "prop_fields should surface per-element child props; got: {paths:?}"
-        );
-        assert!(
-            !paths.iter().any(|n| n == "mcp.servers.filesystem.name"),
-            "prop_fields must hide the natural-key field to keep it read-only; got: {paths:?}"
-        );
-
-        // delete_map_key by natural key removes the matching element.
-        let deleted = config
-            .delete_map_key("mcp.servers", "filesystem")
-            .expect("delete by natural key should resolve");
-        assert!(deleted);
-        assert!(config.mcp.servers.is_empty());
-    }
-
-    #[test]
-    async fn mcp_servers_create_map_key_is_idempotent_on_existing_natural_key() {
-        // Regression for the per-field editor contract: the rest of the
-        // natural-key surface (`get_prop` / `set_prop` / `rename_map_key`)
-        // treats duplicate natural keys as `VecRoute::Ambiguous` and
-        // refuses to mutate (see `mcp_servers_routing_is_ambiguous_on_
-        // duplicate_names`). If `create_map_key` always appended, a UI
-        // retry — or any caller that re-issued the same add after an
-        // uncertain RPC response — would drop `mcp.servers` into that
-        // invalid state and leave `mcp.servers.<name>.command` no longer
-        // routing until the operator hand-repaired the duplicate.
-        //
-        // The contract is the same as the `HashMap<String, T>` arm:
-        // re-adding an existing key is `Ok(false)` (idempotent no-op),
-        // not "append a second element that happens to share the key".
-        let mut config = Config::default();
-
-        let first = config
-            .create_map_key("mcp.servers", "fs")
-            .expect("first add should succeed");
-        assert!(first, "first add should report created=true");
-        assert_eq!(config.mcp.servers.len(), 1);
-        assert_eq!(config.mcp.servers[0].name, "fs");
-
-        // Seed an inner field so we can prove the existing entry's
-        // state is preserved across the no-op second add (rather than,
-        // say, the second call clobbering it with a default).
-        config
-            .set_prop("mcp.servers.fs.command", "/usr/bin/mcp-fs")
-            .expect("set_prop on the freshly-added entry should route");
-
-        // Repeat add for the same natural key. Must report Ok(false)
-        // and must not push a second element.
-        let second = config
-            .create_map_key("mcp.servers", "fs")
-            .expect("repeat add for an existing natural key must not error");
-        assert!(
-            !second,
-            "repeat add for an existing natural key should report created=false (idempotent)"
-        );
-        assert_eq!(
-            config.mcp.servers.len(),
-            1,
-            "repeat add must not append a duplicate; got {} entries",
-            config.mcp.servers.len()
-        );
-        assert_eq!(config.mcp.servers[0].name, "fs");
-
-        // The natural-key surface still routes — the duplicate was
-        // never created, so `set_prop` / `get_prop` are not in the
-        // `VecRoute::Ambiguous` state. The previously-set command
-        // round-trips and a new edit lands on the original entry.
-        assert_eq!(
-            config.get_prop("mcp.servers.fs.command").unwrap(),
-            "/usr/bin/mcp-fs",
-            "existing entry's state must survive the no-op second add"
-        );
-        config
-            .set_prop("mcp.servers.fs.command", "/usr/local/bin/mcp-fs")
-            .expect("set_prop must keep routing after the repeat add");
-        assert_eq!(config.mcp.servers[0].command, "/usr/local/bin/mcp-fs");
-
-        // A genuinely new key is still added: idempotency is per-key,
-        // not "first add wins everything".
-        let third = config
-            .create_map_key("mcp.servers", "github")
-            .expect("a distinct natural key should still be addable");
-        assert!(third, "distinct-key add should report created=true");
-        assert_eq!(config.mcp.servers.len(), 2);
-    }
-
-    #[test]
-    async fn mcp_servers_routing_is_ambiguous_on_duplicate_names() {
-        // `validate_mcp_config` rejects duplicate `name` at save time,
-        // but until the operator repairs the config the in-flight
-        // routing must refuse to silently mutate one of the duplicates.
-        // This is the schema-side anchor for that contract; the helper
-        // function's behaviour is unit-tested directly in
-        // `helpers::tests::route_vec_path_reports_ambiguous_duplicates`.
-        let mut config = Config::default();
-        config.mcp.servers.push(McpServerConfig {
-            name: "dupe".into(),
-            transport: McpTransport::Stdio,
-            command: "/a".into(),
-            ..Default::default()
-        });
-        config.mcp.servers.push(McpServerConfig {
-            name: "dupe".into(),
-            transport: McpTransport::Stdio,
-            command: "/b".into(),
-            ..Default::default()
-        });
-
-        let set_err = config
-            .set_prop("mcp.servers.dupe.command", "/c")
-            .expect_err("set_prop on a duplicated natural key must refuse");
-        assert!(
-            set_err.to_string().contains("ambiguous"),
-            "expected ambiguity error, got: {set_err}"
-        );
-
-        let get_err = config
-            .get_prop("mcp.servers.dupe.command")
-            .expect_err("get_prop on a duplicated natural key must refuse");
-        assert!(
-            get_err.to_string().contains("ambiguous"),
-            "expected ambiguity error, got: {get_err}"
-        );
-
-        // Neither side mutated the underlying state.
-        assert_eq!(config.mcp.servers[0].command, "/a");
-        assert_eq!(config.mcp.servers[1].command, "/b");
-
-        // rename_map_key likewise refuses, with an actionable message.
-        let rename_err = config
-            .rename_map_key("mcp.servers", "dupe", "ok")
-            .expect_err("rename of a duplicated natural key must refuse");
-        assert!(
-            rename_err.contains("ambiguous"),
-            "expected ambiguity error from rename, got: {rename_err}"
-        );
-    }
-
-    #[test]
-    async fn mcp_servers_rename_refuses_when_new_key_is_taken() {
-        let mut config = Config::default();
-        config.create_map_key("mcp.servers", "fs").unwrap();
-        config.create_map_key("mcp.servers", "github").unwrap();
-
-        let err = config
-            .rename_map_key("mcp.servers", "fs", "github")
-            .expect_err("rename should refuse when the target key already exists");
-        assert!(
-            err.contains("already exists"),
-            "expected target-collision error, got: {err}"
-        );
-
-        // State untouched.
-        assert_eq!(config.mcp.servers.len(), 2);
-        assert_eq!(config.mcp.servers[0].name, "fs");
-        assert_eq!(config.mcp.servers[1].name, "github");
-    }
-
-    #[test]
-    async fn mcp_servers_get_map_keys_lists_natural_keys_in_insertion_order() {
-        let mut config = Config::default();
-        config.create_map_key("mcp.servers", "a").unwrap();
-        config.create_map_key("mcp.servers", "b").unwrap();
-        config.create_map_key("mcp.servers", "c").unwrap();
-
-        let keys = config
-            .get_map_keys("mcp.servers")
-            .expect("mcp.servers must surface its natural keys via get_map_keys");
-        assert_eq!(
-            keys,
-            vec!["a".to_string(), "b".to_string(), "c".to_string()]
         );
     }
 

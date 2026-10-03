@@ -15,9 +15,7 @@ use zeroclaw_config::policy::SecurityPolicy;
 use zeroclaw_config::schema::Config;
 
 use crate::agent::loop_::{
-    append_pinned_mcp_section, apply_policy_tool_filter, eager_mcp_tool_allowed,
-    load_peripheral_tools, mcp_allowed_tool_count, mcp_tool_access_policy,
-    preactivate_always_filter_groups, register_eager_mcp_tool_if_allowed,
+    append_pinned_mcp_section, apply_policy_tool_filter, load_peripheral_tools,
 };
 use crate::skills::Skill;
 use crate::tools::{
@@ -133,10 +131,6 @@ pub struct ScopedAssembly<'a> {
     /// threaded into BOTH the built-in filter and the MCP tool-access policy. `None`
     /// on every path except `run`.
     pub caller_allowed: Option<&'a [String]>,
-    /// Documented divergence: ACP `session/new` must return promptly, so it does not
-    /// connect MCP servers - they are neither resolved nor connected; nothing is
-    /// granted.
-    pub connect_mcp: bool,
     /// Documented divergence: loading peripherals physically connects hardware (the
     /// daemon's loader opens serial ports, exclusively for real devices). Listing-only
     /// surfaces (the gateway's `/api/tools` registries) MUST pass `false` so they never
@@ -150,18 +144,7 @@ pub struct ScopedAssembly<'a> {
     /// the tool is absent rather than returning a false success on a channel
     /// that cannot deliver it. Only the ACP turn path passes `true`.
     pub acp_delivery: bool,
-    pub list_deferred_mcp_specs: bool,
     pub emit_assembly_logs: bool,
-    /// Pre-built MCP registry supplied by the caller. The daemon heartbeat
-    /// worker constructs this once at worker start and shares it across
-    /// every tick so that stdio MCP children live for the daemon's
-    /// lifetime rather than being orphaned and re-spawned per
-    /// `agent::run` call. When `Some`, `assemble` MUST use this
-    /// `Arc<McpRegistry>` and MUST NOT call `McpRegistry::connect_all`
-    /// itself. `None` preserves the legacy per-call connect path
-    /// (CLI / one-shot / process_message), which is correct for
-    /// callers that have no cross-turn reuse contract.
-    pub mcp_registry: Option<Arc<crate::tools::McpRegistry>>,
 }
 
 /// Output of [`ScopedToolRegistry::assemble`]: the scoped registry plus the
@@ -197,12 +180,10 @@ pub struct ScopedAssembled {
     /// rendered text), for holders that must be able to withdraw a block when the
     /// caller's tool selector later narrows past its key. Always renders to exactly
     /// [`Self::pinned_section`].
-    pinned_blocks: Vec<tools::mcp_context::PinnedResourceBlock>,
+    pinned_blocks: Vec<zeroclaw_tools::mcp_context::PinnedResourceBlock>,
     /// Live handle to the activated deferred-MCP set (present only when a deferred
     /// `tool_search` tool was registered).
     pub activated_handle: Option<Arc<std::sync::Mutex<ActivatedToolSet>>>,
-    /// The same search instance exposed in the registry, for session narrowing.
-    pub tool_search_handle: Option<Arc<tools::ToolSearchTool>>,
     pub mcp_tool_names: HashSet<String>,
 }
 
@@ -238,7 +219,7 @@ impl ScopedAssembled {
 
     /// The pinned resources as attributed blocks, for a holder that re-renders the
     /// section itself and prunes blocks on live tool narrowing (`Agent`).
-    pub fn pinned_blocks(&self) -> &[tools::mcp_context::PinnedResourceBlock] {
+    pub fn pinned_blocks(&self) -> &[zeroclaw_tools::mcp_context::PinnedResourceBlock] {
         &self.pinned_blocks
     }
 }
@@ -260,13 +241,10 @@ impl ScopedToolRegistry {
             skills,
             runtime,
             caller_allowed,
-            connect_mcp,
             connect_peripherals,
             exclude_memory,
             acp_delivery,
-            list_deferred_mcp_specs,
             emit_assembly_logs,
-            mcp_registry: overrides_mcp_registry,
         } = spec;
 
         let AllToolsResult {
@@ -315,7 +293,7 @@ impl ScopedToolRegistry {
             Arc::new(tools::PipelineTool::with_access_policy(
                 config.pipeline.clone(),
                 context_filtered_tool_arcs.clone(),
-                zeroclaw_tools::tool_search::ToolAccessPolicy::from_security(
+                zeroclaw_tools::tool_access::ToolAccessPolicy::from_security(
                     security.allowed_tools.as_deref(),
                     security.excluded_tools.as_deref(),
                     caller_allowed,
@@ -336,6 +314,7 @@ impl ScopedToolRegistry {
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Load)
                     .with_category(::zeroclaw_log::EventCategory::Agent)
                     .with_attrs(::serde_json::json!({
+                        "agent_alias": agent_alias,
                         "before": before_filter,
                         "retained": tools_registry.len(),
                         "policy_allowed": security.allowed_tools.as_ref().map(|v| v.len()),
@@ -352,297 +331,17 @@ impl ScopedToolRegistry {
         tools_registry
             .retain(|tool| tool_allowed_in_context(tool.name(), exclude_memory, acp_delivery));
 
-        // 4. MCP: scope servers per `mcp_bundles` (omission is not a grant), then gate
-        //    each tool. Skipped only when this path does not connect MCP (ACP) or MCP
-        //    is disabled - in both cases nothing is granted.
         let mut deferred_section = String::new();
-        // Pinned MCP resources are surfaced on their own field. Single-block callers
-        // (`run`, `process_message`) append this onto their `deferred_section` copy;
-        // `from_config` injects it into the Agent's distinct pinned-section slot.
-        let mut pinned_section = String::new();
-        let mut pinned_blocks = Vec::new();
-        let mut activated_handle: Option<Arc<std::sync::Mutex<ActivatedToolSet>>> = None;
-        let mut tool_search_handle = None;
-        let mut mcp_elevation_arcs: Vec<Arc<dyn Tool>> = Vec::new();
-        // MCP-origin ground truth for the tool_filter_groups gates; see
-        // the `ScopedAssembled::mcp_tool_names` field doc for the contract.
-        let mut mcp_tool_names: HashSet<String> = HashSet::new();
-
-        let agent_mcp_servers = if connect_mcp && config.mcp.enabled {
-            config.mcp_servers_for_agent(agent_alias)
-        } else {
-            Vec::new()
-        };
-        if !agent_mcp_servers.is_empty() {
-            if emit_assembly_logs {
-                ::zeroclaw_log::record!(
-                    INFO,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Load)
-                        .with_category(::zeroclaw_log::EventCategory::Tool),
-                    &format!(
-                        "Initializing MCP client - {} server(s) granted via mcp_bundles",
-                        agent_mcp_servers.len()
-                    )
-                );
-            }
-            // Caller-supplied registry wins: the daemon heartbeat worker
-            // constructs the registry once and reuses it across every
-            // tick so stdio MCP children live for the daemon lifetime.
-            // Falling back to per-call `connect_all` keeps the legacy
-            // CLI / one-shot / process_message path intact.
-            let shared_registry: Option<Arc<tools::McpRegistry>> =
-                if let Some(shared) = overrides_mcp_registry.as_ref() {
-                    Some(Arc::clone(shared))
-                } else {
-                    match tools::McpRegistry::connect_all(&agent_mcp_servers).await {
-                        Ok(registry) => Some(Arc::new(registry)),
-                        Err(err) => {
-                            // Non-fatal (the assembly proceeds without MCP), but an ERROR
-                            // with structured attrs - parity with the run/process_message
-                            // connect-failure logging.
-                            ::zeroclaw_log::record!(
-                                ERROR,
-                                ::zeroclaw_log::Event::new(
-                                    module_path!(),
-                                    ::zeroclaw_log::Action::Fail
-                                )
-                                .with_category(::zeroclaw_log::EventCategory::Tool)
-                                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                                .with_attrs(::serde_json::json!({
-                                    "agent_alias": agent_alias,
-                                    "error": format!("{err}"),
-                                })),
-                                "MCP registry failed to initialize (assembly proceeds without MCP)"
-                            );
-                            None
-                        }
-                    }
-                };
-            if let Some(registry) = shared_registry {
-                // Origin set: every `<server>__<tool>` name the registry knows.
-                // Deferred stubs derive from the same `tool_names()` call, so
-                // one extension covers eager, deferred, and later activations.
-                mcp_tool_names.extend(registry.tool_names());
-                // Elevation arcs exist only to resolve skill-declared MCP
-                // elevation in step 5; skip the collection when no skills are
-                // registered through this assembly.
-                if !skills.is_empty() {
-                    mcp_elevation_arcs =
-                        tools::collect_mcp_elevation_arcs(&registry, security).await;
-                }
-                let mcp_policy = mcp_tool_access_policy(security.as_ref(), caller_allowed);
-                // Generic MCP resource/prompt capability tools (policy-gated in
-                // deferred-loading and eager modes) - parity with run/process_message.
-                for tool in tools::build_mcp_capability_tools(&registry, mcp_policy.as_ref()) {
-                    let capability_name = tool.name().to_string();
-                    if register_eager_mcp_tool_if_allowed(
-                        tool,
-                        &mut tools_registry,
-                        delegate_handle.as_ref(),
-                        mcp_policy.as_ref(),
-                    ) {
-                        // Capability tools are MCP-origin (built from the
-                        // registry) and were the only names the pre- prefix
-                        // gate matched — they stay classifiable so a
-                        // non-matching group set keeps excluding them.
-                        mcp_tool_names.insert(capability_name);
-                    }
-                }
-                pinned_blocks = tools::mcp_context::build_pinned_resource_blocks(
-                    &registry,
-                    &agent_mcp_servers,
-                    mcp_policy.as_ref(),
-                )
-                .await;
-                pinned_section =
-                    tools::mcp_context::render_pinned_resources_section(&pinned_blocks);
-                if config.mcp.deferred_loading {
-                    let deferred_set = tools::DeferredMcpToolSet::from_registry(
-                        Arc::clone(&registry),
-                        Arc::clone(security),
-                    )
-                    .await;
-                    if emit_assembly_logs {
-                        ::zeroclaw_log::record!(
-                            INFO,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Load
-                            )
-                            .with_category(::zeroclaw_log::EventCategory::Tool),
-                            &format!(
-                                "MCP deferred: {} tool stub(s) from {} server(s)",
-                                deferred_set.len(),
-                                registry.server_count()
-                            )
-                        );
-                    }
-                    if list_deferred_mcp_specs {
-                        for stub in &deferred_set.stubs {
-                            if !eager_mcp_tool_allowed(&stub.prefixed_name, mcp_policy.as_ref()) {
-                                continue;
-                            }
-                            let wrapper: Arc<dyn Tool> = Arc::new(
-                                stub.activate(Arc::clone(&registry), Arc::clone(security)),
-                            );
-                            register_eager_mcp_tool_if_allowed(
-                                wrapper,
-                                &mut tools_registry,
-                                delegate_handle.as_ref(),
-                                mcp_policy.as_ref(),
-                            );
-                        }
-                    }
-                    // Centralized single source of truth for the deferred-MCP
-                    // tool set: the same `filtered_deferred` drives both the
-                    // prompt-side `build_deferred_tools_section_filtered` and
-                    // the `ToolSearchTool` constructor, so a denied tool cannot
-                    // leak into either side. The `with_access_policy` step on
-                    // the search tool is now defense-in-depth — the stub set is
-                    // already pre-filtered.
-                    let filtered_deferred = deferred_set.filter_by_policy(mcp_policy.as_ref());
-                    let allowed_stub_count = mcp_allowed_tool_count(
-                        filtered_deferred
-                            .stubs
-                            .iter()
-                            .map(|stub| stub.prefixed_name.as_str()),
-                        mcp_policy.as_ref(),
-                    );
-                    deferred_section = tools::build_deferred_tools_section_filtered(
-                        &filtered_deferred,
-                        mcp_policy.as_ref(),
-                    );
-                    // Listing registries expose the real deferred MCP tools as
-                    // eager wrappers above and never consume the deferred prompt
-                    // section, the activation handle, or invoke tools. Skip
-                    // `tool_search` there so `/api/tools` matches eager-mode
-                    // listing (real MCP tools, no deferral-internal helper).
-                    if allowed_stub_count > 0 && !list_deferred_mcp_specs {
-                        let activated = Arc::new(std::sync::Mutex::new(ActivatedToolSet::new()));
-                        activated_handle = Some(Arc::clone(&activated));
-                        // Pre-activate `mode = "always"` tool_filter_groups
-                        // entries before `ToolSearchTool::new` consumes
-                        // the stub set, so `always` tools are live on the very
-                        // first turn. Groups resolve from the agent's runtime
-                        // profile — the same source `Config::resolved_agent_config`
-                        // clones into `agent.resolved.tool_filter_groups`, which
-                        // the per-turn gates read; if profile resolution ever
-                        // grows merge logic, both lookups must move together.
-                        let filter_groups = config
-                            .runtime_profile_for_agent(agent_alias)
-                            .map(|profile| profile.tool_filter_groups.as_slice())
-                            .unwrap_or(&[]);
-                        let preactivated_names = preactivate_always_filter_groups(
-                            &filtered_deferred,
-                            &activated,
-                            filter_groups,
-                            mcp_policy.as_ref(),
-                            delegate_handle.as_ref(),
-                        );
-                        if emit_assembly_logs && !preactivated_names.is_empty() {
-                            ::zeroclaw_log::record!(
-                                INFO,
-                                ::zeroclaw_log::Event::new(
-                                    module_path!(),
-                                    ::zeroclaw_log::Action::Register
-                                )
-                                .with_category(::zeroclaw_log::EventCategory::Tool)
-                                .with_attrs(::serde_json::json!({
-                                    "agent_alias": agent_alias,
-                                    "count": preactivated_names.len(),
-                                })),
-                                "MCP deferred: pre-activated tool(s) via tool_filter_groups mode=always"
-                            );
-                        }
-                        // Build the prompt section AFTER pre-activation and
-                        // exclude the just-activated names: the section tells
-                        // the model listed tools are "NOT yet loaded" and MUST
-                        // be fetched via tool_search — advertising a live tool
-                        // there would burn the exact first-turn round-trip
-                        // `mode = "always"` pre-activation exists to remove.
-                        deferred_section = tools::build_deferred_tools_section_excluding(
-                            &filtered_deferred,
-                            mcp_policy.as_ref(),
-                            &preactivated_names,
-                        );
-                        let mut tool_search =
-                            tools::ToolSearchTool::new(filtered_deferred, activated);
-                        if let Some(mut policy) = mcp_policy {
-                            // The caller ceiling already materialized the stub
-                            // registry above. Do not retain a second, stale
-                            // principal selector in the long-lived search tool.
-                            policy.caller_allowed = None;
-                            tool_search = tool_search.with_access_policy(policy);
-                        }
-                        // Newly-activated deferred tools are also exposed to the
-                        // delegate parent set, matching the run/process_message paths.
-                        if let Some(ref handle) = delegate_handle {
-                            let delegate_tools = Arc::clone(handle);
-                            tool_search = tool_search.with_activation_hook(Arc::new(move |tool| {
-                                let mut tools = delegate_tools.write();
-                                let already =
-                                    tools.iter().any(|existing| existing.name() == tool.name());
-                                if !already {
-                                    tools.push(tool);
-                                }
-                            }));
-                        }
-                        let tool_search = Arc::new(tool_search);
-                        tool_search_handle = Some(Arc::clone(&tool_search));
-                        tools_registry.push(Box::new(tools::ArcToolRef(tool_search)));
-                    }
-                } else {
-                    let names = registry.tool_names();
-                    let mut registered = 0usize;
-                    let mut skipped = 0usize;
-                    for name in names {
-                        if !eager_mcp_tool_allowed(&name, mcp_policy.as_ref()) {
-                            skipped += 1;
-                            continue;
-                        }
-                        if let Some(def) = registry.get_tool_def(&name).await {
-                            let wrapper: Arc<dyn Tool> = Arc::new(tools::McpToolWrapper::new(
-                                name,
-                                def,
-                                Arc::clone(&registry),
-                                Arc::clone(security),
-                            ));
-                            if register_eager_mcp_tool_if_allowed(
-                                wrapper,
-                                &mut tools_registry,
-                                delegate_handle.as_ref(),
-                                mcp_policy.as_ref(),
-                            ) {
-                                registered += 1;
-                            }
-                        }
-                    }
-                    if emit_assembly_logs {
-                        ::zeroclaw_log::record!(
-                            INFO,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Register
-                            )
-                            .with_category(::zeroclaw_log::EventCategory::Tool),
-                            &format!(
-                                "MCP: {} tool(s) registered from {} server(s), {} skipped by policy",
-                                registered,
-                                registry.server_count(),
-                                skipped
-                            )
-                        );
-                    }
-                }
-            }
-        }
+        let pinned_section = String::new();
+        let pinned_blocks: Vec<zeroclaw_tools::mcp_context::PinnedResourceBlock> = Vec::new();
+        let activated_handle = None;
+        let mcp_tool_names: HashSet<String> = HashSet::new();
 
         // 5. Skills (uniform: the gateway used to skip them). Registered under the same
         //    `SecurityPolicy`, resolving builtin elevation against context-filtered arcs.
         let resolution_registry: Vec<Arc<dyn Tool>> = context_filtered_tool_arcs
             .iter()
             .cloned()
-            .chain(mcp_elevation_arcs.iter().cloned())
             .chain(pipeline_tool.iter().cloned())
             .collect();
         let nat64_prefixes = match zeroclaw_infra::net_guard::parse_nat64_prefixes(
@@ -701,7 +400,6 @@ impl ScopedToolRegistry {
             pinned_section,
             pinned_blocks,
             activated_handle,
-            tool_search_handle,
             mcp_tool_names,
         }
     }
@@ -844,13 +542,10 @@ mod tests {
             skills,
             runtime: Arc::new(crate::platform::NativeRuntime::new()),
             caller_allowed,
-            connect_mcp: false,
             connect_peripherals: false,
             exclude_memory: false,
             acp_delivery: false,
-            list_deferred_mcp_specs: false,
             emit_assembly_logs: false,
-            mcp_registry: None,
         })
         .await
     }
@@ -1047,13 +742,10 @@ mod tests {
             skills: &[],
             runtime: Arc::new(crate::platform::NativeRuntime::new()),
             caller_allowed: None,
-            connect_mcp: false,
             connect_peripherals: false,
             exclude_memory,
             acp_delivery,
-            list_deferred_mcp_specs: false,
             emit_assembly_logs: false,
-            mcp_registry: None,
         })
         .await;
 
@@ -1148,13 +840,10 @@ mod tests {
             skills: std::slice::from_ref(&skill),
             runtime: Arc::new(crate::platform::NativeRuntime::new()),
             caller_allowed: None,
-            connect_mcp: false,
             connect_peripherals: false,
             exclude_memory,
             acp_delivery,
-            list_deferred_mcp_specs: false,
             emit_assembly_logs: false,
-            mcp_registry: None,
         })
         .await;
 
@@ -1191,13 +880,10 @@ mod tests {
             skills: &[],
             runtime: Arc::new(crate::platform::NativeRuntime::new()),
             caller_allowed,
-            connect_mcp: false, // exercise the filter path without MCP fixtures
             connect_peripherals: false,
             exclude_memory: false,
             acp_delivery: true, // keep deliver_file so name-filter tests are unaffected
-            list_deferred_mcp_specs: false,
             emit_assembly_logs: false,
-            mcp_registry: None,
         })
         .await;
         out.registry.iter().map(|t| t.name().to_string()).collect()
@@ -1238,13 +924,10 @@ mod tests {
             skills: std::slice::from_ref(&skill),
             runtime: Arc::new(crate::platform::NativeRuntime::new()),
             caller_allowed: None,
-            connect_mcp: false,
             connect_peripherals: false,
             exclude_memory: false,
             acp_delivery: true,
-            list_deferred_mcp_specs: false,
             emit_assembly_logs: false,
-            mcp_registry: None,
         })
         .await;
         let tool = assembled
@@ -1305,13 +988,10 @@ mod tests {
             skills: &[],
             runtime: Arc::new(crate::platform::NativeRuntime::new()),
             caller_allowed: None,
-            connect_mcp: false,
             connect_peripherals: false,
             exclude_memory: false,
             acp_delivery,
-            list_deferred_mcp_specs: false,
             emit_assembly_logs: false,
-            mcp_registry: None,
         })
         .await;
         out.registry.iter().map(|t| t.name().to_string()).collect()
@@ -1336,260 +1016,6 @@ mod tests {
         assert!(
             names.iter().any(|n| n == "deliver_file"),
             "deliver_file must survive on the ACP turn path: {names:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn assemble_grants_no_mcp_to_agent_without_bundles() {
-        use zeroclaw_config::schema::{
-            AliasedAgentConfig, McpServerConfig, McpTransport, RiskProfileConfig,
-        };
-
-        let mut config = Config::default();
-        config.mcp.enabled = true;
-        config.mcp.servers = vec![McpServerConfig {
-            name: "fs".into(),
-            transport: McpTransport::Stdio,
-            command: "/usr/bin/mcp-fs".into(),
-            ..Default::default()
-        }];
-        // Critically: NO mcp_bundles configured and NO agent grants.
-        config
-            .risk_profiles
-            .insert("test-profile".into(), RiskProfileConfig::default());
-        config.agents.insert(
-            "unscoped".into(),
-            AliasedAgentConfig {
-                enabled: true,
-                model_provider: "openai.test-provider".into(),
-                risk_profile: "test-profile".into(),
-                mcp_bundles: Vec::new(),
-                ..Default::default()
-            },
-        );
-        let security = Arc::new(SecurityPolicy {
-            workspace_dir: std::env::temp_dir(),
-            ..SecurityPolicy::default()
-        });
-
-        let out = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            ScopedToolRegistry::assemble(ScopedAssembly {
-                config: &config,
-                agent_alias: "unscoped",
-                security: &security,
-                built: built_with(Vec::new()),
-                skills: &[],
-                runtime: Arc::new(crate::platform::NativeRuntime::new()),
-                caller_allowed: None,
-                connect_mcp: true,
-                connect_peripherals: false,
-                exclude_memory: false,
-                acp_delivery: false,
-                list_deferred_mcp_specs: false,
-                emit_assembly_logs: false,
-                mcp_registry: None,
-            }),
-        )
-        .await
-        .expect("assemble must not hang for an unscoped agent");
-
-        assert!(
-            out.registry.is_empty(),
-            "assemble must not mint any MCP tool when the agent has no \
-             mcp_bundles grant; got {:?}",
-            out.registry.iter().map(|t| t.name()).collect::<Vec<_>>()
-        );
-        assert!(
-            out.activated_handle.is_none() && out.deferred_section.is_empty(),
-            "no deferred-MCP artifacts may exist for an unscoped agent"
-        );
-    }
-
-    async fn mock_mcp_http_server() -> wiremock::MockServer {
-        mock_mcp_http_server_with_tools(&[("echo", "echo"), ("add_numbers", "add")]).await
-    }
-
-    /// Deterministic MCP HTTP server advertising the given `(name, description)`
-    /// tools. Exercised through the real `connect_all` + `from_registry` path so
-    /// the deferred set is built from the wire, not hand-assembled.
-    async fn mock_mcp_http_server_with_tools(tools: &[(&str, &str)]) -> wiremock::MockServer {
-        use wiremock::matchers::{body_partial_json, method};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({"method": "initialize"}),
-            ))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("Mcp-Session-Id", "s")
-                    .set_body_json(serde_json::json!({
-                        "jsonrpc":"2.0","id":1,
-                        "result":{"capabilities":{"tools":{}}}
-                    })),
-            )
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({"method":"notifications/initialized"}),
-            ))
-            .respond_with(ResponseTemplate::new(202))
-            .mount(&server)
-            .await;
-        let tool_json: Vec<serde_json::Value> = tools
-            .iter()
-            .map(|(name, desc)| {
-                serde_json::json!({
-                    "name": name,
-                    "description": desc,
-                    "inputSchema": {"type": "object"}
-                })
-            })
-            .collect();
-        Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({"method":"tools/list"}),
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc":"2.0","id":2,"result":{"tools":tool_json}
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({"method":"resources/list"}),
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc":"2.0","id":3,"result":{"resources":[]}
-            })))
-            .mount(&server)
-            .await;
-        server
-    }
-
-    fn config_with_bundled_mcp(server_uri: String, server2_uri: String) -> Config {
-        use zeroclaw_config::schema::{
-            AliasedAgentConfig, McpBundleConfig, McpServerConfig, McpTransport, RiskProfileConfig,
-        };
-
-        let mut config = Config::default();
-        config.mcp.enabled = true;
-        config.mcp.servers = vec![
-            McpServerConfig {
-                name: "remote".into(),
-                transport: McpTransport::Http,
-                url: Some(server_uri),
-                ..Default::default()
-            },
-            McpServerConfig {
-                name: "remote2".into(),
-                transport: McpTransport::Http,
-                url: Some(server2_uri),
-                ..Default::default()
-            },
-        ];
-        config.mcp_bundles.insert(
-            "mockbundle".into(),
-            McpBundleConfig {
-                servers: vec!["remote".into(), "remote2".into()],
-                exclude: Vec::new(),
-            },
-        );
-        config
-            .risk_profiles
-            .insert("test-profile".into(), RiskProfileConfig::default());
-        config.agents.insert(
-            "scoped".into(),
-            AliasedAgentConfig {
-                enabled: true,
-                model_provider: "openai.test-provider".into(),
-                risk_profile: "test-profile".into(),
-                mcp_bundles: vec!["mockbundle".into()],
-                ..Default::default()
-            },
-        );
-        config
-    }
-
-    async fn assemble_listing_for(config: &Config) -> Vec<String> {
-        let security = Arc::new(SecurityPolicy {
-            workspace_dir: std::env::temp_dir(),
-            ..SecurityPolicy::default()
-        });
-        let out = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            ScopedToolRegistry::assemble(ScopedAssembly {
-                config,
-                agent_alias: "scoped",
-                security: &security,
-                built: built_with(Vec::new()),
-                skills: &[],
-                runtime: Arc::new(crate::platform::NativeRuntime::new()),
-                caller_allowed: None,
-                connect_mcp: true,
-                connect_peripherals: false,
-                exclude_memory: false,
-                acp_delivery: false,
-                list_deferred_mcp_specs: true,
-                emit_assembly_logs: false,
-                mcp_registry: None,
-            }),
-        )
-        .await
-        .expect("assemble must not hang");
-        out.registry.iter().map(|t| t.name().to_string()).collect()
-    }
-
-    #[tokio::test]
-    async fn assemble_lists_bundled_mcp_tools_in_both_loading_modes() {
-        let server = mock_mcp_http_server().await;
-        let server2 = mock_mcp_http_server().await;
-
-        let mut eager = config_with_bundled_mcp(server.uri(), server2.uri());
-        eager.mcp.deferred_loading = false;
-        let mut eager_names = assemble_listing_for(&eager).await;
-
-        let mut deferred = config_with_bundled_mcp(server.uri(), server2.uri());
-        deferred.mcp.deferred_loading = true;
-        let mut deferred_names = assemble_listing_for(&deferred).await;
-
-        for expected in [
-            "remote__echo",
-            "remote__add_numbers",
-            "remote2__echo",
-            "remote2__add_numbers",
-        ] {
-            assert!(
-                eager_names.iter().any(|n| n == expected),
-                "eager mode must list bundled MCP tool {expected}: {eager_names:?}"
-            );
-            assert!(
-                deferred_names.iter().any(|n| n == expected),
-                "deferred mode must still list bundled MCP tool {expected} in the \
-                 enumeration registry (#8302); got {deferred_names:?}"
-            );
-        }
-
-        // The deferral-internal turn helper is not a real listed tool. It must
-        // not appear on the dashboard listing in deferred mode.
-        assert!(
-            !deferred_names.iter().any(|n| n == "tool_search"),
-            "deferred listing registry must not expose tool_search (#8302); \
-             got {deferred_names:?}"
-        );
-
-        // Eager and deferred listing registries must present the same tool set,
-        // which is the parity contract this fix restores.
-        eager_names.sort();
-        eager_names.dedup();
-        deferred_names.sort();
-        deferred_names.dedup();
-        assert_eq!(
-            eager_names, deferred_names,
-            "eager and deferred /api/tools listings must match (#8302)"
         );
     }
 
@@ -1624,30 +1050,8 @@ mod tests {
             pinned_section: pinned.to_string(),
             pinned_blocks: Vec::new(),
             activated_handle: None,
-            tool_search_handle: None,
             mcp_tool_names: HashSet::new(),
         }
-    }
-
-    #[test]
-    fn combined_mcp_prompt_section_composes_both_when_present() {
-        let assembled = assembled_with_sections("## Deferred Tools\n- x__y", "## Pinned\n- z");
-        // Exact-string, not just contains()+ordering: pins the precise
-        // `deferred + "\n\n" + pinned` format `append_pinned_mcp_section` produces, so a
-        // regression in the separator or a stray transformation fails this test directly.
-        assert_eq!(
-            assembled.combined_mcp_prompt_section(),
-            "## Deferred Tools\n- x__y\n\n## Pinned\n- z"
-        );
-    }
-
-    #[test]
-    fn combined_mcp_prompt_section_is_deferred_only_when_pinned_empty() {
-        let assembled = assembled_with_sections("## Deferred Tools\n- x__y", "");
-        assert_eq!(
-            assembled.combined_mcp_prompt_section(),
-            "## Deferred Tools\n- x__y"
-        );
     }
 
     #[test]
@@ -1658,258 +1062,5 @@ mod tests {
         let assembled = assembled_with_sections("deferred-only", "pinned-only");
         assert_eq!(assembled.deferred_section(), "deferred-only");
         assert_eq!(assembled.pinned_section(), "pinned-only");
-    }
-
-    #[tokio::test]
-    async fn assemble_without_mcp_yields_empty_origin_set() {
-        // No MCP connected => nothing is classified MCP-origin, so the
-        // tool_filter_groups gates treat every tool as a pass-through
-        // built-in/skill and the groups are inert by construction
-        let config = Config::default();
-        let security = Arc::new(SecurityPolicy::default());
-        let out = ScopedToolRegistry::assemble(ScopedAssembly {
-            config: &config,
-            agent_alias: "default",
-            security: &security,
-            built: built_with(vec![Box::new(MockTool("shell"))]),
-            skills: &[],
-            runtime: Arc::new(crate::platform::NativeRuntime::new()),
-            caller_allowed: None,
-            connect_mcp: false,
-            connect_peripherals: false,
-            exclude_memory: false,
-            acp_delivery: false,
-            list_deferred_mcp_specs: false,
-            emit_assembly_logs: false,
-            mcp_registry: None,
-        })
-        .await;
-        assert!(
-            out.mcp_tool_names.is_empty(),
-            "no-MCP assembly must export an empty origin set; got {:?}",
-            out.mcp_tool_names
-        );
-    }
-
-    #[tokio::test]
-    async fn assemble_deferred_mcp_excludes_denied_tool_from_prompt_and_search() {
-        // Regression for the deferred-MCP access-policy omission, driven at the
-        // production assembly boundary: a real deferred MCP server advertising
-        // one allowed and one denied tool, a policy that denies the latter, and
-        // then assertions on the assembled prompt section AND the assembled
-        // `tool_search` execution/activation.
-        //
-        // The setup pins two preconditions so the negative assertions below
-        // cannot pass vacuously:
-        // - BOTH advertised tools are asserted to have entered the source
-        //   registry before assembly (the denied tool is not absent because it
-        //   was never advertised).
-        // - The allowed tool is positively asserted to become ACTIVATED through
-        //   `tool_search`, not merely rendered as a schema.
-        //
-        // The keyword-search negative control is the observable signal for the
-        // `filter_by_policy(...)` handoff: with the pre-filtered set, a search
-        // for the denied keyword returns "No matching deferred tools found."
-        // because the denied stub was removed before `ToolSearchTool` was
-        // constructed. If a future edit feeds the UNfiltered stub set to the
-        // consumers (while leaving their defense-in-depth `with_access_policy`
-        // / prompt re-filter intact), the denied stub is still present in the
-        // searchable set and the search returns an empty `<functions>` block
-        // instead — failing this assertion.
-        let server = mock_mcp_http_server_with_tools(&[
-            ("allowed", "Allowed tool"),
-            ("denied", "Denied tool"),
-        ])
-        .await;
-
-        use zeroclaw_config::schema::{
-            AliasedAgentConfig, McpBundleConfig, McpServerConfig, McpTransport, RiskProfileConfig,
-        };
-
-        let mut config = Config::default();
-        config.mcp.enabled = true;
-        config.mcp.deferred_loading = true;
-        config.mcp.servers = vec![McpServerConfig {
-            name: "test-srv".into(),
-            transport: McpTransport::Http,
-            url: Some(server.uri()),
-            ..Default::default()
-        }];
-        config.mcp_bundles.insert(
-            "test-bundle".into(),
-            McpBundleConfig {
-                servers: vec!["test-srv".into()],
-                exclude: Vec::new(),
-            },
-        );
-        config
-            .risk_profiles
-            .insert("test-profile".into(), RiskProfileConfig::default());
-        config.agents.insert(
-            "test-agent".into(),
-            AliasedAgentConfig {
-                enabled: true,
-                model_provider: "openai.test-provider".into(),
-                risk_profile: "test-profile".into(),
-                mcp_bundles: vec!["test-bundle".into()],
-                ..Default::default()
-            },
-        );
-
-        // The denial is the policy-bearing input: `mcp_tool_access_policy`
-        // reads `SecurityPolicy.excluded_tools`, and `filter_by_policy` applies
-        // it to the deferred set before prompt and search are built.
-        let security = Arc::new(SecurityPolicy {
-            workspace_dir: std::env::temp_dir(),
-            excluded_tools: Some(vec!["test-srv__denied".into()]),
-            ..SecurityPolicy::default()
-        });
-
-        // Setup: connect the source registry through the real
-        // `McpRegistry::connect_all` + `DeferredMcpToolSet::from_registry` path
-        // and assert BOTH advertised tools entered it. Feeding this same
-        // registry into `assemble` (via `mcp_registry`) proves the denied tool
-        // started from a non-empty registry — the negative assertions below
-        // cannot pass just because the denied tool was never advertised.
-        let agent_mcp_servers = config.mcp_servers_for_agent("test-agent");
-        let registry = Arc::new(
-            tools::McpRegistry::connect_all(&agent_mcp_servers)
-                .await
-                .expect("source registry must connect to the mock MCP server"),
-        );
-        {
-            let names = registry.tool_names();
-            assert!(
-                names.contains(&"test-srv__allowed".to_string()),
-                "source registry must advertise the allowed tool: {names:?}"
-            );
-            assert!(
-                names.contains(&"test-srv__denied".to_string()),
-                "source registry must advertise the denied tool: {names:?}"
-            );
-        }
-
-        let out = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            ScopedToolRegistry::assemble(ScopedAssembly {
-                config: &config,
-                agent_alias: "test-agent",
-                security: &security,
-                built: built_with(Vec::new()),
-                skills: &[],
-                runtime: Arc::new(crate::platform::NativeRuntime::new()),
-                caller_allowed: None,
-                connect_mcp: true,
-                connect_peripherals: false,
-                exclude_memory: false,
-                acp_delivery: false,
-                list_deferred_mcp_specs: false,
-                emit_assembly_logs: false,
-                mcp_registry: Some(Arc::clone(&registry)),
-            }),
-        )
-        .await
-        .expect("assemble must not hang");
-
-        // 1. The assembled prompt section advertises the allowed stub and omits
-        //    the denied one (proof at the model-visible boundary).
-        let deferred_section = out.deferred_section();
-        assert!(
-            deferred_section.contains("test-srv__allowed"),
-            "allowed stub must be advertised in the deferred prompt section: {deferred_section}"
-        );
-        assert!(
-            !deferred_section.contains("test-srv__denied"),
-            "denied tool must not appear in deferred prompt section: {deferred_section}"
-        );
-
-        // 2. The assembled registry contains a real `tool_search`: the denied
-        //    tool must be neither returned nor activated through it.
-        let activated_handle = out.activated_handle.clone();
-        let tools = out.registry.into_inner();
-        let tool_search = tools
-            .iter()
-            .find(|t| t.name() == "tool_search")
-            .expect("deferred mode with an admitted stub must assemble tool_search");
-
-        let denied_keyword = tool_search
-            .execute(serde_json::json!({"query": "denied"}))
-            .await
-            .expect("tool_search must execute");
-        // Observable signal for the `filter_by_policy(...)` handoff: with the
-        // pre-filtered set the denied stub is not searchable, so the query
-        // finds nothing. If the UNfiltered set leaked into `ToolSearchTool`,
-        // the search would find the denied stub and return an empty
-        // `<functions>` block instead — failing this exact-output assertion.
-        assert_eq!(
-            denied_keyword.output, "No matching deferred tools found.",
-            "keyword search for the denied tool must find nothing because the \
-             pre-filtered stub set carries no denied stub; an empty <functions> \
-             block would mean the unfiltered set leaked through filter_by_policy"
-        );
-
-        let denied_select = tool_search
-            .execute(serde_json::json!({"query": "select:test-srv__denied"}))
-            .await
-            .expect("tool_search must execute");
-        assert!(
-            !denied_select
-                .output
-                .contains("\"name\": \"test-srv__denied\""),
-            "select must not return the denied tool as a function: {}",
-            denied_select.output
-        );
-        assert!(
-            denied_select.output.contains("Not found: test-srv__denied"),
-            "select must route the denied tool into the not-found list: {}",
-            denied_select.output
-        );
-
-        {
-            let activated = activated_handle
-                .as_ref()
-                .expect("tool_search registers the activation handle");
-            let activated = activated.lock().unwrap();
-            assert!(
-                !activated.is_activated("test-srv__denied"),
-                "denied tool must never be activated"
-            );
-        }
-
-        // 3. The allowed tool stays reachable through the same search surface
-        //    (the filter narrows, it does not disable search wholesale).
-        let allowed_hit = tool_search
-            .execute(serde_json::json!({"query": "allowed"}))
-            .await
-            .expect("tool_search must execute");
-        assert!(
-            allowed_hit.output.contains("test-srv__allowed"),
-            "allowed tool must remain searchable: {}",
-            allowed_hit.output
-        );
-
-        // 4. Positive activation control: selecting the allowed tool must
-        //    ACTIVATE it (not merely render its schema). This keeps the test
-        //    from passing when schema rendering still works but the
-        //    activation path is broken.
-        let allowed_select = tool_search
-            .execute(serde_json::json!({"query": "select:test-srv__allowed"}))
-            .await
-            .expect("tool_search must execute");
-        assert!(
-            allowed_select.output.contains("test-srv__allowed"),
-            "select must return the allowed tool schema: {}",
-            allowed_select.output
-        );
-        {
-            let activated = activated_handle
-                .as_ref()
-                .expect("tool_search registers the activation handle");
-            let activated = activated.lock().unwrap();
-            assert!(
-                activated.is_activated("test-srv__allowed"),
-                "the allowed tool must be activated after a select, not just schema-rendered"
-            );
-        }
     }
 }

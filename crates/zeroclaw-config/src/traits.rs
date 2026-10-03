@@ -34,7 +34,6 @@ pub enum AliasSource {
     Agents,
     SkillBundles,
     KnowledgeBundles,
-    McpBundles,
 }
 
 impl AliasSource {
@@ -50,7 +49,6 @@ impl AliasSource {
             Self::Agents => "agents",
             Self::SkillBundles => "skill_bundles",
             Self::KnowledgeBundles => "knowledge_bundles",
-            Self::McpBundles => "mcp_bundles",
         }
     }
 
@@ -211,13 +209,6 @@ impl HasPropKind for Vec<crate::schema::EmbeddingRouteConfig> {
 
     fn display_secret_terminals() -> Vec<&'static str> {
         crate::schema::EmbeddingRouteConfig::secret_field_terminals()
-    }
-}
-impl HasPropKind for Vec<crate::schema::McpServerConfig> {
-    const PROP_KIND: PropKind = PropKind::ObjectArray;
-
-    fn display_secret_terminals() -> Vec<&'static str> {
-        crate::schema::McpServerConfig::secret_field_terminals()
     }
 }
 impl HasPropKind for Vec<crate::schema::ModelRouteConfig> {

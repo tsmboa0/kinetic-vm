@@ -538,7 +538,6 @@ pub struct Agent {
     /// When MCP deferred loading is enabled, tools are activated via `tool_search`
     /// and stored here for lookup during tool execution.
     activated_tools: Option<Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>>,
-    tool_search: Option<Arc<crate::tools::ToolSearchTool>>,
     /// The principal whose private memory plane `memory` is pinned to, set by
     /// `route_memory_to_principal` at session construction. `None` = the
     /// shared/legacy handle (the shared operator's sessions).
@@ -1313,7 +1312,6 @@ impl AgentBuilder {
             inject_memory: !exclude_memory,
             shell_profile: self.shell_profile,
             activated_tools: self.activated_tools,
-            tool_search: None,
             memory_principal: None,
             mcp_pinned: self.mcp_pinned,
             mcp_deferred_section: self.mcp_deferred_section.unwrap_or_default(),
@@ -2017,9 +2015,6 @@ impl Agent {
         };
         self.tools
             .retain(|tool| allowed.iter().any(|name| name == tool.name()));
-        if let Some(search) = &self.tool_search {
-            search.narrow_to_caller(allowed);
-        }
         if let Some(activated) = &self.activated_tools {
             // A poisoned lock must not preserve a revoked executable tool.
             activated
@@ -2156,20 +2151,18 @@ impl Agent {
         agent_alias: &str,
         session_cwd: Option<&Path>,
     ) -> Result<Self> {
-        Self::from_config_with_session_cwd_and_mcp(config, agent_alias, session_cwd, true).await
+        Self::from_config_with_session_cwd_and_mcp(config, agent_alias, session_cwd).await
     }
 
     pub async fn from_config_with_session_cwd_and_mcp(
         config: &Config,
         agent_alias: &str,
         session_cwd: Option<&Path>,
-        initialize_mcp: bool,
     ) -> Result<Self> {
         Self::from_config_with_session_cwd_and_mcp_approval_mode(
             config,
             agent_alias,
             session_cwd,
-            initialize_mcp,
             false,
             false,
             // Non-ACP construction path: `deliver_file` has no transport here.
@@ -2190,7 +2183,6 @@ impl Agent {
         config: &Config,
         agent_alias: &str,
         session_cwd: Option<&Path>,
-        initialize_mcp: bool,
         exclude_memory: bool,
         acp_delivery: bool,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
@@ -2200,7 +2192,6 @@ impl Agent {
             config,
             agent_alias,
             session_cwd,
-            initialize_mcp,
             exclude_memory,
             acp_delivery,
             sop_engine,
@@ -2214,7 +2205,6 @@ impl Agent {
         config: &Config,
         agent_alias: &str,
         session_cwd: Option<&Path>,
-        initialize_mcp: bool,
         exclude_memory: bool,
         acp_delivery: bool,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
@@ -2225,7 +2215,6 @@ impl Agent {
             config,
             agent_alias,
             session_cwd,
-            initialize_mcp,
             true,
             exclude_memory,
             acp_delivery,
@@ -2245,7 +2234,6 @@ impl Agent {
         config: &Config,
         agent_alias: &str,
         session_cwd: Option<&Path>,
-        initialize_mcp: bool,
         exclude_memory: bool,
         acp_delivery: bool,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
@@ -2256,7 +2244,6 @@ impl Agent {
             config,
             agent_alias,
             session_cwd,
-            initialize_mcp,
             true,
             exclude_memory,
             acp_delivery,
@@ -2279,7 +2266,6 @@ impl Agent {
         live_config: Arc<parking_lot::RwLock<Config>>,
         agent_alias: &str,
         session_cwd: Option<&Path>,
-        initialize_mcp: bool,
         exclude_memory: bool,
         acp_delivery: bool,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
@@ -2289,7 +2275,6 @@ impl Agent {
             live_config,
             agent_alias,
             session_cwd,
-            initialize_mcp,
             exclude_memory,
             acp_delivery,
             sop_engine,
@@ -2303,7 +2288,6 @@ impl Agent {
         live_config: Arc<parking_lot::RwLock<Config>>,
         agent_alias: &str,
         session_cwd: Option<&Path>,
-        initialize_mcp: bool,
         exclude_memory: bool,
         acp_delivery: bool,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
@@ -2315,7 +2299,6 @@ impl Agent {
             &config,
             agent_alias,
             session_cwd,
-            initialize_mcp,
             true,
             exclude_memory,
             acp_delivery,
@@ -2337,7 +2320,6 @@ impl Agent {
         live_config: Arc<parking_lot::RwLock<Config>>,
         agent_alias: &str,
         session_cwd: Option<&Path>,
-        initialize_mcp: bool,
         exclude_memory: bool,
         acp_delivery: bool,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
@@ -2347,7 +2329,6 @@ impl Agent {
             live_config,
             agent_alias,
             session_cwd,
-            initialize_mcp,
             exclude_memory,
             acp_delivery,
             sop_engine,
@@ -2360,7 +2341,6 @@ impl Agent {
         live_config: Arc<parking_lot::RwLock<Config>>,
         agent_alias: &str,
         session_cwd: Option<&Path>,
-        initialize_mcp: bool,
         exclude_memory: bool,
         acp_delivery: bool,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
@@ -2371,7 +2351,6 @@ impl Agent {
             live_config,
             agent_alias,
             session_cwd,
-            initialize_mcp,
             exclude_memory,
             acp_delivery,
             sop_engine,
@@ -2387,7 +2366,6 @@ impl Agent {
         live_config: Arc<parking_lot::RwLock<Config>>,
         agent_alias: &str,
         session_cwd: Option<&Path>,
-        initialize_mcp: bool,
         exclude_memory: bool,
         acp_delivery: bool,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
@@ -2400,7 +2378,6 @@ impl Agent {
             &config,
             agent_alias,
             session_cwd,
-            initialize_mcp,
             true,
             exclude_memory,
             acp_delivery,
@@ -2424,7 +2401,6 @@ impl Agent {
         config: &Config,
         agent_alias: &str,
         session_cwd: Option<&Path>,
-        initialize_mcp: bool,
         exclude_memory: bool,
         tui_env: Option<std::collections::HashMap<String, String>>,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
@@ -2434,7 +2410,6 @@ impl Agent {
             config,
             agent_alias,
             session_cwd,
-            initialize_mcp,
             exclude_memory,
             tui_env,
             sop_engine,
@@ -2448,7 +2423,6 @@ impl Agent {
         config: &Config,
         agent_alias: &str,
         session_cwd: Option<&Path>,
-        initialize_mcp: bool,
         exclude_memory: bool,
         tui_env: Option<std::collections::HashMap<String, String>>,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
@@ -2459,7 +2433,6 @@ impl Agent {
             config,
             agent_alias,
             session_cwd,
-            initialize_mcp,
             true,
             exclude_memory,
             // TUI turns never transport an ACP file attachment.
@@ -2483,7 +2456,6 @@ impl Agent {
         live_config: Arc<parking_lot::RwLock<Config>>,
         agent_alias: &str,
         session_cwd: Option<&Path>,
-        initialize_mcp: bool,
         exclude_memory: bool,
         tui_env: Option<std::collections::HashMap<String, String>>,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
@@ -2493,7 +2465,6 @@ impl Agent {
             live_config,
             agent_alias,
             session_cwd,
-            initialize_mcp,
             exclude_memory,
             tui_env,
             sop_engine,
@@ -2510,7 +2481,6 @@ impl Agent {
         live_config: Arc<parking_lot::RwLock<Config>>,
         agent_alias: &str,
         session_cwd: Option<&Path>,
-        initialize_mcp: bool,
         exclude_memory: bool,
         tui_env: Option<std::collections::HashMap<String, String>>,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
@@ -2523,7 +2493,6 @@ impl Agent {
             live_config,
             agent_alias,
             session_cwd,
-            initialize_mcp,
             exclude_memory,
             tui_env,
             sop_engine,
@@ -2539,7 +2508,6 @@ impl Agent {
         live_config: Arc<parking_lot::RwLock<Config>>,
         agent_alias: &str,
         session_cwd: Option<&Path>,
-        initialize_mcp: bool,
         exclude_memory: bool,
         tui_env: Option<std::collections::HashMap<String, String>>,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
@@ -2552,7 +2520,6 @@ impl Agent {
             live_config,
             agent_alias,
             session_cwd,
-            initialize_mcp,
             exclude_memory,
             tui_env,
             sop_engine,
@@ -2572,7 +2539,6 @@ impl Agent {
         live_config: Arc<parking_lot::RwLock<Config>>,
         agent_alias: &str,
         session_cwd: Option<&Path>,
-        initialize_mcp: bool,
         exclude_memory: bool,
         tui_env: Option<std::collections::HashMap<String, String>>,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
@@ -2601,7 +2567,6 @@ impl Agent {
                 &config,
                 &agent_alias,
                 session_cwd.as_deref(),
-                initialize_mcp,
                 true,
                 exclude_memory,
                 false,
@@ -2626,7 +2591,6 @@ impl Agent {
         config: &Config,
         agent_alias: &str,
         session_cwd: Option<&Path>,
-        initialize_mcp: bool,
         approval_backchannel: bool,
         exclude_memory: bool,
         acp_delivery: bool,
@@ -2807,17 +2771,10 @@ impl Agent {
                 // principal list denies every MCP tool and a named list
                 // admits only the named ones.
                 caller_allowed: principal_allowed_tools.as_deref(),
-                connect_mcp: initialize_mcp,
                 connect_peripherals: false,
                 exclude_memory,
                 acp_delivery,
-                list_deferred_mcp_specs: false,
                 emit_assembly_logs: true,
-                // `from_config` is the Agent (gateway / library) construction
-                // path: no cross-turn reuse contract, so the per-call
-                // `connect_all` is the correct choice. The daemon heartbeat
-                // worker is the only `mcp_registry` supplier.
-                mcp_registry: None,
             },
         )
         .await;
@@ -2838,7 +2795,6 @@ impl Agent {
             escalate_handle,
             channel_room_handle,
             activated_handle,
-            tool_search_handle,
             // from_config performs no per-turn tool_filter_groups filtering
             // itself, so mcp_tool_names is dropped here along with `registry`'s
             // already-consumed sibling fields via `..`.
@@ -3031,7 +2987,6 @@ impl Agent {
         let mut agent = builder.build()?;
 
         agent.forwarded_environment = tui_env;
-        agent.tool_search = tool_search_handle;
 
         // Wire per-tool channel-map handles into the agent so callers (e.g.
         // the ACP server) can register back-channels after construction.
@@ -3284,10 +3239,7 @@ impl Agent {
             prompt.push_str(crate::agent::tool_receipts::SYSTEM_PROMPT_ADDENDUM);
         }
         let deferred_section = if self.tools.iter().any(|tool| tool.name() == "tool_search") {
-            self.tool_search.as_ref().map_or_else(
-                || self.mcp_deferred_section.clone(),
-                |search| search.deferred_prompt_section(),
-            )
+            self.mcp_deferred_section.clone()
         } else {
             String::new()
         };
@@ -9459,7 +9411,6 @@ mod tests {
             &config,
             "test-agent",
             Some(&data_dir),
-            false,
             true,
             true,
             None,
@@ -9474,7 +9425,6 @@ mod tests {
             authority.config(),
             "test-agent",
             Some(&data_dir),
-            false,
             true,
             true,
             None,
@@ -16561,7 +16511,7 @@ model_provider = "custom.only"
                     .unwrap();
                 let caller = zeroclaw_spawn::spawn!(async move {
                     let result = Agent::from_snapshot_with_tui_env_with_capability(
-                        &config, live, "direct", None, false, true, None, None, None,
+                        &config, live, "direct", None, true, None, None, None,
                         None, Some(capability), None,
                     )
                     .await;
@@ -16612,7 +16562,6 @@ model_provider = "custom.only"
             Arc::clone(&live),
             "direct",
             Some(temp.path()),
-            false,
             true,
             false,
             None,
@@ -16668,7 +16617,6 @@ model_provider = "custom.only"
             Arc::clone(&live),
             "direct",
             Some(temp.path()),
-            false,
             true,
             false,
             None,

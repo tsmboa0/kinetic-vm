@@ -92,7 +92,6 @@ fn child_run_overrides(policy: Arc<SecurityPolicy>) -> AgentRunOverrides {
         // so the per-call `connect_all` path inside `agent::run` is
         // the correct choice. The daemon heartbeat worker is the
         // only `mcp_registry` supplier.
-        mcp_registry: None,
         execution_capability: None,
         execution_admission: None,
         sop_step_scope: crate::sop::active_scope::active_headless_step_scope(),

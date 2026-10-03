@@ -33,8 +33,8 @@ use serde::Serialize;
 
 use crate::multi_agent::AccessMode;
 use crate::schema::{
-    AliasedAgentConfig, Config, KnowledgeBundleConfig, McpBundleConfig, McpServerConfig,
-    McpTransport, RiskProfileConfig, RuntimeProfileConfig, SkillBundleConfig,
+    AliasedAgentConfig, Config, KnowledgeBundleConfig, RiskProfileConfig, RuntimeProfileConfig,
+    SkillBundleConfig,
 };
 use crate::traits::{MaskSecrets, is_masked_secret};
 
@@ -129,10 +129,6 @@ pub enum RiskKind {
     ExtraFilesystemRoots,
     /// The agent may initiate delegation to other agents.
     DelegationEnabled,
-    /// A stdio MCP server spawns a local process on the target host.
-    ProcessSpawn,
-    /// Server-controlled text is injected into the system prompt at startup.
-    UntrustedStartupContext,
     /// The bundle carries skill content authored on the exporting install,
     /// which the agent reads as instructions once installed.
     CarriedSkills,
@@ -150,8 +146,6 @@ impl RiskKind {
             Self::EnvPassthrough => "env_passthrough",
             Self::ExtraFilesystemRoots => "extra_filesystem_roots",
             Self::DelegationEnabled => "delegation_enabled",
-            Self::ProcessSpawn => "process_spawn",
-            Self::UntrustedStartupContext => "untrusted_startup_context",
             Self::CarriedSkills => "carried_skills",
         }
     }
@@ -481,54 +475,6 @@ pub fn plan_export(config: &Config, alias: &str) -> Result<ExportPlan, ExportErr
             &knowledge_default,
         );
     }
-    let mcp_bundle_default = to_table(&McpBundleConfig::default())?;
-    for bundle in dedup(&agent.mcp_bundles) {
-        carry(
-            &mut out,
-            &masked_root,
-            &["mcp_bundles", &bundle],
-            &mcp_bundle_default,
-        );
-    }
-
-    // ── MCP servers the bundles actually grant ───────────────────────────
-    //
-    // Resolution goes through `mcp_servers_for_bundles` rather than a manual
-    // union so `exclude` keeps winning here exactly as it does at runtime: the
-    // bundle carries the servers this agent can really reach, no more.
-    //
-    // INVARIANT: a server name addresses exactly one entry in the closure.
-    // The manifest's `required_secrets` paths are addressed by that name
-    // (`mcp.servers.github.env.GITHUB_TOKEN`), and the promise that they can be
-    // pasted into `zeroclaw config set` holds only while it is true. Two things
-    // hold it up: `Config::validate` rejects duplicate `mcp.servers` names, and
-    // `mcp_servers_for_bundles` resolves each granted name to the first
-    // matching entry, so even a config hand-edited past validation collapses to
-    // one entry per name here. `duplicate_server_names_collapse_to_one_entry`
-    // pins the second half, which is the one this module owns.
-    let granted = config.mcp_servers_for_bundles(&agent.mcp_bundles);
-    debug_assert_eq!(
-        granted
-            .iter()
-            .map(|s| &s.name)
-            .collect::<BTreeSet<_>>()
-            .len(),
-        granted.len(),
-        "mcp.servers names must be unique in the closure: required_secrets paths key on them"
-    );
-    if !granted.is_empty() {
-        let server_default = to_table(&McpServerConfig::default())?;
-        let mut servers = Vec::with_capacity(granted.len());
-        for server in &granted {
-            let table = masked_server_table(&masked_root, &server.name, server)?;
-            let mut pruned = prune(table, &server_default);
-            // `name` is the natural key every other surface addresses the
-            // server by, so it stays even when pruning would drop it.
-            pruned.insert("name".to_string(), toml::Value::String(server.name.clone()));
-            servers.push(toml::Value::Table(pruned));
-        }
-        insert_at(&mut out, &["mcp", "servers"], toml::Value::Array(servers));
-    }
 
     // ── provider entries, carried keyless ────────────────────────────────
     //
@@ -625,7 +571,7 @@ pub fn plan_export(config: &Config, alias: &str) -> Result<ExportPlan, ExportErr
             .to_string(),
     });
 
-    let risk_flags = collect_risk_flags(config, alias, agent, &granted, &skill_sources);
+    let risk_flags = collect_risk_flags(config, alias, agent, &skill_sources);
 
     Ok(ExportPlan {
         root_alias: alias.to_string(),
@@ -1075,7 +1021,6 @@ fn collect_risk_flags(
     config: &Config,
     alias: &str,
     agent: &AliasedAgentConfig,
-    servers: &[McpServerConfig],
     skill_sources: &[SkillBundleSource],
 ) -> Vec<RiskFlag> {
     let mut flags = Vec::new();
@@ -1191,39 +1136,7 @@ fn collect_risk_flags(
         });
     }
 
-    for server in servers {
-        if matches!(server.transport, McpTransport::Stdio) {
-            flags.push(RiskFlag {
-                kind: RiskKind::ProcessSpawn,
-                path: format!("mcp.servers.{}.command", server.name),
-                detail: format!(
-                    "starts a local process on the target host: {}",
-                    shell_preview(server)
-                ),
-            });
-        }
-        if !server.pinned_resources.is_empty() {
-            flags.push(RiskFlag {
-                kind: RiskKind::UntrustedStartupContext,
-                path: format!("mcp.servers.{}.pinned_resources", server.name),
-                detail: format!(
-                    "server-controlled text is read into the system prompt at startup: {}",
-                    server.pinned_resources.join(", ")
-                ),
-            });
-        }
-    }
-
     flags
-}
-
-/// Command line an stdio MCP server would run, for the risk report.
-fn shell_preview(server: &McpServerConfig) -> String {
-    if server.args.is_empty() {
-        server.command.clone()
-    } else {
-        format!("{} {}", server.command, server.args.join(" "))
-    }
 }
 
 /// Copy `path` out of the masked config into `out`, pruned against `defaults`.
@@ -1372,35 +1285,6 @@ fn remove_unresolved_provider_fallbacks(
                  the imported agent's endpoint or credentials"
             ),
         });
-    }
-}
-
-/// The masked table for one MCP server, matched by natural key.
-///
-/// Falls back to serializing the resolved entry when the masked array has no
-/// element with this name — which cannot happen for a config that round-trips,
-/// but must not panic if it does.
-fn masked_server_table(
-    masked_root: &toml::Table,
-    name: &str,
-    fallback: &McpServerConfig,
-) -> Result<toml::Table, ExportError> {
-    let found = lookup(masked_root, &["mcp", "servers"])
-        .and_then(toml::Value::as_array)
-        .and_then(|servers| {
-            servers.iter().find_map(|server| {
-                let table = server.as_table()?;
-                let matches = table.get("name").and_then(toml::Value::as_str) == Some(name);
-                matches.then(|| table.clone())
-            })
-        });
-    match found {
-        Some(table) => Ok(table),
-        None => {
-            let mut masked = fallback.clone();
-            masked.mask_secrets();
-            to_table(&masked)
-        }
     }
 }
 
@@ -1784,53 +1668,15 @@ mod tests {
     use super::*;
     use crate::autonomy::{AutonomyLevel, DelegationMode};
     use crate::multi_agent::AgentWorkspaceConfig;
-    use std::collections::HashMap;
 
-    /// Config with one agent wired to a risk profile, an MCP bundle granting
-    /// two of three servers, and an Anthropic model provider carrying a key.
+    /// Config with one agent wired to a risk profile and an Anthropic model
+    /// provider carrying a key.
     fn fixture() -> Config {
         let mut config = Config::default();
 
         config
             .risk_profiles
             .insert("guarded".to_string(), RiskProfileConfig::default());
-
-        config.mcp_bundles.insert(
-            "research".to_string(),
-            McpBundleConfig {
-                servers: vec!["github".to_string(), "search".to_string()],
-                exclude: vec!["search".to_string()],
-            },
-        );
-
-        config.mcp.servers = vec![
-            McpServerConfig {
-                name: "github".to_string(),
-                transport: McpTransport::Stdio,
-                command: "npx".to_string(),
-                args: vec![
-                    "-y".to_string(),
-                    "@modelcontextprotocol/server-github".to_string(),
-                ],
-                env: HashMap::from([(
-                    "GITHUB_TOKEN".to_string(),
-                    "ghp_realsecretvalue".to_string(),
-                )]),
-                ..Default::default()
-            },
-            McpServerConfig {
-                name: "search".to_string(),
-                transport: McpTransport::Http,
-                url: Some("https://search.example.com/mcp".to_string()),
-                ..Default::default()
-            },
-            McpServerConfig {
-                name: "unrelated".to_string(),
-                transport: McpTransport::Stdio,
-                command: "other".to_string(),
-                ..Default::default()
-            },
-        ];
 
         config.providers.models.anthropic.insert(
             "main".to_string(),
@@ -1849,7 +1695,6 @@ mod tests {
             AliasedAgentConfig {
                 model_provider: "anthropic.main".into(),
                 risk_profile: "guarded".into(),
-                mcp_bundles: vec!["research".to_string()],
                 channels: vec!["telegram.work".into()],
                 ..Default::default()
             },
@@ -1866,88 +1711,9 @@ mod tests {
     }
 
     #[test]
-    fn closure_carries_only_the_servers_the_bundles_grant() {
-        let plan = plan_export(&fixture(), "researcher").unwrap();
-        let servers = lookup(&plan.config, &["mcp", "servers"])
-            .and_then(toml::Value::as_array)
-            .expect("closure carries mcp.servers");
-        let names: Vec<&str> = servers
-            .iter()
-            .filter_map(|s| s.get("name").and_then(toml::Value::as_str))
-            .collect();
-        // `search` is excluded by the bundle and `unrelated` is not referenced.
-        assert_eq!(names, vec!["github"]);
-    }
-
-    /// `required_secrets` promises paths that can be pasted into
-    /// `zeroclaw config set`, which holds only while a server name addresses
-    /// one entry. `Config::validate` rejects duplicate names, so this pins what
-    /// the exporter does on its own with a config that reached it hand-edited.
-    #[test]
-    fn duplicate_server_names_collapse_to_one_entry() {
-        let mut config = fixture();
-        config.mcp.servers.push(McpServerConfig {
-            name: "github".to_string(),
-            transport: McpTransport::Stdio,
-            command: "impostor".to_string(),
-            env: HashMap::from([("GITHUB_TOKEN".to_string(), "ghp_theotherone".to_string())]),
-            ..Default::default()
-        });
-
-        let plan = plan_export(&config, "researcher").unwrap();
-
-        let servers = lookup(&plan.config, &["mcp", "servers"])
-            .and_then(toml::Value::as_array)
-            .expect("closure carries mcp.servers");
-        let names: Vec<&str> = servers
-            .iter()
-            .filter_map(|s| s.get("name").and_then(toml::Value::as_str))
-            .collect();
-        assert_eq!(names, vec!["github"], "one entry per name");
-
-        // One path, so the operator has one thing to fill in and no ambiguity
-        // about which entry they are filling.
-        let github_secrets: Vec<&str> = plan
-            .required_secrets
-            .iter()
-            .filter(|path| path.starts_with("mcp.servers.github"))
-            .map(String::as_str)
-            .collect();
-        assert_eq!(github_secrets, vec!["mcp.servers.github.env.GITHUB_TOKEN"]);
-
-        // Resolution and masking agree on which entry won, so the shadowed
-        // one contributes nothing to the bundle.
-        let rendered = render_config_toml(&plan).unwrap();
-        assert!(!rendered.contains("impostor"), "{rendered}");
-        assert!(!rendered.contains("ghp_theotherone"), "{rendered}");
-    }
-
-    #[test]
-    fn exclude_still_wins_inside_the_closure() {
-        let mut config = fixture();
-        // A second bundle that grants `search` outright — the first bundle's
-        // `exclude` must still remove it, matching runtime resolution.
-        config.mcp_bundles.insert(
-            "extra".to_string(),
-            McpBundleConfig {
-                servers: vec!["search".to_string()],
-                exclude: Vec::new(),
-            },
-        );
-        if let Some(agent) = config.agents.get_mut("researcher") {
-            agent.mcp_bundles.push("extra".to_string());
-        }
-
-        let plan = plan_export(&config, "researcher").unwrap();
-        let rendered = render_config_toml(&plan).unwrap();
-        assert!(!rendered.contains("search.example.com"), "{rendered}");
-    }
-
-    #[test]
     fn no_credential_survives_into_the_rendered_bundle() {
         let plan = plan_export(&fixture(), "researcher").unwrap();
         let rendered = render_config_toml(&plan).unwrap();
-        assert!(!rendered.contains("ghp_realsecretvalue"), "{rendered}");
         assert!(!rendered.contains("sk-ant-realkey"), "{rendered}");
         assert!(!rendered.contains("***MASKED***"), "{rendered}");
     }
@@ -1955,12 +1721,6 @@ mod tests {
     #[test]
     fn required_secrets_name_every_scrubbed_leaf_by_config_path() {
         let plan = plan_export(&fixture(), "researcher").unwrap();
-        assert!(
-            plan.required_secrets
-                .contains(&"mcp.servers.github.env.GITHUB_TOKEN".to_string()),
-            "{:?}",
-            plan.required_secrets
-        );
         assert!(
             plan.required_secrets
                 .contains(&"providers.models.anthropic.main.api_key".to_string()),
@@ -2111,18 +1871,6 @@ mod tests {
     }
 
     #[test]
-    fn stdio_servers_are_flagged_as_process_spawn() {
-        let plan = plan_export(&fixture(), "researcher").unwrap();
-        let flag = plan
-            .risk_flags
-            .iter()
-            .find(|f| f.kind == RiskKind::ProcessSpawn)
-            .expect("stdio server flagged");
-        assert_eq!(flag.path, "mcp.servers.github.command");
-        assert!(flag.detail.contains("npx"), "{}", flag.detail);
-    }
-
-    #[test]
     fn permissive_risk_profile_raises_every_matching_flag() {
         let mut config = fixture();
         config.risk_profiles.insert(
@@ -2211,29 +1959,14 @@ mod tests {
     }
 
     #[test]
-    fn default_profile_raises_no_flags_beyond_transport() {
+    fn default_profile_raises_no_risk_flags() {
         let plan = plan_export(&fixture(), "researcher").unwrap();
         let policy_flags: Vec<&str> = plan
             .risk_flags
             .iter()
-            .filter(|flag| flag.kind != RiskKind::ProcessSpawn)
             .map(|flag| flag.kind.as_wire())
             .collect();
         assert!(policy_flags.is_empty(), "{policy_flags:?}");
-    }
-
-    #[test]
-    fn pinned_resources_are_flagged_as_untrusted_startup_context() {
-        let mut config = fixture();
-        if let Some(server) = config.mcp.servers.iter_mut().find(|s| s.name == "github") {
-            server.pinned_resources = vec!["repo://readme".to_string()];
-        }
-        let plan = plan_export(&config, "researcher").unwrap();
-        assert!(
-            plan.risk_flags
-                .iter()
-                .any(|f| f.kind == RiskKind::UntrustedStartupContext)
-        );
     }
 
     #[test]
@@ -2588,14 +2321,6 @@ mod tests {
                         .knowledge_bundles = vec!["gone".to_string()];
                 },
                 "agents.researcher.knowledge_bundles[0]",
-            ),
-            (
-                "mcp bundle",
-                |config| {
-                    config.agents.get_mut("researcher").unwrap().mcp_bundles =
-                        vec!["gone".to_string()];
-                },
-                "agents.researcher.mcp_bundles[0]",
             ),
         ];
 
@@ -3392,7 +3117,6 @@ mod tests {
         assert_eq!(agent.risk_profile.as_str(), "guarded");
         assert!(agent.channels.is_empty(), "channels were dropped");
         assert!(reparsed.risk_profiles.contains_key("guarded"));
-        assert!(reparsed.mcp_bundles.contains_key("research"));
     }
 
     #[test]

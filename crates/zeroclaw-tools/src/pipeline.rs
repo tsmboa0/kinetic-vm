@@ -6,7 +6,7 @@ use std::sync::Arc;
 use zeroclaw_api::tool::{Tool, ToolOutput, ToolResult};
 use zeroclaw_config::schema::PipelineConfig;
 
-use crate::tool_search::ToolAccessPolicy;
+use crate::tool_access::ToolAccessPolicy;
 
 /// Errors specific to pipeline execution.
 #[derive(Debug, Clone, Serialize, thiserror::Error)]

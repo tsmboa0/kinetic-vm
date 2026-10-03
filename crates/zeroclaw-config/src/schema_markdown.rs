@@ -833,23 +833,17 @@ mod tests {
 
     #[test]
     fn config_fields_descends_array_section_to_entry_struct() {
-        // `mcp.servers` is a Vec<McpServerConfig> (schemars `items`), not a map.
-        // The path walker must step into the element struct so a `[[mcp.servers]]`
+        // `model_routes` is a Vec<ModelRouteConfig> (schemars `items`), not a map.
+        // The path walker must step into the element struct so a `[[model_routes]]`
         // list section renders its entry fields instead of erroring with
         // "no fields to render".
         let schema = schemars::schema_for!(crate::schema::Config);
-        let table = field_table_for_path(&schema.to_value(), "mcp.servers", false, None)
-            .expect("mcp.servers should resolve to its entry struct fields");
-        for field in [
-            "transport",
-            "command",
-            "url",
-            "headers",
-            "tool_timeout_secs",
-        ] {
+        let table = field_table_for_path(&schema.to_value(), "model_routes", false, None)
+            .expect("model_routes should resolve to its entry struct fields");
+        for field in ["hint", "model_provider", "model", "api_key"] {
             assert!(
                 table.contains(&format!("<code>{field}</code>")),
-                "mcp.servers field table missing `{field}`"
+                "model_routes field table missing `{field}`"
             );
         }
     }

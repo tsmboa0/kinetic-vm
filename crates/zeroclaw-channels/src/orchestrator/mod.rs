@@ -13855,7 +13855,6 @@ async fn assemble_channel_agent_tools(
                         skills,
                         runtime,
                         caller_allowed: None,
-                        connect_mcp: true,
                         connect_peripherals: true,
                         exclude_memory: false,
                         // Channel listeners (Telegram, Slack, ...) do not transport an
@@ -13865,14 +13864,12 @@ async fn assemble_channel_agent_tools(
                         // Channel startup is an execution surface (the agent actually runs),
                         // so deferral behaves as normal; the dashboard-only per-spec listing
                         // is off, matching `run`/`process_message`.
-                        list_deferred_mcp_specs: false,
                         emit_assembly_logs: true,
                         // Channel tools are assembled once at daemon startup and
                         // retain their registry-backed wrappers for the listener
                         // lifetime, so there is no per-turn reconnect to avoid here.
                         // The heartbeat worker remains the only caller that supplies
                         // a pre-built registry for reuse across repeated assemblies.
-                        mcp_registry: None,
                     },
                 )
                 .await
@@ -16656,15 +16653,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// Upper bound for "this must not deadlock" waits in the assembly tests.
-    ///
-    /// These guards exist to fail a genuine hang, not to assert how fast
-    /// assembly is. `scripts/ci/parallel_runtime_test_gate.sh` runs the suite
-    /// at 16 threads; under that contention the previous budgets stopped being
-    /// deadlock guards and became scheduling assertions. Assembly is
-    /// sub-second when it is not hung, so 30s cannot be reached by ordinary
-    /// runner load.
-    const ASSEMBLY_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
     use zeroclaw_runtime::agent::loop_::apply_policy_tool_filter;
     use zeroclaw_runtime::agent::loop_::build_tool_instructions;
 
@@ -24777,311 +24765,12 @@ BTC is currently around $65,000 based on latest tool output."#
         }
     }
 
-    /// A mock HTTP MCP server that advertises `resources` support and serves one
-    /// readable resource (`file:///handbook.md`), so `assemble_channel_agent_tools`
-    /// resolves a real pinned-resource section instead of an empty one.
-    async fn mock_mcp_server_with_pinned_resource() -> wiremock::MockServer {
-        use wiremock::matchers::{body_partial_json, method};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({"method": "initialize"}),
-            ))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("Mcp-Session-Id", "s")
-                    .set_body_json(serde_json::json!({
-                        "jsonrpc":"2.0","id":1,
-                        "result":{"capabilities":{"tools":{},"resources":{}}}
-                    })),
-            )
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({"method":"notifications/initialized"}),
-            ))
-            .respond_with(ResponseTemplate::new(202))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({"method":"tools/list"}),
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc":"2.0","id":2,"result":{"tools":[
-                    {"name":"echo","description":"echo","inputSchema":{"type":"object"}}
-                ]}
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({"method":"resources/list"}),
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc":"2.0","id":3,"result":{"resources":[
-                    {"uri":"file:///handbook.md","name":"handbook","mimeType":"text/plain"}
-                ]}
-            })))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_partial_json(serde_json::json!({"method":"resources/read"})))
-            .respond_with(|request: &wiremock::Request| {
-                let id = serde_json::from_slice::<serde_json::Value>(&request.body)
-                    .expect("resources/read request should be JSON")
-                    .get("id")
-                    .cloned()
-                    .expect("resources/read request should carry an id");
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "jsonrpc":"2.0","id":id,"result":{"contents":[
-                        {"uri":"file:///handbook.md","mimeType":"text/plain","text":"Pinned handbook body"}
-                    ]}
-                }))
-            })
-            .mount(&server)
-            .await;
-        server
-    }
-
-    /// Drives the REAL `assemble_channel_agent_tools` against a mock MCP server
-    /// granting one pinned resource, then runs the exact post-assembly composition
-    /// `start_channels` performs (`compose_channel_mcp_prompt_sections`). It proves
-    /// the production boundary keeps the deferred tool-search listing and the pinned
-    /// MCP resource in SEPARATE sections, so strict text-tool suppression
-    /// (`native_tools = false`, `strict_tool_parsing = true`) clears the deferred
-    /// tool instructions while the pinned resource survives into the final prompt.
-    /// A regression that re-merges the two sections inside the assembly (or reorders
-    /// the suppress/append pair) fails here, unlike a test that hand-builds the
-    /// section strings and never calls the assembly.
-    #[tokio::test]
-    async fn assemble_channel_agent_tools_keeps_pinned_resources_after_strict_policy() {
-        use zeroclaw_config::schema::{
-            AliasedAgentConfig, McpBundleConfig, McpServerConfig, McpTransport, RiskProfileConfig,
-        };
-        let server = mock_mcp_server_with_pinned_resource().await;
-
-        let mut config = Config::default();
-        config.mcp.enabled = true;
-        config.mcp.deferred_loading = true;
-        config.mcp.servers = vec![McpServerConfig {
-            name: "docs".into(),
-            transport: McpTransport::Http,
-            url: Some(server.uri()),
-            pinned_resources: vec!["file:///handbook.md".into()],
-            ..Default::default()
-        }];
-        config.mcp_bundles.insert(
-            "docsbundle".into(),
-            McpBundleConfig {
-                servers: vec!["docs".into()],
-                exclude: Vec::new(),
-            },
-        );
-        config
-            .risk_profiles
-            .insert("test-profile".into(), RiskProfileConfig::default());
-        config.agents.insert(
-            "channel-agent".into(),
-            AliasedAgentConfig {
-                enabled: true,
-                model_provider: "openai.test-provider".into(),
-                risk_profile: "test-profile".into(),
-                mcp_bundles: vec!["docsbundle".into()],
-                ..Default::default()
-            },
-        );
-
-        let security = Arc::new(SecurityPolicy {
-            workspace_dir: std::env::temp_dir(),
-            ..SecurityPolicy::default()
-        });
-        let assembled = tokio::time::timeout(
-            ASSEMBLY_HANG_GUARD,
-            assemble_channel_agent_tools(
-                &config,
-                "channel-agent",
-                "openai.test-provider",
-                "gpt-test",
-                &security,
-                channel_all_tools_result(Vec::new()),
-                &[],
-                Arc::new(platform::NativeRuntime::new()),
-            ),
-        )
-        .await
-        .expect("assemble must not hang");
-
-        // The production assembly must surface the pinned resource in its OWN
-        // section, distinct from the deferred/tool-search listing.
-        assert!(
-            assembled.pinned_section.contains("Pinned handbook body")
-                && assembled
-                    .pinned_section
-                    .contains("trust=\"untrusted-external\""),
-            "assemble_channel_agent_tools must expose the pinned MCP resource in \
-             pinned_section; got {:?}",
-            assembled.pinned_section
-        );
-        assert!(
-            !assembled.deferred_section.contains("Pinned handbook body"),
-            "pinned resource content must NOT be merged into the deferred section; got {:?}",
-            assembled.deferred_section
-        );
-        assert!(
-            assembled.deferred_section.contains("tool_search"),
-            "precondition: a deferred-loading MCP grant must yield a tool_search \
-             section to suppress; got {:?}",
-            assembled.deferred_section
-        );
-
-        // Run the exact composition start_channels performs for a strict,
-        // non-native target: suppress the deferred tool-search section, keep pinned.
-        let mut tool_descs: Vec<(&str, &str)> = vec![("shell", "Run commands")];
-        let mut deferred_section = assembled.deferred_section.clone();
-        let expose_text_protocol = compose_channel_mcp_prompt_sections(
-            false,
-            true,
-            &mut tool_descs,
-            &mut deferred_section,
-            &assembled.pinned_section,
-        );
-
-        assert!(!expose_text_protocol);
-        assert!(
-            !deferred_section.contains("tool_search"),
-            "strict policy must clear the deferred tool-search section; got {deferred_section:?}"
-        );
-        assert!(
-            deferred_section.contains("Pinned handbook body")
-                && deferred_section.contains("## Pinned MCP Resources"),
-            "pinned resource must survive strict suppression; got {deferred_section:?}"
-        );
-    }
-
-    #[allow(clippy::await_holding_lock)]
-    #[tokio::test]
-    async fn assemble_channel_agent_tools_attributes_assembly_logs_to_agent_and_model() {
-        use zeroclaw_config::schema::{
-            AliasedAgentConfig, McpBundleConfig, McpServerConfig, McpTransport, RiskProfileConfig,
-        };
-
-        let _writer_guard = zeroclaw_log::__private_test_writer_lock();
-        let _hook_guard = zeroclaw_log::__private_test_hook_lock();
-        zeroclaw_log::try_install_capture_subscriber();
-        let mut rx = zeroclaw_log::subscribe_or_install();
-        while rx.try_recv().is_ok() {}
-
-        let server = mock_mcp_server_with_pinned_resource().await;
-        let mut config = Config::default();
-        config.mcp.enabled = true;
-        config.mcp.deferred_loading = true;
-        config.mcp.servers = vec![McpServerConfig {
-            name: "docs".into(),
-            transport: McpTransport::Http,
-            url: Some(server.uri()),
-            pinned_resources: vec!["file:///handbook.md".into()],
-            ..Default::default()
-        }];
-        config.mcp_bundles.insert(
-            "docsbundle".into(),
-            McpBundleConfig {
-                servers: vec!["docs".into()],
-                exclude: Vec::new(),
-            },
-        );
-        config
-            .risk_profiles
-            .insert("test-profile".into(), RiskProfileConfig::default());
-        config.agents.insert(
-            "channel-agent".into(),
-            AliasedAgentConfig {
-                enabled: true,
-                model_provider: "openai.test-provider".into(),
-                risk_profile: "test-profile".into(),
-                mcp_bundles: vec!["docsbundle".into()],
-                ..Default::default()
-            },
-        );
-
-        let security = Arc::new(SecurityPolicy {
-            workspace_dir: std::env::temp_dir(),
-            ..SecurityPolicy::default()
-        });
-        let _assembled = tokio::time::timeout(
-            ASSEMBLY_HANG_GUARD,
-            assemble_channel_agent_tools(
-                &config,
-                "channel-agent",
-                "openai.test-provider",
-                "gpt-test",
-                &security,
-                channel_all_tools_result(Vec::new()),
-                &[],
-                Arc::new(platform::NativeRuntime::new()),
-            ),
-        )
-        .await
-        .expect("assemble must not hang");
-
-        let deadline = std::time::Instant::now() + ASSEMBLY_HANG_GUARD;
-        let mut assembly_event = None;
-        while std::time::Instant::now() < deadline {
-            match tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await {
-                Ok(Ok(value)) => {
-                    if value
-                        .get("message")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|m| m.starts_with("Initializing MCP client"))
-                    {
-                        assembly_event = Some(value);
-                        break;
-                    }
-                }
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
-                Err(_) => {}
-            }
-        }
-
-        let value = assembly_event.expect("assembly log should be emitted");
-        assert_eq!(
-            value["zeroclaw"]["agent_alias"], "channel-agent",
-            "assembly log must inherit the channel agent attribution span, got: {value}"
-        );
-        assert_eq!(
-            value["zeroclaw"]["model_provider"], "openai.test-provider",
-            "assembly log must preserve the startup model_provider scope, got: {value}"
-        );
-        assert_eq!(
-            value["zeroclaw"]["model_provider_type"], "openai",
-            "assembly log must split the scoped provider family, got: {value}"
-        );
-        assert_eq!(
-            value["zeroclaw"]["model_provider_alias"], "test-provider",
-            "assembly log must split the scoped provider alias, got: {value}"
-        );
-        assert_eq!(
-            value["zeroclaw"]["model"], "gpt-test",
-            "assembly log must preserve the startup model scope, got: {value}"
-        );
-
-        zeroclaw_log::clear_broadcast_hook();
-    }
-
     /// The `channel_path_*` tests elsewhere pin the shared filter/registration
-    /// helpers directly, not `start_channels`'s actual assembly call - a bad edit
-    /// to `assemble_channel_agent_tools`'s knobs (flipping `exclude_memory`,
-    /// dropping `connect_mcp`, etc.) would compile and slip past them undetected.
-    /// This test drives the exact function `start_channels` calls, closing that
-    /// gap for the built-in allow/deny behavior. (Pinned-resource resolution
-    /// through this same path is covered by
-    /// `assemble_channel_agent_tools_keeps_pinned_resources_after_strict_policy`;
-    /// `scoped.rs`'s `assemble_grants_no_mcp_to_agent_without_bundles` and siblings
-    /// cover the assembly's own MCP-grant policy.)
+    /// helpers directly, not `start_channels`'s actual assembly call. A bad edit
+    /// to `assemble_channel_agent_tools`'s knobs (flipping `exclude_memory`, for
+    /// example) would compile and slip past them undetected. This test drives
+    /// the exact function `start_channels` calls, closing that gap for the
+    /// built-in allow/deny behavior.
     #[tokio::test]
     async fn assemble_channel_agent_tools_honors_allowed_and_excluded_tools() {
         let config = Config::default();

@@ -1184,10 +1184,8 @@ pub async fn run_gateway_with_plugin_webhooks(
                 skills: &[],
                 runtime: Arc::clone(&runtime),
                 caller_allowed: None,
-                connect_mcp: true,
                 // Gateway tool-listing path: short-lived, no cross-turn reuse
                 // contract, so the per-call connect is correct.
-                mcp_registry: None,
                 // Listing-only registry: loading peripherals physically opens
                 // hardware (exclusive serial holds) that the live turn paths
                 // need. Never connect them for a registry no turn runs against.
@@ -1195,7 +1193,6 @@ pub async fn run_gateway_with_plugin_webhooks(
                 emit_assembly_logs: false,
                 exclude_memory: false,
                 acp_delivery: false,
-                list_deferred_mcp_specs: true,
             })
             .await;
             let reaction_handle_gw_opt = Some(assembled.reaction_handle.clone());
@@ -1318,10 +1315,8 @@ pub async fn run_gateway_with_plugin_webhooks(
             skills: &[],
             runtime: Arc::clone(&runtime),
             caller_allowed: None,
-            connect_mcp: true,
             // Gateway tool-listing path: short-lived, no cross-turn reuse
             // contract, so the per-call connect is correct.
-            mcp_registry: None,
             // Same as the seed: never open hardware for a listing (and
             // `config.peripherals` is global - N per-agent opens of the same
             // boards would fail against the first holder anyway).
@@ -1329,7 +1324,6 @@ pub async fn run_gateway_with_plugin_webhooks(
             emit_assembly_logs: false,
             exclude_memory: false,
             acp_delivery: false,
-            list_deferred_mcp_specs: true,
         })
         .await;
         let specs: Vec<ToolSpec> = assembled.registry.iter().map(|t| t.spec()).collect();
@@ -3748,7 +3742,6 @@ async fn dispatch_gateway_turn_streaming_with_agent(
             Arc::clone(&state.config),
             &agent_alias,
             None,
-            true,
             false,
             false,
             state.sop_engine.clone(),

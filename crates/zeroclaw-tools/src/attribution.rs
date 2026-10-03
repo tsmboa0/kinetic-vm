@@ -3,7 +3,7 @@
 //! the tool's `name()` as its alias so log emissions can attribute
 //! tool activity with the same `<kind>.<alias>` composite the rest of
 
-use zeroclaw_api::attribution::{ToolKind, ToolProvenance};
+use zeroclaw_api::attribution::ToolKind;
 use zeroclaw_api::tool_attribution;
 
 use crate::ask_user::AskUserTool;
@@ -26,7 +26,6 @@ use crate::http_request::HttpRequestTool;
 use crate::image_info::ImageInfoTool;
 use crate::knowledge_tool::KnowledgeTool;
 use crate::llm_task::LlmTaskTool;
-use crate::mcp_tool::McpToolWrapper;
 use crate::memory_export::MemoryExportTool;
 use crate::memory_forget::MemoryForgetTool;
 use crate::memory_purge::MemoryPurgeTool;
@@ -42,7 +41,6 @@ use crate::sessions::{
     SessionDeleteTool, SessionResetTool, SessionsCurrentTool, SessionsHistoryTool,
     SessionsListTool, SessionsSendTool,
 };
-use crate::tool_search::ToolSearchTool;
 use crate::web_fetch::WebFetchTool;
 use crate::web_search_tool::WebSearchTool;
 
@@ -66,7 +64,6 @@ tool_attribution!(HttpRequestTool, ToolKind::HttpRequest);
 tool_attribution!(ImageInfoTool, ToolKind::Plugin);
 tool_attribution!(KnowledgeTool, ToolKind::Plugin);
 tool_attribution!(LlmTaskTool, ToolKind::Plugin);
-tool_attribution!(McpToolWrapper, ToolKind::Plugin, ToolProvenance::Extension);
 tool_attribution!(MemoryExportTool, ToolKind::Memory);
 tool_attribution!(MemoryForgetTool, ToolKind::Memory);
 tool_attribution!(MemoryPurgeTool, ToolKind::Memory);
@@ -84,7 +81,6 @@ tool_attribution!(SessionsCurrentTool, ToolKind::Plugin);
 tool_attribution!(SessionsHistoryTool, ToolKind::Plugin);
 tool_attribution!(SessionsListTool, ToolKind::Plugin);
 tool_attribution!(SessionsSendTool, ToolKind::Plugin);
-tool_attribution!(ToolSearchTool, ToolKind::Search);
 tool_attribution!(WebFetchTool, ToolKind::FetchUrl);
 tool_attribution!(WebSearchTool, ToolKind::Search);
 
@@ -111,26 +107,6 @@ mod tests {
         assert_eq!(arc.alias(), "calculator");
         assert_eq!(arc.role(), Role::Tool(ToolKind::Plugin));
         assert_eq!(arc.tool_provenance(), ToolProvenance::Native);
-    }
-
-    #[test]
-    fn mcp_wrapper_is_an_extension_even_when_its_role_is_plugin() {
-        let registry = tokio::runtime::Runtime::new()
-            .expect("test runtime")
-            .block_on(crate::mcp_client::McpRegistry::connect_all(&[]))
-            .expect("empty registry");
-        let tool = McpToolWrapper::new(
-            "mcp__shell".to_string(),
-            crate::mcp_protocol::McpToolDef {
-                name: "shell".to_string(),
-                description: None,
-                input_schema: serde_json::json!({"type": "object"}),
-            },
-            Arc::new(registry),
-            Arc::new(zeroclaw_config::policy::SecurityPolicy::default()),
-        );
-        assert_eq!(tool.role(), Role::Tool(ToolKind::Plugin));
-        assert_eq!(tool.tool_provenance(), ToolProvenance::Extension);
     }
 
     #[test]

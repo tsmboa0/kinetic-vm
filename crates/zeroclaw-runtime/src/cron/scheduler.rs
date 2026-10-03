@@ -1149,7 +1149,6 @@ async fn run_agent_job(
         // contract, so the per-call `connect_all` path inside
         // `agent::run` is the correct choice. The daemon heartbeat
         // worker is the only `mcp_registry` supplier.
-        mcp_registry: None,
         execution_admission,
         // Initiating principal, resolved from the job's stored config at
         // dispatch and immutable for the turn's lifetime.

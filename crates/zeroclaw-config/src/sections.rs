@@ -330,7 +330,7 @@ sections! {
     },
 
     // Tier 4 — Capabilities. Bundles that agents reference via
-    // skill_bundles / mcp_bundle / knowledge_bundles.
+    // skill_bundles / knowledge_bundles.
     Skills => {
         key:   "skills",
         shape: DirectForm,
@@ -345,32 +345,6 @@ sections! {
         group: Foundation,
         help:  "Named bundles of skill files. Agents reference a bundle to load a \
                 set of capabilities at startup.",
-    },
-    Mcp => {
-        key:   "mcp",
-        shape: DirectForm,
-        group: Tools,
-        help:  "Model Context Protocol settings. Toggle `enabled` and pick deferred \
-                or eager loading. Individual MCP servers live under `mcp.servers[]`.",
-    },
-    McpServers => {
-        key:   "mcp.servers",
-        shape: OneTierAliasMap,
-        group: Tools,
-        help:  "Individual Model Context Protocol servers. Each entry binds a \
-                transport (stdio, http, sse), the command or URL to reach it, \
-                optional headers, and a `tool_timeout_secs` cap (≤ 600). Each \
-                server's `name` is its addressable key — rename via the section \
-                page rather than editing the field directly. Group servers \
-                into bundles under `mcp_bundles` below.",
-    },
-    McpBundles => {
-        key:   "mcp_bundles",
-        shape: OneTierAliasMap,
-        group: Tools,
-        help:  "Named bundles of MCP servers, granted to agents that list the bundle \
-                in their `mcp_bundles`. Secure by default: an agent gets only the \
-                servers its bundles grant; with no bundle it gets no MCP servers.",
     },
     KnowledgeBundles => {
         key:   "knowledge_bundles",
@@ -526,8 +500,6 @@ pub fn section_has_signal(cfg: &crate::schema::Config, section: Section) -> bool
                 .is_some_and(|rest| rest.contains('.'))
         }),
         Section::Hardware => cfg.hardware.enabled,
-        Section::McpServers => !cfg.mcp.servers.is_empty(),
-        // Routes' existence in the Vec is the signal, same as McpServers.
         Section::ModelRoutes => !cfg.model_routes.is_empty(),
         Section::EmbeddingRoutes => !cfg.embedding_routes.is_empty(),
         Section::TtsProviders
@@ -543,8 +515,6 @@ pub fn section_has_signal(cfg: &crate::schema::Config, section: Section) -> bool
         | Section::Storage
         | Section::DecisionModels
         | Section::Cron
-        | Section::Mcp
-        | Section::McpBundles
         | Section::KnowledgeBundles
         | Section::QuickstartState => false,
     }
@@ -556,14 +526,10 @@ mod tests {
 
     #[test]
     fn humanize_strips_dots_underscores_and_hyphens() {
-        assert_eq!(humanize_section_key("mcp.servers"), "Mcp servers");
-        assert_eq!(humanize_section_key("mcp_bundles"), "Mcp bundles");
         assert_eq!(
             humanize_section_key("knowledge-bundles"),
             "Knowledge bundles"
         );
-        assert_eq!(Section::McpServers.label(), "Mcp servers");
-        assert_eq!(Section::McpBundles.label(), "Mcp bundles");
     }
 
     #[test]
@@ -583,7 +549,6 @@ mod tests {
     fn dashboard_url_sections_round_trip_kebab_and_snake() {
         let kebab_then_snake: &[(&str, &str, Section)] = &[
             ("peer-groups", "peer_groups", Section::PeerGroups),
-            ("mcp-bundles", "mcp_bundles", Section::McpBundles),
             (
                 "knowledge-bundles",
                 "knowledge_bundles",
@@ -598,7 +563,6 @@ mod tests {
             ),
             ("storage", "storage", Section::Storage),
             ("cron", "cron", Section::Cron),
-            ("mcp", "mcp", Section::Mcp),
         ];
         for (kebab, snake, expected) in kebab_then_snake {
             assert_eq!(
@@ -627,8 +591,6 @@ mod tests {
             Section::PeerGroups,
             Section::DecisionModels,
             Section::Cron,
-            Section::McpServers,
-            Section::McpBundles,
             Section::KnowledgeBundles,
             Section::SkillBundles,
             Section::RiskProfiles,
@@ -642,27 +604,6 @@ mod tests {
                 section.as_str(),
             );
         }
-    }
-
-    #[test]
-    fn mcp_servers_section_has_alias_map_shape_and_parent_keeps_direct_form() {
-        assert_eq!(Section::Mcp.shape(), SectionShape::DirectForm);
-        assert_eq!(Section::McpServers.shape(), SectionShape::OneTierAliasMap);
-        assert!(QUICKSTART_SECTIONS.contains(&Section::Mcp));
-        assert!(QUICKSTART_SECTIONS.contains(&Section::McpServers));
-        assert!(QUICKSTART_SECTIONS.contains(&Section::McpBundles));
-
-        // Canonical order: parent settings come first, then the
-        // servers editor, then the bundles map. Operators walking the
-        // Quickstart hit the toggle before the per-server form.
-        let idx = |s: Section| {
-            QUICKSTART_SECTIONS
-                .iter()
-                .position(|x| *x == s)
-                .unwrap_or_else(|| panic!("{s:?} missing from QUICKSTART_SECTIONS"))
-        };
-        assert!(idx(Section::Mcp) < idx(Section::McpServers));
-        assert!(idx(Section::McpServers) < idx(Section::McpBundles));
     }
 
     #[test]
@@ -680,7 +621,6 @@ mod tests {
             Section::RiskProfiles,
             Section::RuntimeProfiles,
             Section::SkillBundles,
-            Section::McpBundles,
             Section::KnowledgeBundles,
             Section::Channels,
         ] {
@@ -809,8 +749,6 @@ mod tests {
             section_group_for_key("providers.tts"),
             SectionGroup::Foundation
         );
-        assert_eq!(section_group_for_key("mcp.servers"), SectionGroup::Tools);
-        assert_eq!(section_group_for_key("mcp_bundles"), SectionGroup::Tools);
         assert_eq!(
             section_group_for_key("knowledge_bundles"),
             SectionGroup::Tools

@@ -234,7 +234,6 @@ pub struct AgentOptionsResponse {
     pub runtime_profiles: Vec<String>,
     pub skill_bundles: Vec<String>,
     pub knowledge_bundles: Vec<String>,
-    pub mcp_bundles: Vec<String>,
     pub agents: Vec<String>,
 }
 
@@ -257,7 +256,6 @@ pub fn build_agent_options(cfg: &zeroclaw_config::schema::Config) -> AgentOption
         runtime_profiles: cfg.resolve_alias_source(AliasSource::RuntimeProfiles),
         skill_bundles: cfg.resolve_alias_source(AliasSource::SkillBundles),
         knowledge_bundles: cfg.resolve_alias_source(AliasSource::KnowledgeBundles),
-        mcp_bundles: cfg.resolve_alias_source(AliasSource::McpBundles),
         agents: cfg.resolve_alias_source(AliasSource::Agents),
     }
 }
@@ -356,7 +354,6 @@ pub async fn handle_sections(State(state): State<AppState>) -> Response {
                 Some(w) => !matches!(
                     w,
                     zeroclaw_config::sections::Section::Hardware
-                        | zeroclaw_config::sections::Section::Mcp
                         | zeroclaw_config::sections::Section::Skills
                 ),
                 None => section_has_picker_for_key(&key),
@@ -506,8 +503,6 @@ fn picker_items_for(
         Section::PeerGroups
         | Section::DecisionModels
         | Section::Cron
-        | Section::McpServers
-        | Section::McpBundles
         | Section::KnowledgeBundles
         | Section::SkillBundles
         | Section::RiskProfiles
@@ -516,7 +511,7 @@ fn picker_items_for(
         | Section::EmbeddingRoutes => {
             PickerDispatch::Items(one_tier_alias_map_picker(cfg, section.as_str()))
         }
-        Section::Hardware | Section::Mcp | Section::Skills | Section::QuickstartState => {
+        Section::Hardware | Section::Skills | Section::QuickstartState => {
             PickerDispatch::DirectForm
         }
     }
@@ -979,8 +974,6 @@ async fn select_section(
         | Section::PeerGroups
         | Section::DecisionModels
         | Section::Cron
-        | Section::McpServers
-        | Section::McpBundles
         | Section::KnowledgeBundles
         | Section::SkillBundles
         | Section::RiskProfiles
@@ -1105,7 +1098,7 @@ async fn select_section(
             };
             (prefix, selection_changed || defaults_changed)
         }
-        Section::Hardware | Section::Mcp | Section::Skills | Section::QuickstartState => {
+        Section::Hardware | Section::Skills | Section::QuickstartState => {
             return error_response(
                 ConfigApiError::new(
                     ConfigApiCode::PathNotFound,
@@ -1345,7 +1338,6 @@ mod tests {
         cfg.create_map_key("skill_bundles", "alpha_skills").unwrap();
         cfg.create_map_key("knowledge_bundles", "alpha_knowledge")
             .unwrap();
-        cfg.create_map_key("mcp_bundles", "alpha_mcp").unwrap();
         cfg.create_map_key("agents", "alpha_agent").unwrap();
 
         let resp = build_agent_options(&cfg);
@@ -1355,7 +1347,6 @@ mod tests {
         assert_eq!(resp.runtime_profiles, vec!["alpha_runtime".to_string()]);
         assert_eq!(resp.skill_bundles, vec!["alpha_skills".to_string()]);
         assert_eq!(resp.knowledge_bundles, vec!["alpha_knowledge".to_string()],);
-        assert_eq!(resp.mcp_bundles, vec!["alpha_mcp".to_string()]);
         assert_eq!(resp.agents, vec!["alpha_agent".to_string()]);
     }
 
@@ -2390,7 +2381,6 @@ mod tests {
         for section in [
             "peer_groups",
             "cron",
-            "mcp_bundles",
             "knowledge_bundles",
             "skill_bundles",
             "risk_profiles",
@@ -2410,7 +2400,6 @@ mod tests {
         let cases: &[(&str, &str)] = &[
             ("peer_groups", "team_chat"),
             ("cron", "daily_brief"),
-            ("mcp_bundles", "core_tools"),
             ("knowledge_bundles", "house_docs"),
             ("skill_bundles", "ops_skills"),
             ("risk_profiles", "tight"),
@@ -2454,14 +2443,12 @@ mod tests {
             Section::PeerGroups,
             Section::Storage,
             Section::Cron,
-            Section::Mcp,
-            Section::McpBundles,
             Section::KnowledgeBundles,
             Section::SkillBundles,
             Section::RiskProfiles,
             Section::RuntimeProfiles,
         ];
-        let direct_form = [Section::Hardware, Section::Mcp];
+        let direct_form = [Section::Hardware];
         for section in all {
             match picker_items_for(*section, &cfg) {
                 PickerDispatch::Items(_items) => {

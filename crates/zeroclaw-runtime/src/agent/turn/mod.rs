@@ -3010,16 +3010,13 @@ pub(crate) async fn assemble_owned_execution_with_admission(
             skills: &skills,
             runtime,
             caller_allowed: None,
-            connect_mcp: true,
             // A nested SOP step re-assembly is per turn (memoized per alias);
             // it has no cross-turn reuse contract, so the per-call
             // `connect_all` path inside `assemble` is the correct choice
             // (same as `process_message`).
-            mcp_registry: None,
             connect_peripherals: false,
             exclude_memory: false,
             acp_delivery: false,
-            list_deferred_mcp_specs: false,
             emit_assembly_logs: true,
         })
         .await;

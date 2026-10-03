@@ -72,7 +72,6 @@ pub enum Role {
     Memory(MemoryKind),
     PeerGroup,
     Skill,
-    Mcp,
     Sop,
     Session,
     System,
@@ -352,7 +351,6 @@ impl Role {
             Self::Memory(_) => Some("memory_namespace"),
             Self::PeerGroup => Some("peer_group"),
             Self::Skill => Some("skill_bundle"),
-            Self::Mcp => Some("mcp_bundle"),
             Self::Sop => Some("sop_name"),
             Self::Session => Some("session_key"),
             Self::System => Some("system_alias"),
@@ -378,7 +376,6 @@ impl Role {
             Self::Memory(_) => "memory",
             Self::PeerGroup => "peer_group",
             Self::Skill => "skill",
-            Self::Mcp => "mcp",
             Self::Sop => "sop",
             Self::Session => "session",
             Self::System => "system",
@@ -400,7 +397,7 @@ impl Role {
             Self::Memory(_) => "memory",
             Self::Session => "session",
             Self::Sop => "system",
-            Self::PeerGroup | Self::Skill | Self::Mcp | Self::System => "system",
+            Self::PeerGroup | Self::Skill | Self::System => "system",
         }
     }
 }
@@ -501,7 +498,6 @@ mod tests {
         assert_eq!(Role::Memory(MemoryKind::Sqlite).family_str(), "memory");
         assert_eq!(Role::PeerGroup.family_str(), "peer_group");
         assert_eq!(Role::Skill.family_str(), "skill");
-        assert_eq!(Role::Mcp.family_str(), "mcp");
         assert_eq!(Role::Sop.family_str(), "sop");
         assert_eq!(Role::Session.family_str(), "session");
         assert_eq!(Role::System.family_str(), "system");

@@ -413,33 +413,22 @@ pub fn apply_policy_tool_filter(
 pub fn mcp_tool_access_policy(
     security: &zeroclaw_config::policy::SecurityPolicy,
     caller_allowed: Option<&[String]>,
-) -> Option<zeroclaw_tools::tool_search::ToolAccessPolicy> {
-    zeroclaw_tools::tool_search::ToolAccessPolicy::from_security(
+) -> Option<zeroclaw_tools::tool_access::ToolAccessPolicy> {
+    zeroclaw_tools::tool_access::ToolAccessPolicy::from_security(
         security.allowed_tools.as_deref(),
         security.excluded_tools.as_deref(),
         caller_allowed,
     )
 }
 
-/// Whether an MCP tool name is admitted by `policy` (a `None` policy admits
-/// everything). The risk-profile denylist always wins; the allowlist
-/// auto-admits `<server>__<tool>` names so a restrictive allowlist does not
-/// silently drop a configured server's tools.
+/// Whether a tool name is admitted by `policy` (a `None` policy admits
+/// everything). The denylist always wins. A non-empty allowlist admits only
+/// names that appear in it; a double-underscore name is not a special case.
 pub fn eager_mcp_tool_allowed(
     name: &str,
-    policy: Option<&zeroclaw_tools::tool_search::ToolAccessPolicy>,
+    policy: Option<&zeroclaw_tools::tool_access::ToolAccessPolicy>,
 ) -> bool {
     policy.is_none_or(|policy| policy.is_tool_allowed(name))
-}
-
-pub(crate) fn mcp_allowed_tool_count<'a>(
-    names: impl IntoIterator<Item = &'a str>,
-    policy: Option<&zeroclaw_tools::tool_search::ToolAccessPolicy>,
-) -> usize {
-    names
-        .into_iter()
-        .filter(|name| eager_mcp_tool_allowed(name, policy))
-        .count()
 }
 
 /// Append a pre-rendered pinned-MCP-resources section onto the system-prompt
@@ -465,7 +454,7 @@ pub fn register_eager_mcp_tool_if_allowed(
     wrapper: std::sync::Arc<dyn Tool>,
     tools: &mut Vec<Box<dyn Tool>>,
     delegate_handle: Option<&tools::DelegateParentToolsHandle>,
-    policy: Option<&zeroclaw_tools::tool_search::ToolAccessPolicy>,
+    policy: Option<&zeroclaw_tools::tool_access::ToolAccessPolicy>,
 ) -> bool {
     if !eager_mcp_tool_allowed(wrapper.name(), policy) {
         return false;
@@ -475,64 +464,6 @@ pub fn register_eager_mcp_tool_if_allowed(
     }
     tools.push(Box::new(tools::ArcToolRef(wrapper)));
     true
-}
-
-pub(crate) fn preactivate_always_filter_groups(
-    deferred: &crate::tools::DeferredMcpToolSet,
-    activated: &Arc<Mutex<crate::tools::ActivatedToolSet>>,
-    groups: &[zeroclaw_config::schema::ToolFilterGroup],
-    policy: Option<&zeroclaw_tools::tool_search::ToolAccessPolicy>,
-    delegate_handle: Option<&tools::DelegateParentToolsHandle>,
-) -> HashSet<String> {
-    use zeroclaw_config::schema::ToolFilterGroupMode;
-
-    let mut activated_names: HashSet<String> = HashSet::new();
-    let always_patterns: Vec<&str> = groups
-        .iter()
-        .filter(|group| matches!(group.mode, ToolFilterGroupMode::Always))
-        .flat_map(|group| group.tools.iter().map(String::as_str))
-        .collect();
-    if always_patterns.is_empty() {
-        return activated_names;
-    }
-    // A poisoned mutex only means another thread panicked mid-update; the
-    // activated map itself stays coherent (inserts are atomic), so recover.
-    let mut guard = match activated.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    for stub in &deferred.stubs {
-        if guard.is_activated(&stub.prefixed_name) {
-            continue;
-        }
-        if !eager_mcp_tool_allowed(&stub.prefixed_name, policy) {
-            continue;
-        }
-        if !always_patterns
-            .iter()
-            .any(|pat| glob_match(pat, &stub.prefixed_name))
-        {
-            continue;
-        }
-        if let Some(tool) = deferred.activate(&stub.prefixed_name) {
-            let tool: Arc<dyn Tool> = Arc::from(tool);
-            // Pre-activated tools must reach delegated subagents exactly as
-            // tool_search-activated ones do (same dedup as the activation
-            // hook `assemble` installs on `ToolSearchTool`).
-            if let Some(handle) = delegate_handle {
-                let mut delegate_tools = handle.write();
-                let already = delegate_tools
-                    .iter()
-                    .any(|existing| existing.name() == tool.name());
-                if !already {
-                    delegate_tools.push(Arc::clone(&tool));
-                }
-            }
-            guard.activate(stub.prefixed_name.clone(), tool);
-            activated_names.insert(stub.prefixed_name.clone());
-        }
-    }
-    activated_names
 }
 
 pub fn filter_tool_specs_for_turn(
@@ -1313,16 +1244,6 @@ pub struct AgentRunOverrides {
     pub memory_free: bool,
     /// Per-run restriction applied after selecting an authoritative config.
     pub suppress_memory_auto_save: bool,
-    /// Pre-built MCP registry supplied by the caller. The daemon heartbeat
-    /// worker constructs this once at worker start and shares it across
-    /// every tick so that stdio MCP children live for the daemon's
-    /// lifetime rather than being orphaned and re-spawned per
-    /// `agent::run` call. When `Some`, the loop MUST use this
-    /// `Arc<McpRegistry>` and MUST NOT call `McpRegistry::connect_all`
-    /// itself. `None` preserves the legacy per-call connect path
-    /// (CLI / one-shot), which is correct for callers that have no
-    /// cross-turn reuse contract.
-    pub mcp_registry: Option<Arc<crate::tools::McpRegistry>>,
     /// Shared authority used to admit this run's target before construction.
     pub execution_capability: Option<AgentExecutionCapability>,
     /// An already-admitted target lease supplied by a caller that must retain
@@ -1639,21 +1560,18 @@ pub async fn run(
             skills: &skills,
             runtime: runtime.clone(),
             caller_allowed: allowed_tools.as_deref(),
-            connect_mcp: true,
             connect_peripherals: true,
             // A memory-free run drops the persistent memory tools so the model
             // cannot read or write memory even though the registry is otherwise
             // built identically.
             exclude_memory: memory_free,
             acp_delivery: false,
-            list_deferred_mcp_specs: false,
             emit_assembly_logs: true,
             // Honor the daemon worker's pre-built shared registry so stdio
             // MCP children live for the daemon's lifetime, not per
             // `agent::run` call. CLI/one-shot callers leave
             // `mcp_registry` at its default (`None`) and the seam
             // falls back to the per-call `connect_all`.
-            mcp_registry: overrides.mcp_registry.as_ref().map(Arc::clone),
         })
         .await;
         // run injects one combined MCP prompt block: deferred tool-search listing +
@@ -3550,11 +3468,9 @@ async fn process_message_inner(
             skills: &skills,
             runtime: runtime.clone(),
             caller_allowed: None,
-            connect_mcp: true,
             connect_peripherals: true,
             exclude_memory: false,
             acp_delivery: false,
-            list_deferred_mcp_specs: false,
             emit_assembly_logs: true,
             // `process_message` is the channel/orchestrator live-chat path;
             // it has no cross-turn reuse contract, so the per-call
@@ -3562,7 +3478,6 @@ async fn process_message_inner(
             // The daemon heartbeat worker — the only caller that has a
             // reuse contract — passes its own `mcp_registry` through
             // `agent::run` (`AgentRunOverrides::mcp_registry`).
-            mcp_registry: None,
         })
         .await;
         // process_message injects one combined MCP prompt block: deferred tool-search
@@ -15792,13 +15707,10 @@ Let me check the result."#;
                 skills: std::slice::from_ref(&skill),
                 runtime: Arc::new(crate::platform::NativeRuntime::new()),
                 caller_allowed: None,
-                connect_mcp: false,
                 connect_peripherals: false,
                 exclude_memory: false,
                 acp_delivery: false,
-                list_deferred_mcp_specs: false,
                 emit_assembly_logs: false,
-                mcp_registry: None,
             },
         )
         .await;
@@ -16625,155 +16537,6 @@ Let me check the result."#;
     }
 
     // ── preactivate_always_filter_groups tests ─────────────────────────────────
-
-    async fn make_deferred_set(names: &[&str]) -> crate::tools::DeferredMcpToolSet {
-        let registry = Arc::new(
-            crate::tools::McpRegistry::connect_all(&[])
-                .await
-                .expect("empty MCP registry connects"),
-        );
-        let stubs = names
-            .iter()
-            .map(|name| {
-                zeroclaw_tools::mcp_deferred::DeferredMcpToolStub::new(
-                    (*name).to_string(),
-                    zeroclaw_tools::mcp_protocol::McpToolDef {
-                        name: (*name).to_string(),
-                        description: Some("test tool".to_string()),
-                        input_schema: serde_json::json!({"type": "object", "properties": {}}),
-                    },
-                )
-            })
-            .collect();
-        crate::tools::DeferredMcpToolSet {
-            stubs,
-            registry,
-            security: Arc::new(zeroclaw_config::policy::SecurityPolicy::default()),
-        }
-    }
-
-    fn always_group(patterns: &[&str]) -> Vec<zeroclaw_config::schema::ToolFilterGroup> {
-        use zeroclaw_config::schema::{ToolFilterGroup, ToolFilterGroupMode};
-        vec![ToolFilterGroup {
-            mode: ToolFilterGroupMode::Always,
-            tools: patterns.iter().map(|p| (*p).to_string()).collect(),
-            keywords: vec![],
-        }]
-    }
-
-    #[tokio::test]
-    async fn preactivate_always_group_activates_matched_stubs() {
-        let deferred = make_deferred_set(&["files__list", "lights__get_state"]).await;
-        let activated = Arc::new(Mutex::new(crate::tools::ActivatedToolSet::new()));
-
-        let names = super::preactivate_always_filter_groups(
-            &deferred,
-            &activated,
-            &always_group(&["files__*"]),
-            None,
-            None,
-        );
-
-        assert_eq!(names, mcp_set(&["files__list"]));
-        let guard = activated.lock().unwrap();
-        assert!(guard.is_activated("files__list"));
-        assert!(!guard.is_activated("lights__get_state"));
-    }
-
-    #[tokio::test]
-    async fn preactivate_skips_dynamic_groups() {
-        use zeroclaw_config::schema::{ToolFilterGroup, ToolFilterGroupMode};
-
-        let deferred = make_deferred_set(&["files__list"]).await;
-        let activated = Arc::new(Mutex::new(crate::tools::ActivatedToolSet::new()));
-        let groups = vec![ToolFilterGroup {
-            mode: ToolFilterGroupMode::Dynamic,
-            tools: vec!["files__*".into()],
-            keywords: vec!["file".into()],
-        }];
-
-        let names =
-            super::preactivate_always_filter_groups(&deferred, &activated, &groups, None, None);
-
-        assert!(names.is_empty());
-        assert!(!activated.lock().unwrap().is_activated("files__list"));
-    }
-
-    #[tokio::test]
-    async fn preactivate_is_idempotent_on_repeat_call() {
-        let deferred = make_deferred_set(&["files__list"]).await;
-        let activated = Arc::new(Mutex::new(crate::tools::ActivatedToolSet::new()));
-        let groups = always_group(&["files__*"]);
-
-        let first =
-            super::preactivate_always_filter_groups(&deferred, &activated, &groups, None, None);
-        let second =
-            super::preactivate_always_filter_groups(&deferred, &activated, &groups, None, None);
-
-        assert_eq!(first, mcp_set(&["files__list"]));
-        assert!(second.is_empty());
-        assert!(activated.lock().unwrap().is_activated("files__list"));
-    }
-
-    #[tokio::test]
-    async fn preactivate_respects_mcp_access_policy() {
-        let deferred = make_deferred_set(&["files__list", "files__write"]).await;
-        let activated = Arc::new(Mutex::new(crate::tools::ActivatedToolSet::new()));
-        // The risk-profile denylist always wins over `mode = "always"`.
-        let excluded = vec!["files__write".to_string()];
-        let policy = zeroclaw_tools::tool_search::ToolAccessPolicy::from_security(
-            None,
-            Some(&excluded),
-            None,
-        )
-        .expect("denylist yields a policy");
-
-        let names = super::preactivate_always_filter_groups(
-            &deferred,
-            &activated,
-            &always_group(&["files__*"]),
-            Some(&policy),
-            None,
-        );
-
-        assert_eq!(names, mcp_set(&["files__list"]));
-        let guard = activated.lock().unwrap();
-        assert!(guard.is_activated("files__list"));
-        assert!(!guard.is_activated("files__write"));
-    }
-
-    #[tokio::test]
-    async fn preactivate_pushes_delegate_handle_once() {
-        let deferred = make_deferred_set(&["files__list"]).await;
-        let activated = Arc::new(Mutex::new(crate::tools::ActivatedToolSet::new()));
-        let handle: crate::tools::DelegateParentToolsHandle =
-            Arc::new(parking_lot::RwLock::new(Vec::new()));
-        // Pre-seed the delegate handle with a same-named tool while the
-        // ActivatedToolSet is still empty, so the call below reaches the
-        // dedup branch (`already == true`) instead of short-circuiting on
-        // `is_activated`. Dropping the dedup must fail this test.
-        let preexisting: Arc<dyn crate::tools::Tool> =
-            Arc::from(deferred.activate("files__list").expect("stub exists"));
-        handle.write().push(preexisting);
-
-        let names = super::preactivate_always_filter_groups(
-            &deferred,
-            &activated,
-            &always_group(&["files__*"]),
-            None,
-            Some(&handle),
-        );
-
-        assert_eq!(names, mcp_set(&["files__list"]));
-        assert!(activated.lock().unwrap().is_activated("files__list"));
-        let delegate_tools = handle.read();
-        assert_eq!(
-            delegate_tools.len(),
-            1,
-            "dedup must not push a duplicate of a same-named pre-existing delegate tool"
-        );
-        assert_eq!(delegate_tools[0].name(), "files__list");
-    }
 
     // ── Token-based compaction tests ──────────────────────────
 
@@ -18542,12 +18305,9 @@ Let me check the result."#;
             !super::eager_mcp_tool_allowed("slack__post", access_policy.as_ref()),
             "policy excluded_tools must block eager MCP registration"
         );
-        // `github__search` is in the caller list AND its `__` prefix triggers
-        // the risk-profile MCP auto-admit, so both independent gates pass it.
         assert!(
-            super::eager_mcp_tool_allowed("github__search", access_policy.as_ref()),
-            "name auto-admitted by risk-profile MCP exception and listed by \
-             the caller must be registered eagerly"
+            !super::eager_mcp_tool_allowed("github__search", access_policy.as_ref()),
+            "a caller listing is not enough when the policy allowlist omits the name"
         );
     }
 
@@ -18591,18 +18351,10 @@ Let me check the result."#;
         let caller = vec!["cron_add".to_string()];
         let access_policy = super::mcp_tool_access_policy(&policy, Some(&caller));
 
-        // The two stubs are MCP-shaped wrappers that the risk-profile
-        // auto-admit would otherwise pass, but the caller-supplied
-        // per-run list does not include either of them.
-        assert_eq!(
-            super::mcp_allowed_tool_count(
-                ["filesystem__write_file", "github__search"],
-                access_policy.as_ref()
-            ),
-            0,
-            "deferred MCP `tool_search` must not be registered when the \
-             caller-supplied per-run list admits no MCP stub (PR #7547 \
-             review regression)"
+        assert!(
+            !super::eager_mcp_tool_allowed("filesystem__write_file", access_policy.as_ref())
+                && !super::eager_mcp_tool_allowed("github__search", access_policy.as_ref()),
+            "a caller allowlist that names neither tool admits neither tool"
         );
     }
 
@@ -18616,12 +18368,11 @@ Let me check the result."#;
 
         assert!(
             super::eager_mcp_tool_allowed("fs__read_file", access_policy.as_ref()),
-            "process_message eager MCP should use the agent SecurityPolicy allowlist"
+            "an allowlisted name is admitted"
         );
-        // github__search contains "__" → auto-admitted even though not in allowed_tools
         assert!(
-            super::eager_mcp_tool_allowed("github__search", access_policy.as_ref()),
-            "runtime-discovered MCP tools are auto-admitted (subject only to excluded_tools)"
+            !super::eager_mcp_tool_allowed("github__search", access_policy.as_ref()),
+            "a name that is not on the allowlist is denied, including names that contain __"
         );
     }
 
@@ -18633,13 +18384,10 @@ Let me check the result."#;
         };
         let access_policy = super::mcp_tool_access_policy(&policy, None);
 
-        assert_eq!(
-            super::mcp_allowed_tool_count(
-                ["fs__read_file", "github__search"],
-                access_policy.as_ref()
-            ),
-            0,
-            "deferred MCP must not register tool_search when policy admits no MCP stubs"
+        assert!(
+            !super::eager_mcp_tool_allowed("fs__read_file", access_policy.as_ref())
+                && !super::eager_mcp_tool_allowed("github__search", access_policy.as_ref()),
+            "an empty allowlist admits no tool"
         );
     }
 
@@ -18700,14 +18448,12 @@ Let me check the result."#;
             Some(&delegate_handle),
             access_policy.as_ref(),
         ));
-        // github__search contains "__" → auto-admitted
-        assert!(super::register_eager_mcp_tool_if_allowed(
+        assert!(!super::register_eager_mcp_tool_if_allowed(
             mock_tool_arc("github__search"),
             &mut tools,
             Some(&delegate_handle),
             access_policy.as_ref(),
         ));
-        // slack__post is explicitly excluded → denied
         assert!(!super::register_eager_mcp_tool_if_allowed(
             mock_tool_arc("slack__post"),
             &mut tools,
@@ -18715,13 +18461,13 @@ Let me check the result."#;
             access_policy.as_ref(),
         ));
 
-        assert_eq!(tool_names(&tools), vec!["fs__read_file", "github__search"]);
+        assert_eq!(tool_names(&tools), vec!["fs__read_file"]);
         let delegate_names: Vec<String> = delegate_handle
             .read()
             .iter()
             .map(|tool| tool.name().to_string())
             .collect();
-        assert_eq!(delegate_names, vec!["fs__read_file", "github__search"]);
+        assert_eq!(delegate_names, vec!["fs__read_file"]);
     }
 
     // ── agent_provider_composite regression ───────────────────────────────
@@ -19362,13 +19108,10 @@ Let me check the result."#;
                 skills: &[],
                 runtime: Arc::new(crate::platform::NativeRuntime::new()),
                 caller_allowed: None, // process_message has no caller allowlist
-                connect_mcp: false,   // exercise the filter without MCP fixtures
                 connect_peripherals: false,
                 exclude_memory: false,
                 acp_delivery: false,
-                list_deferred_mcp_specs: false,
                 emit_assembly_logs: false,
-                mcp_registry: None,
             },
         )
         .await;

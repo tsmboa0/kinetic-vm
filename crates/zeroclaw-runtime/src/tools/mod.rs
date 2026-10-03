@@ -59,15 +59,7 @@ pub use zeroclaw_tools::http_request::HttpRequestTool;
 pub use zeroclaw_tools::image_info::ImageInfoTool;
 pub use zeroclaw_tools::knowledge_tool::KnowledgeTool;
 pub use zeroclaw_tools::llm_task::LlmTaskTool;
-pub use zeroclaw_tools::mcp_client::{McpRegistry, McpServer};
-pub use zeroclaw_tools::mcp_context;
-pub use zeroclaw_tools::mcp_deferred::{
-    ActivatedToolSet, DeferredMcpToolSet, build_deferred_tools_section,
-    build_deferred_tools_section_excluding, build_deferred_tools_section_filtered,
-};
-pub use zeroclaw_tools::mcp_prompts_tool::McpPromptsTool;
-pub use zeroclaw_tools::mcp_resources_tool::McpResourcesTool;
-pub use zeroclaw_tools::mcp_tool::McpToolWrapper;
+pub use zeroclaw_tools::mcp_deferred::ActivatedToolSet;
 pub use zeroclaw_tools::memory_export::MemoryExportTool;
 pub use zeroclaw_tools::memory_forget::MemoryForgetTool;
 pub use zeroclaw_tools::memory_purge::MemoryPurgeTool;
@@ -85,7 +77,6 @@ pub use zeroclaw_tools::sessions::{
     AcpSessionReadView, SessionDeleteTool, SessionResetTool, SessionsCurrentTool,
     SessionsHistoryTool, SessionsListTool, SessionsSendTool,
 };
-pub use zeroclaw_tools::tool_search::ToolSearchTool;
 pub use zeroclaw_tools::web_fetch::WebFetchTool;
 pub use zeroclaw_tools::web_search_tool::WebSearchTool;
 pub use zeroclaw_tools::wrappers::{PathGuardedTool, RateLimitedTool};
@@ -463,43 +454,6 @@ pub(crate) fn register_skill_tools_with_context_and_runtime_optional_nat64(
                 .join(", "),
         )
     );
-}
-
-pub async fn collect_mcp_elevation_arcs(
-    registry: &Arc<McpRegistry>,
-    security: &Arc<zeroclaw_config::policy::SecurityPolicy>,
-) -> Vec<Arc<dyn Tool>> {
-    let mut arcs: Vec<Arc<dyn Tool>> = Vec::new();
-    for name in registry.tool_names() {
-        if let Some(def) = registry.get_tool_def(&name).await {
-            arcs.push(Arc::new(McpToolWrapper::new(
-                name,
-                def,
-                Arc::clone(registry),
-                Arc::clone(security),
-            )));
-        }
-    }
-    arcs
-}
-
-/// Build the two generic MCP capability tools (`mcp_resources`, `mcp_prompts`),
-/// including each only when the access `policy` admits its name. A `None` policy
-/// admits both. Returned as `Arc<dyn Tool>` ready to register and/or expose to
-/// delegates.
-pub fn build_mcp_capability_tools(
-    registry: &Arc<McpRegistry>,
-    policy: Option<&zeroclaw_tools::tool_search::ToolAccessPolicy>,
-) -> Vec<Arc<dyn Tool>> {
-    let admit = |name: &str| policy.is_none_or(|p| p.is_tool_allowed(name));
-    let mut out: Vec<Arc<dyn Tool>> = Vec::new();
-    if admit("mcp_resources") {
-        out.push(Arc::new(McpResourcesTool::new(Arc::clone(registry))));
-    }
-    if admit("mcp_prompts") {
-        out.push(Arc::new(McpPromptsTool::new(Arc::clone(registry))));
-    }
-    out
 }
 
 pub const BUILTIN_TOOL_INTEGRATIONS: &[(&str, &str)] = &[
@@ -2049,26 +2003,6 @@ mod tests {
         ApprovalGroupConfig, ApprovalPolicyConfig, Config, FileDownloadConfig, MemoryConfig,
         SopApprovalConfig,
     };
-
-    #[tokio::test]
-    async fn mcp_capability_tools_respect_policy() {
-        use zeroclaw_tools::tool_search::ToolAccessPolicy;
-        let registry = std::sync::Arc::new(McpRegistry::connect_all(&[]).await.unwrap());
-
-        // No policy → both tools present.
-        let both = build_mcp_capability_tools(&registry, None);
-        let names: Vec<_> = both.iter().map(|t| t.name().to_string()).collect();
-        assert!(names.contains(&"mcp_resources".to_string()));
-        assert!(names.contains(&"mcp_prompts".to_string()));
-
-        // Deny mcp_prompts → only mcp_resources present.
-        let policy =
-            ToolAccessPolicy::from_security(None, Some(&["mcp_prompts".to_string()]), None);
-        let one = build_mcp_capability_tools(&registry, policy.as_ref());
-        let names: Vec<_> = one.iter().map(|t| t.name().to_string()).collect();
-        assert!(names.contains(&"mcp_resources".to_string()));
-        assert!(!names.contains(&"mcp_prompts".to_string()));
-    }
 
     /// The Serply resolver only honours `ZEROCLAW_web_search__serply_api_key`
     /// if the runtime hands it the loader's override state. Pin the mapping for

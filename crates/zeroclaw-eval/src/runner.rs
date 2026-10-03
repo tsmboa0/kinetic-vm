@@ -93,13 +93,10 @@ pub async fn run_case(trace: &LlmTrace) -> anyhow::Result<RunRecord> {
             skills: &[],
             runtime: Arc::new(zeroclaw_runtime::platform::NativeRuntime::new()),
             caller_allowed: None,
-            connect_mcp: false,
             connect_peripherals: false,
             exclude_memory: false,
             acp_delivery: false,
-            list_deferred_mcp_specs: false,
             emit_assembly_logs: false,
-            mcp_registry: None,
         },
     )
     .await

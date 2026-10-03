@@ -277,13 +277,10 @@ async fn parity_l2_builtin_filter_semantic_parity() {
         skills: &[],
         runtime: Arc::new(crate::platform::NativeRuntime::new()),
         caller_allowed: None,
-        connect_mcp: false,
         connect_peripherals: false,
         exclude_memory: false,
         acp_delivery: false,
-        list_deferred_mcp_specs: false,
         emit_assembly_logs: false,
-        mcp_registry: None,
     })
     .await;
     let seam_names = retained_names(&assembled.registry.into_inner());
@@ -427,13 +424,10 @@ async fn parity_l2_sop_live_step_agent_isolation() {
         skills: &[],
         runtime: Arc::new(crate::platform::NativeRuntime::new()),
         caller_allowed: None,
-        connect_mcp: true,
         connect_peripherals: false,
         exclude_memory: false,
         acp_delivery: false,
-        list_deferred_mcp_specs: false,
         emit_assembly_logs: false,
-        mcp_registry: None,
     })
     .await;
     let mut seam_names = retained_names(&assembled.registry.into_inner());

@@ -335,7 +335,6 @@ impl AcpServer {
         config: &Config,
         agent_alias: &str,
         workspace_dir: &std::path::Path,
-        enable_mcp: bool,
     ) -> Result<Agent> {
         let Some(store) = self.store.as_ref() else {
             return if let ConfigSource::Live(live_config) = &self.config_source {
@@ -343,7 +342,6 @@ impl AcpServer {
                     Arc::clone(live_config),
                     agent_alias,
                     Some(workspace_dir),
-                    enable_mcp,
                     true,
                     true,
                     self.sop_engine.clone(),
@@ -359,7 +357,6 @@ impl AcpServer {
                     config,
                     agent_alias,
                     Some(workspace_dir),
-                    enable_mcp,
                     true,
                     true,
                     self.sop_engine.clone(),
@@ -377,7 +374,6 @@ impl AcpServer {
                 Arc::clone(live_config),
                 agent_alias,
                 Some(workspace_dir),
-                enable_mcp,
                 true,
                 // ACP turns transport the typed file attachment `deliver_file` emits.
                 true,
@@ -392,7 +388,6 @@ impl AcpServer {
                 config,
                 agent_alias,
                 Some(workspace_dir),
-                enable_mcp,
                 true,
                 // ACP turns transport the typed file attachment `deliver_file` emits.
                 true,
@@ -960,17 +955,8 @@ impl AcpServer {
         // (identity, scheduled tasks) still lives under `config.data_dir`.
         // ACP sessions exclude persistent memory — context comes from the
         // persisted session history, not the agent's long-term memory store.
-        // MCP init is opt-in per agent (`[agents.<alias>].acp_enable_mcp`): off
-        // by default to keep `session/new` prompt; on to load this agent's
-        // `mcp_bundles` tools. Runs without the sessions lock held (see above).
-        let enable_mcp = config.agent(&agent_alias).is_some_and(|a| a.acp_enable_mcp);
         let mut agent = match self
-            .build_agent(
-                &config,
-                &agent_alias,
-                std::path::Path::new(&workspace_dir),
-                enable_mcp,
-            )
+            .build_agent(&config, &agent_alias, std::path::Path::new(&workspace_dir))
             .await
         {
             Ok(agent) => agent,
@@ -1253,13 +1239,8 @@ impl AcpServer {
             }
         };
 
-        // MCP init follows the restored agent's own opt-in
-        // (`[agents.<alias>].acp_enable_mcp`), matching `session/new`.
-        let enable_mcp = config
-            .agent(&restore_alias)
-            .is_some_and(|a| a.acp_enable_mcp);
         let agent_result = self
-            .build_agent(&config, &restore_alias, &workspace_dir, enable_mcp)
+            .build_agent(&config, &restore_alias, &workspace_dir)
             .await
             .map_err(|e| RpcError {
                 code: INTERNAL_ERROR,
@@ -1587,13 +1568,8 @@ impl AcpServer {
             }
         };
 
-        // MCP init follows the restored agent's own opt-in
-        // (`[agents.<alias>].acp_enable_mcp`), matching `session/new`.
-        let enable_mcp = config
-            .agent(&restore_alias)
-            .is_some_and(|a| a.acp_enable_mcp);
         let agent_result = self
-            .build_agent(&config, &restore_alias, &workspace_dir, enable_mcp)
+            .build_agent(&config, &restore_alias, &workspace_dir)
             .await
             .map_err(|e| RpcError {
                 code: INTERNAL_ERROR,
@@ -4183,9 +4159,7 @@ mod tests {
     /// it while the behaviour under test was correct.
     ///
     /// The operations guarded here are sub-second when they are not hung, so
-    /// 30s cannot be reached by ordinary contention. It also stays well under
-    /// the 60s sleep that `session_new_does_not_wait_for_configured_mcp_servers`
-    /// relies on, so that regression is still caught.
+    /// 30s cannot be reached by ordinary contention.
     const DEADLOCK_GUARD: Duration = Duration::from_secs(30);
 
     #[test]
@@ -4532,89 +4506,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn session_new_does_not_wait_for_configured_mcp_servers() {
-        let cwd = tempfile::tempdir().unwrap();
-        // The configured server touches this before sleeping, so its absence
-        // is direct evidence the child was never launched. Without it the test
-        // can only infer "did not wait" from elapsed time, which says nothing
-        // about a server that is spawned but not awaited.
-        let spawn_marker = cwd.path().join("mcp-server-was-spawned");
-        let mut config = Config {
-            data_dir: cwd.path().to_path_buf(),
-            providers: {
-                let mut p = zeroclaw_config::providers::Providers::default();
-                p.models.openrouter.insert(
-                    "default".to_string(),
-                    zeroclaw_config::schema::OpenRouterModelProviderConfig {
-                        base: zeroclaw_config::schema::ModelProviderConfig {
-                            model: Some("test-model".to_string()),
-                            ..Default::default()
-                        },
-                    },
-                );
-                p
-            },
-            mcp: zeroclaw_config::schema::McpConfig {
-                enabled: true,
-                servers: vec![zeroclaw_config::schema::McpServerConfig {
-                    name: "slow".to_string(),
-                    transport: zeroclaw_config::schema::McpTransport::Stdio,
-                    command: "/bin/sh".to_string(),
-                    args: vec![
-                        "-c".to_string(),
-                        format!("touch {}; sleep 60", spawn_marker.display()),
-                    ],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        config.risk_profiles.insert(
-            "default".to_string(),
-            zeroclaw_config::schema::RiskProfileConfig::default(),
-        );
-        config.runtime_profiles.insert(
-            "default".to_string(),
-            zeroclaw_config::schema::RuntimeProfileConfig::default(),
-        );
-        // Grant the slow server to the agent. Without a bundle grant,
-        // `mcp_servers_for_agent` returns nothing and the assertions below hold
-        // no matter what `session/new` does, which would make this test
-        // vacuous. With the grant, flipping `acp_enable_mcp` on is enough to
-        // spawn the child and block on its 60s sleep.
-        config.mcp_bundles.insert(
-            "slow-bundle".to_string(),
-            zeroclaw_config::schema::McpBundleConfig {
-                servers: vec!["slow".to_string()],
-                exclude: Vec::new(),
-            },
-        );
-        let mut agent = dispatchable_test_agent("openrouter.default");
-        agent.mcp_bundles = vec!["slow-bundle".to_string()];
-        config.agents.insert("test-agent".to_string(), agent);
-        let server = AcpServer::new(config, AcpServerConfig::default());
-
-        let result = tokio::time::timeout(
-            DEADLOCK_GUARD,
-            server.handle_session_new(&serde_json::json!({
-                "cwd": cwd.path().to_string_lossy(),
-                "agentAlias": "test-agent",
-                "mcpServers": []
-            })),
-        )
-        .await
-        .expect("session/new must not hang on configured MCP startup")
-        .expect("session/new should create a session");
-
-        assert!(result["sessionId"].as_str().is_some());
-        assert!(
-            !spawn_marker.exists(),
-            "session/new must not launch configured MCP servers (acp_enable_mcp is off)"
-        );
-    }
-
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn session_new_agent_init_failure_log_is_attributed_and_redacted() {
@@ -4725,155 +4616,6 @@ mod tests {
         assert!(
             !logged_error.contains(EXPOSED_PREFIX),
             "the persisted event must not contain the credential fragment: {logged_error}"
-        );
-    }
-
-    /// Spin up a wiremock server speaking the minimum MCP HTTP handshake
-    /// (`initialize` → `notifications/initialized` → `tools/list`) advertising a
-    /// single tool. HTTP transport keeps the test cross-platform (no stdio
-    /// scripts). Mirrors the runtime crate'shelper.
-    async fn start_mock_mcp_http_server(tool_name: &str) -> wiremock::MockServer {
-        use wiremock::matchers::{body_partial_json, method};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({"method": "initialize"}),
-            ))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("Mcp-Session-Id", "sess-1")
-                    .set_body_json(serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "result": {
-                            "protocolVersion": "2024-11-05",
-                            "capabilities": {"tools": {}},
-                            "serverInfo": {"name": "remote", "version": "0.1.0"}
-                        }
-                    })),
-            )
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({"method": "notifications/initialized"}),
-            ))
-            .respond_with(ResponseTemplate::new(202))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(body_partial_json(
-                serde_json::json!({"method": "tools/list"}),
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "result": {"tools": [{
-                    "name": tool_name,
-                    "description": "List finance records",
-                    "inputSchema": {"type": "object"}
-                }]}
-            })))
-            .mount(&server)
-            .await;
-        server
-    }
-
-    /// `make_test_config` plus an MCP server (`remote`, HTTP transport at
-    /// `mock_uri`) granted to `test-agent` through the `b1` mcp_bundle.
-    fn make_mcp_granting_test_config(cwd: &std::path::Path, mock_uri: String) -> Config {
-        use zeroclaw_config::schema::{McpBundleConfig, McpServerConfig, McpTransport};
-
-        let mut cfg = make_test_config(cwd);
-        cfg.mcp.enabled = true;
-        cfg.mcp.deferred_loading = false;
-        cfg.mcp.servers = vec![McpServerConfig {
-            name: "remote".into(),
-            transport: McpTransport::Http,
-            url: Some(mock_uri),
-            ..Default::default()
-        }];
-        cfg.mcp_bundles.insert(
-            "b1".into(),
-            McpBundleConfig {
-                servers: vec!["remote".into()],
-                exclude: vec![],
-            },
-        );
-        cfg.agents
-            .get_mut("test-agent")
-            .expect("test-agent must exist")
-            .mcp_bundles = vec!["b1".into()];
-        cfg
-    }
-
-    #[test]
-    fn agent_acp_enable_mcp_defaults_off() {
-        assert!(
-            !zeroclaw_config::schema::AliasedAgentConfig::default().acp_enable_mcp,
-            "MCP must stay opt-in per agent so session/new is prompt by default (#8193)"
-        );
-    }
-
-    #[tokio::test]
-    async fn session_new_skips_mcp_by_default() {
-        let cwd = tempfile::tempdir().unwrap();
-        let server = start_mock_mcp_http_server("records.list").await;
-        let config = make_mcp_granting_test_config(cwd.path(), server.uri());
-        let acp = AcpServer::new(config, AcpServerConfig::default());
-
-        acp.handle_session_new(&serde_json::json!({
-            "cwd": cwd.path().to_string_lossy(),
-            "agentAlias": "test-agent"
-        }))
-        .await
-        .expect("session/new must succeed");
-
-        let requests = server
-            .received_requests()
-            .await
-            .expect("mock records requests");
-        assert!(
-            requests.is_empty(),
-            "default ACP session must not connect to granted MCP servers; got {} request(s)",
-            requests.len()
-        );
-    }
-
-    #[tokio::test]
-    async fn session_new_loads_mcp_bundles_when_agent_opts_in() {
-        let cwd = tempfile::tempdir().unwrap();
-        let server = start_mock_mcp_http_server("records.list").await;
-        let mut config = make_mcp_granting_test_config(cwd.path(), server.uri());
-        config
-            .agents
-            .get_mut("test-agent")
-            .expect("test-agent must exist")
-            .acp_enable_mcp = true;
-        let acp = AcpServer::new(config, AcpServerConfig::default());
-
-        acp.handle_session_new(&serde_json::json!({
-            "cwd": cwd.path().to_string_lossy(),
-            "agentAlias": "test-agent"
-        }))
-        .await
-        .expect("session/new must succeed");
-
-        let requests = server
-            .received_requests()
-            .await
-            .expect("mock records requests");
-        assert!(
-            requests.iter().any(|r| {
-                std::str::from_utf8(&r.body)
-                    .map(|b| b.contains("tools/list"))
-                    .unwrap_or(false)
-            }),
-            "agent with acp_enable_mcp must list tools from granted MCP servers; \
-             got {} request(s)",
-            requests.len()
         );
     }
 
@@ -10282,116 +10024,6 @@ mod tests {
             .expect_err("session/load for active session must fail");
 
         assert_eq!(err.code, INVALID_PARAMS);
-    }
-
-    fn make_cross_agent_restore_config(cwd: &std::path::Path, mock_uri: String) -> Config {
-        let mut cfg = make_mcp_granting_test_config(cwd, mock_uri);
-        // ACP default agent: no bundle, MCP off.
-        {
-            let ta = cfg.agents.get_mut("test-agent").expect("test-agent exists");
-            ta.mcp_bundles = vec![];
-            ta.acp_enable_mcp = false;
-        }
-        // Session owner: granted the bundle and opted into ACP MCP.
-        cfg.agents.insert(
-            "finance".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
-                model_provider: "anthropic.default".into(),
-                risk_profile: "default".into(),
-                runtime_profile: "default".into(),
-                mcp_bundles: vec!["b1".into()],
-                acp_enable_mcp: true,
-                ..Default::default()
-            },
-        );
-        cfg.acp.default_agent = Some("test-agent".to_string());
-        cfg
-    }
-
-    #[tokio::test]
-    async fn session_load_restores_owning_agent_and_its_mcp_optin() {
-        let cwd = tempfile::tempdir().unwrap();
-        let mcp = start_mock_mcp_http_server("records.list").await;
-        let config = make_cross_agent_restore_config(cwd.path(), mcp.uri());
-
-        let store =
-            Arc::new(zeroclaw_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
-        let session_id = "sess-cross-agent-load";
-        store
-            .create_session(session_id, "finance", &cwd.path().to_string_lossy(), None)
-            .unwrap();
-
-        let (writer_tx, _rx) = tokio::sync::mpsc::channel::<String>(64);
-        let server = Arc::new(AcpServer::new_with_writer_and_store(
-            config,
-            AcpServerConfig::default(),
-            writer_tx,
-            Arc::clone(&store),
-        ));
-
-        server
-            .handle_session_load(&serde_json::json!({
-                "sessionId": session_id,
-                "cwd": cwd.path().to_string_lossy()
-            }))
-            .await
-            .expect("session/load must succeed");
-
-        let requests = mcp
-            .received_requests()
-            .await
-            .expect("mock records requests");
-        assert!(
-            requests.iter().any(|r| std::str::from_utf8(&r.body)
-                .map(|b| b.contains("tools/list"))
-                .unwrap_or(false)),
-            "restored session must rebuild from its owning agent `finance` (acp_enable_mcp=true) \
-             and load its MCP bundles, not the ACP default `test-agent`; got {} request(s)",
-            requests.len()
-        );
-    }
-
-    #[tokio::test]
-    async fn session_resume_restores_owning_agent_and_its_mcp_optin() {
-        let cwd = tempfile::tempdir().unwrap();
-        let mcp = start_mock_mcp_http_server("records.list").await;
-        let config = make_cross_agent_restore_config(cwd.path(), mcp.uri());
-
-        let store =
-            Arc::new(zeroclaw_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
-        let session_id = "sess-cross-agent-resume";
-        store
-            .create_session(session_id, "finance", &cwd.path().to_string_lossy(), None)
-            .unwrap();
-
-        let (writer_tx, _rx) = tokio::sync::mpsc::channel::<String>(64);
-        let server = Arc::new(AcpServer::new_with_writer_and_store(
-            config,
-            AcpServerConfig::default(),
-            writer_tx,
-            Arc::clone(&store),
-        ));
-
-        server
-            .handle_session_resume(&serde_json::json!({
-                "sessionId": session_id,
-                "cwd": cwd.path().to_string_lossy()
-            }))
-            .await
-            .expect("session/resume must succeed");
-
-        let requests = mcp
-            .received_requests()
-            .await
-            .expect("mock records requests");
-        assert!(
-            requests.iter().any(|r| std::str::from_utf8(&r.body)
-                .map(|b| b.contains("tools/list"))
-                .unwrap_or(false)),
-            "resumed session must rebuild from its owning agent `finance` (acp_enable_mcp=true) \
-             and load its MCP bundles, not the ACP default `test-agent`; got {} request(s)",
-            requests.len()
-        );
     }
 
     #[test]
