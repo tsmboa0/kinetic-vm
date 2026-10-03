@@ -519,8 +519,8 @@ impl ModelRoutingConfigTool {
                     "conversation": {
                         "action": "upsert_scenario",
                         "hint": "conversation",
-                        "model_provider": "kimi",
-                        "model": "moonshot-v1-8k",
+                        "model_provider": "anthropic",
+                        "model": "claude-sonnet-4-6",
                         "classification_enabled": false
                     },
                     "coding": {
@@ -1347,17 +1347,17 @@ mod tests {
         let result = tool
             .execute(json!({
                 "action": "set_default",
-                "model_provider": "moonshot",
-                "model": "moonshot-v1-8k",
+                "model_provider": "openrouter",
+                "model": "anthropic/claude-sonnet-4",
                 "temperature": 0.2
             }))
             .await
             .unwrap();
 
         assert!(result.success, "{:?}", result.error);
-        let entry = read_saved_provider_entry(&cfg_path, "moonshot", "default")
-            .expect("set_default must materialize the moonshot.default slot");
-        assert_eq!(entry.model.as_deref(), Some("moonshot-v1-8k"));
+        let entry = read_saved_provider_entry(&cfg_path, "openrouter", "default")
+            .expect("set_default must materialize the openrouter.default slot");
+        assert_eq!(entry.model.as_deref(), Some("anthropic/claude-sonnet-4"));
         assert_eq!(entry.temperature, Some(0.2));
     }
 

@@ -1308,11 +1308,6 @@ impl OpenAiCompatibleModelProvider {
         else {
             return Ok(None);
         };
-        if model_provider == "xai" {
-            return auth
-                .get_valid_xai_access_token(self.auth_profile_override.as_deref())
-                .await;
-        }
         auth.get_provider_bearer_token(model_provider, self.auth_profile_override.as_deref())
             .await
     }

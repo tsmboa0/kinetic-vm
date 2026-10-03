@@ -82,11 +82,11 @@ fn memory_config_default_vector_keyword_weights_sum_to_one() {
 
 #[test]
 fn config_toml_roundtrip_preserves_provider() {
-    use zeroclaw::config::{DeepseekModelProviderConfig, ModelProviderConfig};
+    use zeroclaw::config::{ModelProviderConfig, OpenRouterModelProviderConfig};
     let mut config = Config::default();
-    config.providers.models.deepseek.insert(
+    config.providers.models.openrouter.insert(
         "default".to_string(),
-        DeepseekModelProviderConfig {
+        OpenRouterModelProviderConfig {
             base: ModelProviderConfig {
                 model: Some("deepseek-chat".into()),
                 temperature: Some(0.5),
@@ -103,15 +103,15 @@ fn config_toml_roundtrip_preserves_provider() {
         parsed
             .providers
             .models
-            .find("deepseek", "default")
+            .find("openrouter", "default")
             .is_some(),
-        "deepseek.default entry should survive round-trip"
+        "openrouter.default entry should survive round-trip"
     );
     assert_eq!(
         parsed
             .providers
             .models
-            .find("deepseek", "default")
+            .find("openrouter", "default")
             .and_then(|e| e.model.as_deref()),
         Some("deepseek-chat")
     );
@@ -119,7 +119,7 @@ fn config_toml_roundtrip_preserves_provider() {
         (parsed
             .providers
             .models
-            .find("deepseek", "default")
+            .find("openrouter", "default")
             .and_then(|e| e.temperature)
             .unwrap_or(0.7)
             - 0.5)
@@ -171,18 +171,19 @@ fn config_toml_roundtrip_preserves_memory_config() {
 
 #[test]
 fn config_file_write_read_roundtrip() {
-    use zeroclaw::config::{MistralModelProviderConfig, ModelProviderConfig};
+    use zeroclaw::config::{AnthropicModelProviderConfig, ModelProviderConfig};
     let tmp = tempfile::TempDir::new().expect("tempdir creation should succeed");
     let config_path = tmp.path().join("config.toml");
 
     let mut config = Config::default();
-    config.providers.models.mistral.insert(
+    config.providers.models.anthropic.insert(
         "default".to_string(),
-        MistralModelProviderConfig {
+        AnthropicModelProviderConfig {
             base: ModelProviderConfig {
-                model: Some("mistral-large".into()),
+                model: Some("claude-sonnet-4-6".into()),
                 ..Default::default()
             },
+            ..Default::default()
         },
     );
     config
@@ -199,16 +200,20 @@ fn config_file_write_read_roundtrip() {
         .expect("TOML should round-trip through migration");
 
     assert!(
-        parsed.providers.models.find("mistral", "default").is_some(),
-        "mistral.default entry should survive round-trip"
+        parsed
+            .providers
+            .models
+            .find("anthropic", "default")
+            .is_some(),
+        "anthropic.default entry should survive round-trip"
     );
     assert_eq!(
         parsed
             .providers
             .models
-            .find("mistral", "default")
+            .find("anthropic", "default")
             .and_then(|e| e.model.as_deref()),
-        Some("mistral-large")
+        Some("claude-sonnet-4-6")
     );
     assert_eq!(
         parsed

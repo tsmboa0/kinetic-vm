@@ -533,7 +533,6 @@ pub fn resolve_model_provider_type(type_key: &str) -> Option<(&'static str, bool
         zeroclaw_providers::auth::AuthProvider::OpenaiCodex => ("openai", true),
         zeroclaw_providers::auth::AuthProvider::Anthropic => ("anthropic", false),
         zeroclaw_providers::auth::AuthProvider::Gemini => ("gemini", false),
-        zeroclaw_providers::auth::AuthProvider::Xai => ("xai", false),
     })
 }
 
@@ -553,9 +552,7 @@ pub fn snapshot_state(cfg: &Config) -> QuickstartState {
             kind: info.name.to_string(),
             display_name: info.display_name.to_string(),
             local: info.local,
-            default_runtime_profile: zeroclaw_providers::recommended_runtime_profile(info.name)
-                .and_then(runtime_preset)
-                .map(|preset| preset.preset_name.to_string()),
+            default_runtime_profile: None,
         })
         .collect();
     let channel_types = build_channel_type_options(&cfg.channels);
@@ -2293,68 +2290,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_runtime_defaults_follow_canonical_provider_recommendations() {
-        let snapshot = snapshot_state(&Config::default());
-
-        let local = snapshot
-            .model_provider_types
-            .iter()
-            .find(|provider| provider.kind == "lmstudio")
-            .expect("LM Studio should be present in the canonical provider registry");
-        assert!(local.local);
-        assert_eq!(
-            local.default_runtime_profile.as_deref(),
-            Some("local_small")
-        );
-
-        let ollama = snapshot
-            .model_provider_types
-            .iter()
-            .find(|provider| provider.kind == "ollama")
-            .expect("Ollama should be present in the canonical provider registry");
-        assert!(ollama.local);
-        assert_eq!(
-            ollama.default_runtime_profile.as_deref(),
-            None,
-            "providers without native tools must use the canonical fallback",
-        );
-
-        let remote = snapshot
-            .model_provider_types
-            .iter()
-            .find(|provider| provider.kind == "anthropic")
-            .expect("Anthropic should be present in the canonical provider registry");
-        assert!(!remote.local);
-        assert_eq!(remote.default_runtime_profile, None);
-        assert_eq!(snapshot.default_runtime_profile, "unbounded");
-
-        let cli_shim = snapshot
-            .model_provider_types
-            .iter()
-            .find(|provider| provider.kind == "gemini_cli")
-            .expect("Gemini CLI should be present in the canonical provider registry");
-        assert!(cli_shim.local);
-        assert_eq!(
-            cli_shim.default_runtime_profile.as_deref(),
-            None,
-            "credential-free cloud CLI providers must not inherit local-small policy",
-        );
-
-        for provider in &snapshot.model_provider_types {
-            if let Some(default) = provider.default_runtime_profile.as_deref() {
-                assert!(
-                    snapshot
-                        .runtime_presets
-                        .iter()
-                        .any(|preset| preset.preset_name == default),
-                    "provider {} advertised unavailable runtime preset {default}",
-                    provider.kind,
-                );
-            }
-        }
-    }
-
-    #[test]
     fn snapshot_state_sorts_configured_model_provider_refs() {
         let mut cfg = Config::default();
         cfg.create_map_key("providers.models.openai", "zeta")
@@ -2544,9 +2479,9 @@ mod tests {
     fn apply_provider_type_trims_and_canonicalizes_whitespace() {
         // A provider type with stray whitespace must canonicalize to the
         // registry's family key, not reach create_map_key verbatim (which would
-        // fail with "no map-keyed/list section at providers.models.llamacpp ").
+        // fail with "no map-keyed/list section at providers.models.ollama ").
         let (cfg, applied, errors) = apply_fresh_provider(ModelProviderChoice {
-            provider_type: "  llamacpp  ".into(),
+            provider_type: "  ollama  ".into(),
             alias: "local".into(),
             model: "qwen2.5-coder".into(),
             fields: std::collections::HashMap::new(),
@@ -2554,11 +2489,11 @@ mod tests {
         assert!(errors.is_empty(), "apply_into errors: {errors:?}");
         assert!(applied.is_some());
         assert!(
-            cfg.providers.models.find("llamacpp", "local").is_some(),
-            "expected providers.models.llamacpp.local to exist"
+            cfg.providers.models.find("ollama", "local").is_some(),
+            "expected providers.models.ollama.local to exist"
         );
         let agent = cfg.agents.get("bot").expect("agent created");
-        assert_eq!(agent.model_provider.as_str(), "llamacpp.local");
+        assert_eq!(agent.model_provider.as_str(), "ollama.local");
     }
 
     #[test]
@@ -2790,7 +2725,7 @@ mod tests {
 
     #[test]
     fn field_shape_returns_model_provider_rows_for_canonical_types() {
-        for kind in ["anthropic", "openai", "ollama", "openrouter", "groq"] {
+        for kind in ["anthropic", "openai", "ollama", "openrouter", "gemini"] {
             let rows = super::field_shape(super::FieldSection::ModelProvider, kind);
             let keys: Vec<&str> = rows.iter().map(|r| r.key.as_str()).collect();
             assert!(
@@ -3728,29 +3663,6 @@ mod tests {
         assert!(!model_listing_is_unsupported(&actionable));
     }
 
-    #[tokio::test]
-    async fn configured_static_catalog_provider_preserves_typed_live_listing_boundary() {
-        let mut config = Config::default();
-        config
-            .providers
-            .models
-            .ensure("bedrock", "static")
-            .expect("bedrock fixture profile");
-        let provider =
-            zeroclaw_providers::create_model_provider_from_ref(&config, "bedrock.static")
-                .expect("configured Bedrock provider should construct");
-        let error = zeroclaw_providers::ProviderDispatch::from_ref(&*provider)
-            .list_models_with_pricing()
-            .await
-            .expect_err("Bedrock intentionally has no live listing endpoint");
-
-        assert!(model_listing_is_unsupported(&error));
-        let (models_dev, openrouter) = zeroclaw_providers::catalog::catalog_source_for("bedrock")
-            .expect("Bedrock must have a canonical family catalog source");
-        assert_eq!(models_dev, Some("amazon-bedrock"));
-        assert_eq!(openrouter, None);
-    }
-
     #[test]
     fn model_provider_is_local_classifies_configured_refs_by_family() {
         assert!(model_provider_is_local("hailo_ollama"));
@@ -3779,9 +3691,9 @@ mod tests {
             .await;
 
         let mut config = Config::default();
-        config.providers.models.xai.insert(
+        config.providers.models.custom.insert(
             "default".to_string(),
-            zeroclaw_config::schema::XaiModelProviderConfig {
+            zeroclaw_config::schema::CustomModelProviderConfig {
                 base: zeroclaw_config::schema::ModelProviderConfig {
                     api_key: Some("xai-test-key".to_string()),
                     uri: Some(server.uri()),
@@ -3791,7 +3703,7 @@ mod tests {
         );
 
         let (models, _pricing, live) =
-            model_catalog_with_config_result(Some(&config), "xai.default")
+            model_catalog_with_config_result(Some(&config), "custom.default")
                 .await
                 .expect("configured native catalog should succeed");
 
@@ -3821,9 +3733,9 @@ mod tests {
 
         let mut config = Config::default();
         // Non-default alias name to prove the dotted ref targets it precisely.
-        config.providers.models.xai.insert(
+        config.providers.models.custom.insert(
             "prod".to_string(),
-            zeroclaw_config::schema::XaiModelProviderConfig {
+            zeroclaw_config::schema::CustomModelProviderConfig {
                 base: zeroclaw_config::schema::ModelProviderConfig {
                     api_key: Some("xai-test-key".to_string()),
                     uri: Some(server.uri()),
@@ -3835,9 +3747,10 @@ mod tests {
             },
         );
 
-        let (models, _pricing, live) = model_catalog_with_config_result(Some(&config), "xai.prod")
-            .await
-            .expect("configured alias catalog should succeed");
+        let (models, _pricing, live) =
+            model_catalog_with_config_result(Some(&config), "custom.prod")
+                .await
+                .expect("configured alias catalog should succeed");
 
         assert!(live);
         assert!(
@@ -3895,9 +3808,9 @@ mod tests {
         endpoint.set_query(Some(&format!("signature={SIGNATURE}")));
 
         let mut config = Config::default();
-        config.providers.models.xai.insert(
+        config.providers.models.custom.insert(
             "private".to_string(),
-            zeroclaw_config::schema::XaiModelProviderConfig {
+            zeroclaw_config::schema::CustomModelProviderConfig {
                 base: zeroclaw_config::schema::ModelProviderConfig {
                     api_key: Some("expired-key".to_string()),
                     uri: Some(endpoint.to_string()),
@@ -3906,7 +3819,7 @@ mod tests {
             },
         );
 
-        let error = model_catalog_with_config_result(Some(&config), "xai.private")
+        let error = model_catalog_with_config_result(Some(&config), "custom.private")
             .await
             .expect_err("configured profile rejection must not become a public family catalog");
         let error = error.to_string();
@@ -3925,7 +3838,7 @@ mod tests {
 
     #[tokio::test]
     async fn configured_catalog_construction_error_redacts_key_excerpt() {
-        const SECRET: &str = "xai-syntheticSecretValue12345";
+        const SECRET: &str = "sk-ant-syntheticSecretValue12345";
 
         let mut config = Config::default();
         config.providers.models.openai.insert(
@@ -3943,7 +3856,10 @@ mod tests {
             .expect_err("mismatched credential prefix must reject provider construction")
             .to_string();
         assert!(error.contains("could not be constructed"), "{error}");
-        assert!(!error.contains("xai-"), "credential prefix leaked: {error}");
+        assert!(
+            !error.contains("sk-ant-"),
+            "credential prefix leaked: {error}"
+        );
         assert!(
             !error.contains("synthetic"),
             "credential excerpt leaked: {error}"

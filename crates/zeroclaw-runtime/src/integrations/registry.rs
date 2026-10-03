@@ -240,19 +240,6 @@ mod tests {
     }
 
     #[test]
-    fn zai_entry_key_survives_display_name_slug_mismatch() {
-        // Regression: the Z.AI display name slugifies to
-        // `z-ai`, but the config slot is `providers.models.zai`.
-        let config = Config::default();
-        let entries = all_integrations(&config);
-        let zai = entries
-            .iter()
-            .find(|e| e.category == IntegrationCategory::AiModel && e.key.as_deref() == Some("zai"))
-            .expect("Z.AI registry entry with family key `zai`");
-        assert_eq!(zai.name, "Z.AI");
-    }
-
-    #[test]
     fn telegram_active_when_configured() {
         let mut config = Config::default();
         config.channels.telegram.insert(

@@ -2082,9 +2082,9 @@ mod tests {
     #[test]
     fn non_hailo_local_alias_keeps_existing_missing_api_key_warning() {
         let mut config = Config::default();
-        config.providers.models.llamacpp.insert(
+        config.providers.models.custom.insert(
             "edge".to_string(),
-            zeroclaw_config::schema::LlamacppModelProviderConfig {
+            zeroclaw_config::schema::CustomModelProviderConfig {
                 base: zeroclaw_config::schema::ModelProviderConfig {
                     model: Some("local-model".to_string()),
                     ..Default::default()
@@ -2097,7 +2097,7 @@ mod tests {
         assert!(
             items
                 .iter()
-                .any(|item| item.message.contains("llamacpp.edge: no api_key set")),
+                .any(|item| item.message.contains("custom.edge: no api_key set")),
             "other local families must retain their established API-key warning"
         );
     }
@@ -3076,12 +3076,12 @@ mod tests {
 
     #[test]
     fn config_validation_surfaces_dangling_fallback_ref() {
-        use zeroclaw_config::schema::{ModelProviderConfig, NvidiaModelProviderConfig};
+        use zeroclaw_config::schema::{ModelProviderConfig, OpenRouterModelProviderConfig};
 
         let mut config = Config::default();
-        config.providers.models.nvidia.insert(
-            "nvidia".to_string(),
-            NvidiaModelProviderConfig {
+        config.providers.models.openrouter.insert(
+            "default".to_string(),
+            OpenRouterModelProviderConfig {
                 base: ModelProviderConfig {
                     model: Some("stepfun-ai/step-3.5-flash".into()),
                     fallback: vec![zeroclaw_config::providers::ModelProviderRef::new(
@@ -3099,7 +3099,7 @@ mod tests {
                 .contains("does not resolve to a configured providers.models entry")
                 && item
                     .message
-                    .contains("providers.models.nvidia.nvidia.fallback[0]")
+                    .contains("providers.models.openrouter.default.fallback[0]")
         });
         assert!(
             fallback_item.is_some(),
@@ -3823,15 +3823,15 @@ mod tests {
             ..Default::default()
         };
 
-        // Create two groq provider aliases with SAME model and URI
+        // Create two openrouter provider aliases with SAME model and URI
         // This simulates the bug scenario where multiple aliases share the same
         // model/endpoint but should be updated independently
         {
             let entry1 = config
                 .providers
                 .models
-                .ensure("groq", "alias1")
-                .expect("groq provider type exists");
+                .ensure("openrouter", "alias1")
+                .expect("openrouter provider type exists");
             entry1.model = Some("llama-3.1-8b-instant".into());
             entry1.context_window = Some(8192);
         }
@@ -3839,8 +3839,8 @@ mod tests {
             let entry2 = config
                 .providers
                 .models
-                .ensure("groq", "alias2")
-                .expect("groq provider type exists");
+                .ensure("openrouter", "alias2")
+                .expect("openrouter provider type exists");
             entry2.model = Some("llama-3.1-8b-instant".into());
         }
 
@@ -3852,10 +3852,14 @@ mod tests {
                     as std::pin::Pin<Box<dyn std::future::Future<Output = Option<usize>> + Send>>
             },
         );
-        let updated =
-            update_context_windows(&mut config, Some("groq.alias2"), false, Some(mock_fetch))
-                .await
-                .expect("update_context_windows should succeed");
+        let updated = update_context_windows(
+            &mut config,
+            Some("openrouter.alias2"),
+            false,
+            Some(mock_fetch),
+        )
+        .await
+        .expect("update_context_windows should succeed");
 
         // Should have updated exactly 1 entry (alias2)
         assert_eq!(updated, 1);
@@ -3864,7 +3868,7 @@ mod tests {
         let alias1_ctx = config
             .providers
             .models
-            .find("groq", "alias1")
+            .find("openrouter", "alias1")
             .expect("alias1 should exist")
             .context_window;
         assert_eq!(
@@ -3877,7 +3881,7 @@ mod tests {
         let alias2_ctx = config
             .providers
             .models
-            .find("groq", "alias2")
+            .find("openrouter", "alias2")
             .expect("alias2 should exist")
             .context_window;
         assert_eq!(

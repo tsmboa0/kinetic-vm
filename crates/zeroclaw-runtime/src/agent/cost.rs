@@ -654,7 +654,7 @@ mod tests {
     use super::*;
     use zeroclaw_api::attribution::{Attributable, ModelProviderKind, ProviderKind, Role};
     use zeroclaw_api::model_provider::{ChatMessage, ChatRequest, ChatResponse, ModelProvider};
-    use zeroclaw_config::schema::{Config, DeepseekModelProviderConfig, ModelProviderConfig};
+    use zeroclaw_config::schema::{Config, ModelProviderConfig, OpenRouterModelProviderConfig};
     use zeroclaw_providers::ProviderDispatch;
     use zeroclaw_providers::dispatch::{AccountedChatScope, with_exact_dispatch_route};
 
@@ -1453,9 +1453,9 @@ mod tests {
     #[test]
     fn build_model_provider_pricing_prefers_rate_sheet_over_legacy_alias_pricing() {
         let mut config = Config::default();
-        config.providers.models.deepseek.insert(
+        config.providers.models.openrouter.insert(
             "default".to_string(),
-            DeepseekModelProviderConfig {
+            OpenRouterModelProviderConfig {
                 base: ModelProviderConfig {
                     model: Some("deepseek-v4-flash".into()),
                     pricing: HashMap::from([("deepseek-v4-flash.output".into(), 0.77)]),
@@ -1463,7 +1463,7 @@ mod tests {
                 },
             },
         );
-        config.cost.rates.providers.models.deepseek.insert(
+        config.cost.rates.providers.models.openrouter.insert(
             "deepseek-v4-flash".to_string(),
             zeroclaw_config::schema::ModelCostRates {
                 input_per_mtok: Some(0.14),
@@ -1475,7 +1475,7 @@ mod tests {
 
         let alias_map = build_model_provider_pricing(&config);
         let deepseek = alias_map
-            .get("deepseek.default")
+            .get("openrouter.default")
             .expect("deepseek alias pricing");
         assert_eq!(deepseek.get("deepseek-v4-flash.input").copied(), Some(0.14));
         assert_eq!(
@@ -1492,18 +1492,18 @@ mod tests {
     #[test]
     fn build_model_provider_pricing_keeps_alias_legacy_pricing_isolated() {
         let mut config = Config::default();
-        config.providers.models.deepseek.insert(
+        config.providers.models.openrouter.insert(
             "work".to_string(),
-            DeepseekModelProviderConfig {
+            OpenRouterModelProviderConfig {
                 base: ModelProviderConfig {
                     pricing: HashMap::from([("deepseek-v4-flash.output".into(), 0.77)]),
                     ..Default::default()
                 },
             },
         );
-        config.providers.models.deepseek.insert(
+        config.providers.models.openrouter.insert(
             "personal".to_string(),
-            DeepseekModelProviderConfig {
+            OpenRouterModelProviderConfig {
                 base: ModelProviderConfig {
                     pricing: HashMap::from([("deepseek-v4-flash.output".into(), 0.91)]),
                     ..Default::default()
@@ -1512,9 +1512,11 @@ mod tests {
         );
 
         let alias_map = build_model_provider_pricing(&config);
-        let work = alias_map.get("deepseek.work").expect("work alias pricing");
+        let work = alias_map
+            .get("openrouter.work")
+            .expect("work alias pricing");
         let personal = alias_map
-            .get("deepseek.personal")
+            .get("openrouter.personal")
             .expect("personal alias pricing");
 
         assert_eq!(work.get("deepseek-v4-flash.output").copied(), Some(0.77));
@@ -1527,9 +1529,9 @@ mod tests {
     #[test]
     fn build_type_level_model_provider_pricing_merges_aliases_and_rate_sheet() {
         let mut config = Config::default();
-        config.providers.models.deepseek.insert(
+        config.providers.models.openrouter.insert(
             "work".to_string(),
-            DeepseekModelProviderConfig {
+            OpenRouterModelProviderConfig {
                 base: ModelProviderConfig {
                     pricing: HashMap::from([
                         ("deepseek-v4-flash.input".into(), 0.33),
@@ -1539,16 +1541,16 @@ mod tests {
                 },
             },
         );
-        config.providers.models.deepseek.insert(
+        config.providers.models.openrouter.insert(
             "personal".to_string(),
-            DeepseekModelProviderConfig {
+            OpenRouterModelProviderConfig {
                 base: ModelProviderConfig {
                     pricing: HashMap::from([("deepseek-v4-flash.output".into(), 0.91)]),
                     ..Default::default()
                 },
             },
         );
-        config.cost.rates.providers.models.deepseek.insert(
+        config.cost.rates.providers.models.openrouter.insert(
             "deepseek-v4-flash".to_string(),
             zeroclaw_config::schema::ModelCostRates {
                 input_per_mtok: Some(0.14),
@@ -1559,7 +1561,7 @@ mod tests {
         );
 
         let by_type = build_type_level_model_provider_pricing(&config);
-        let deepseek = by_type.get("deepseek").expect("deepseek type pricing");
+        let deepseek = by_type.get("openrouter").expect("openrouter type pricing");
         assert_eq!(deepseek.get("deepseek-v4-flash.input").copied(), Some(0.14));
         assert_eq!(
             deepseek.get("deepseek-v4-flash.output").copied(),
@@ -1574,18 +1576,18 @@ mod tests {
     #[test]
     fn build_type_level_model_provider_pricing_keeps_legacy_last_alias_wins_behavior() {
         let mut config = Config::default();
-        config.providers.models.deepseek.insert(
+        config.providers.models.openrouter.insert(
             "work".to_string(),
-            DeepseekModelProviderConfig {
+            OpenRouterModelProviderConfig {
                 base: ModelProviderConfig {
                     pricing: HashMap::from([("deepseek-v4-flash.output".into(), 0.77)]),
                     ..Default::default()
                 },
             },
         );
-        config.providers.models.deepseek.insert(
+        config.providers.models.openrouter.insert(
             "personal".to_string(),
-            DeepseekModelProviderConfig {
+            OpenRouterModelProviderConfig {
                 base: ModelProviderConfig {
                     pricing: HashMap::from([("deepseek-v4-flash.output".into(), 0.91)]),
                     ..Default::default()
@@ -1607,8 +1609,10 @@ mod tests {
         }
 
         let by_type = build_type_level_model_provider_pricing(&config);
-        let deepseek = by_type.get("deepseek").expect("deepseek type pricing");
-        let expected_deepseek = expected.get("deepseek").expect("expected deepseek pricing");
+        let deepseek = by_type.get("openrouter").expect("openrouter type pricing");
+        let expected_deepseek = expected
+            .get("openrouter")
+            .expect("expected openrouter pricing");
         assert_eq!(deepseek, expected_deepseek);
     }
 
@@ -1991,16 +1995,16 @@ mod tests {
             .unwrap(),
         );
         let mut config = Config::default();
-        config.providers.models.deepseek.insert(
+        config.providers.models.openrouter.insert(
             "invalid".to_string(),
-            DeepseekModelProviderConfig {
+            OpenRouterModelProviderConfig {
                 base: ModelProviderConfig {
                     model: Some("invalid-model".into()),
                     ..Default::default()
                 },
             },
         );
-        config.cost.rates.providers.models.deepseek.insert(
+        config.cost.rates.providers.models.openrouter.insert(
             "invalid-model".to_string(),
             zeroclaw_config::schema::ModelCostRates {
                 input_per_mtok: Some(-1.0),

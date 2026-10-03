@@ -1364,8 +1364,7 @@ mod tests {
     fn typed_provider_catalog_keys_create_snake_config_sections() {
         let mut cfg = zeroclaw_config::schema::Config::default();
         let cases = [
-            ("providers.models", "atomic_chat"),
-            ("providers.models", "gemini_cli"),
+            ("providers.models", "hailo_ollama"),
             ("providers.transcription", "local_whisper"),
         ];
 
@@ -1376,12 +1375,8 @@ mod tests {
         }
 
         assert!(
-            cfg.providers.models.atomic_chat.contains_key("default"),
-            "created Atomic Chat alias should land in the atomic_chat provider map",
-        );
-        assert!(
-            cfg.providers.models.gemini_cli.contains_key("default"),
-            "created Gemini CLI alias should land in the gemini_cli provider map",
+            cfg.providers.models.hailo_ollama.contains_key("default"),
+            "created Hailo-Ollama alias should land in the hailo_ollama provider map",
         );
         assert!(
             cfg.providers

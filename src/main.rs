@@ -11857,9 +11857,6 @@ async fn handle_oidc_command(oidc_command: OidcCommands, config: &Config) -> Res
 #[cfg(feature = "agent-runtime")]
 async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Result<()> {
     let auth_service = auth::AuthService::from_config(config);
-    let auth_cli_formatter =
-        |key: &str, args: &[(&str, &str)], fallback: &str| ta(key, args, fallback);
-
     match auth_command {
         AuthCommands::Login {
             model_provider,
@@ -11873,7 +11870,6 @@ async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Res
                 config,
                 auth_service: &auth_service,
                 client: &client,
-                format_cli: &auth_cli_formatter,
             };
             provider
                 .flow()
@@ -11892,7 +11888,6 @@ async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Res
                 config,
                 auth_service: &auth_service,
                 client: &client,
-                format_cli: &auth_cli_formatter,
             };
             let input_str: Option<String> = match input {
                 Some(value) => Some(value),
@@ -11989,7 +11984,6 @@ async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Res
                 config,
                 auth_service: &auth_service,
                 client: &client,
-                format_cli: &auth_cli_formatter,
             };
             let status = provider
                 .flow()
@@ -16129,13 +16123,13 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     fn config_set_materializes_missing_typed_provider_alias() {
         let mut config = Config::default();
-        let path = "providers.models.deepseek.default.model";
+        let path = "providers.models.openrouter.default.model";
 
         assert!(
             config
                 .providers
                 .models
-                .find("deepseek", "default")
+                .find("openrouter", "default")
                 .is_none(),
             "fresh config should not already contain the requested provider alias"
         );
@@ -16145,21 +16139,21 @@ mod tests {
 
         assert!(created, "missing provider alias should be created");
         config
-            .set_prop_persistent(path, "deepseek-chat")
+            .set_prop_persistent(path, "anthropic/claude-sonnet-4")
             .expect("materialized path should be writable");
         assert_eq!(
             config
                 .providers
                 .models
-                .find("deepseek", "default")
+                .find("openrouter", "default")
                 .and_then(|provider| provider.model.as_deref()),
-            Some("deepseek-chat")
+            Some("anthropic/claude-sonnet-4")
         );
 
         let known_paths: Vec<String> = config.prop_fields().into_iter().map(|f| f.name).collect();
         let api_key_path = zeroclaw_config::helpers::resolve_field_path(
             &known_paths,
-            "providers.models.deepseek.default.api-key",
+            "providers.models.openrouter.default.api-key",
         );
         config
             .set_prop_persistent(&api_key_path, "sk-test-placeholder")
@@ -16170,7 +16164,7 @@ mod tests {
             config
                 .providers
                 .models
-                .find("deepseek", "default")
+                .find("openrouter", "default")
                 .and_then(|provider| provider.api_key.as_deref()),
             Some("sk-test-placeholder")
         );

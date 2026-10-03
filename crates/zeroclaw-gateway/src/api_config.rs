@@ -6082,17 +6082,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn refresh_context_window_allows_slow_response_and_forwards_api_key() {
+    async fn refresh_context_window_allows_slow_response_without_leaking_api_key() {
         use http_body_util::BodyExt;
         use tower::ServiceExt;
-        use wiremock::matchers::{header, method, path};
+        use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let mock = MockServer::start().await;
 
         Mock::given(method("GET"))
             .and(path("/models"))
-            .and(header("authorization", "Bearer test-api-key-123"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_delay(std::time::Duration::from_millis(3_100))
@@ -6112,13 +6111,13 @@ mod tests {
             config_path: path.clone(),
             ..Default::default()
         };
-        cfg.providers.models.groq.insert(
+        cfg.providers.models.openrouter.insert(
             "test".to_string(),
-            zeroclaw_config::schema::GroqModelProviderConfig {
+            zeroclaw_config::schema::OpenRouterModelProviderConfig {
                 base: zeroclaw_config::schema::ModelProviderConfig {
                     model: Some("llama-3.1-70b".into()),
                     api_key: Some("test-api-key-123".into()),
-                    uri: Some(mock.uri()),
+                    uri: Some(format!("{}/models", mock.uri())),
                     ..Default::default()
                 },
             },
@@ -6138,7 +6137,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri("/api/config/model-providers/groq/test/refresh-context-window")
+                    .uri("/api/config/model-providers/openrouter/test/refresh-context-window")
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -6160,7 +6159,7 @@ mod tests {
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         let json: serde_json::Value = serde_json::from_str(&body_str).unwrap();
 
-        assert_eq!(json["path"], "providers.models.groq.test");
+        assert_eq!(json["path"], "providers.models.openrouter.test");
         assert_eq!(json["context_window"], 4096);
         assert!(
             !body_str.contains("test-api-key-123"),
@@ -6169,14 +6168,5 @@ mod tests {
 
         let requests = mock.received_requests().await.unwrap();
         assert_eq!(requests.len(), 1, "expected exactly one request to mock");
-        assert_eq!(
-            requests[0]
-                .headers
-                .get("authorization")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            "Bearer test-api-key-123"
-        );
     }
 }

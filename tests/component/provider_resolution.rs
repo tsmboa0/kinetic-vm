@@ -30,63 +30,13 @@ fn factory_resolves_anthropic_provider() {
 }
 
 #[test]
-fn factory_resolves_deepseek_provider() {
-    assert_provider_ok("deepseek", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_mistral_provider() {
-    assert_provider_ok("mistral", Some("test-key"), None);
-}
-
-#[test]
 fn factory_resolves_ollama_provider() {
     assert_provider_ok("ollama", None, None);
-}
-
-#[test]
-fn factory_resolves_groq_provider() {
-    assert_provider_ok("groq", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_xai_provider() {
-    assert_provider_ok("xai", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_together_provider() {
-    assert_provider_ok("together", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_fireworks_provider() {
-    assert_provider_ok("fireworks", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_perplexity_provider() {
-    assert_provider_ok("perplexity", Some("test-key"), None);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Factory resolution: alias variants map to same model_provider
 // ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn factory_grok_alias_resolves_to_xai() {
-    assert_provider_ok("grok", Some("test-key"), None);
-}
-
-#[test]
-fn factory_kimi_alias_resolves_to_moonshot() {
-    assert_provider_ok("kimi", Some("test-key"), None);
-}
-
-#[test]
-fn factory_zhipu_alias_resolves_to_glm() {
-    assert_provider_ok("zhipu", Some("test-key"), None);
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Custom URL model_provider creation
@@ -211,17 +161,7 @@ fn factory_openai_with_custom_api_url() {
 
 #[test]
 fn convenience_factory_resolves_major_providers() {
-    for provider_name in &[
-        "openai",
-        "anthropic",
-        "deepseek",
-        "mistral",
-        "groq",
-        "xai",
-        "together",
-        "fireworks",
-        "perplexity",
-    ] {
+    for provider_name in &["openai", "anthropic", "gemini", "openrouter"] {
         let result = create_model_provider(provider_name, Some("test-key"));
         assert!(
             result.is_ok(),
@@ -256,21 +196,6 @@ fn factory_resolves_gemini_provider() {
 }
 
 #[test]
-fn factory_resolves_bedrock_provider() {
-    assert_provider_ok("bedrock", None, None);
-}
-
-#[test]
-fn factory_resolves_copilot_provider() {
-    assert_provider_ok("copilot", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_synthetic_provider() {
-    assert_provider_ok("synthetic", Some("test-key"), None);
-}
-
-#[test]
 fn factory_resolves_openai_codex_provider() {
     let options = zeroclaw::providers::ModelProviderRuntimeOptions::default();
     let result = create_model_provider_with_options("openai-codex", None, &options);
@@ -285,117 +210,17 @@ fn factory_resolves_openai_codex_provider() {
 // OpenAI-compatible ecosystem model_providers
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[test]
-fn factory_resolves_venice_provider() {
-    assert_provider_ok("venice", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_cohere_provider() {
-    assert_provider_ok("cohere", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_opencode_provider() {
-    assert_provider_ok("opencode", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_opencode_go_provider() {
-    assert_provider_ok("opencode-go", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_astrai_provider() {
-    assert_provider_ok("astrai", Some("test-key"), None);
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // China region model_providers
 // ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn factory_resolves_moonshot_provider() {
-    assert_provider_ok("moonshot", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_glm_provider() {
-    assert_provider_ok("glm", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_qwen_provider() {
-    assert_provider_ok("qwen", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_doubao_provider() {
-    assert_provider_ok("doubao", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_qianfan_provider() {
-    assert_provider_ok("qianfan", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_minimax_provider() {
-    assert_provider_ok("minimax", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_kimi_code_provider() {
-    assert_provider_ok("kimi-code", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_zai_provider() {
-    assert_provider_ok("zai", Some("test-key"), None);
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Local/self-hosted model_providers
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[test]
-fn factory_resolves_lmstudio_provider() {
-    assert_provider_ok("lmstudio", None, None);
-}
-
-#[test]
-fn factory_resolves_llamacpp_provider() {
-    assert_provider_ok("llamacpp", None, None);
-}
-
-#[test]
-fn factory_resolves_vllm_provider() {
-    assert_provider_ok("vllm", None, None);
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Cloud AI endpoints
 // ─────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn factory_resolves_vercel_provider() {
-    assert_provider_ok("vercel", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_cloudflare_provider() {
-    assert_provider_ok("cloudflare", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_nvidia_provider() {
-    assert_provider_ok("nvidia", Some("test-key"), None);
-}
-
-#[test]
-fn factory_resolves_ovhcloud_provider() {
-    assert_provider_ok("ovhcloud", Some("test-key"), None);
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Alias resolution tests
@@ -409,56 +234,6 @@ fn factory_google_alias_resolves_to_gemini() {
 #[test]
 fn factory_google_gemini_alias_resolves_to_gemini() {
     assert_provider_ok("google-gemini", Some("test-key"), None);
-}
-
-#[test]
-fn factory_aws_bedrock_alias_resolves_to_bedrock() {
-    assert_provider_ok("aws-bedrock", None, None);
-}
-
-#[test]
-fn factory_github_copilot_alias_resolves_to_copilot() {
-    assert_provider_ok("github-copilot", Some("test-key"), None);
-}
-
-#[test]
-fn factory_vercel_ai_alias_resolves_to_vercel() {
-    assert_provider_ok("vercel-ai", Some("test-key"), None);
-}
-
-#[test]
-fn factory_cloudflare_ai_alias_resolves_to_cloudflare() {
-    assert_provider_ok("cloudflare-ai", Some("test-key"), None);
-}
-
-#[test]
-fn factory_opencode_zen_alias_resolves_to_opencode() {
-    assert_provider_ok("opencode-zen", Some("test-key"), None);
-}
-
-#[test]
-fn factory_lm_studio_alias_resolves_to_lmstudio() {
-    assert_provider_ok("lm-studio", None, None);
-}
-
-#[test]
-fn factory_llama_cpp_alias_resolves_to_llamacpp() {
-    assert_provider_ok("llama.cpp", None, None);
-}
-
-#[test]
-fn factory_nvidia_nim_alias_resolves_to_nvidia() {
-    assert_provider_ok("nvidia-nim", Some("test-key"), None);
-}
-
-#[test]
-fn factory_build_nvidia_com_alias_resolves_to_nvidia() {
-    assert_provider_ok("build.nvidia.com", Some("test-key"), None);
-}
-
-#[test]
-fn factory_ovh_alias_resolves_to_ovhcloud() {
-    assert_provider_ok("ovh", Some("test-key"), None);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -601,14 +601,14 @@ mod tests {
         let config: Config = toml::from_str(
             r#"
 schema_version = 3
-[providers.models.llamacpp.forced_off]
+[providers.models.ollama.forced_off]
 model = "qwen3-4b"
 vision = false
 "#,
         )
         .expect("config parses");
         let multimodal = MultimodalConfig {
-            vision_model_provider: Some("llamacpp.forced_off".to_string()),
+            vision_model_provider: Some("ollama.forced_off".to_string()),
             ..Default::default()
         };
         let history = vec![ChatMessage::user("look [IMAGE:/tmp/x.png]".to_string())];
