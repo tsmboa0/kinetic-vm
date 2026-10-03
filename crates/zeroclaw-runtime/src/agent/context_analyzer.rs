@@ -58,7 +58,7 @@ fn tools_for_keyword(keyword: &str) -> &'static [&'static str] {
         }
         "browser" | "website" | "url" | "http" | "fetch" => &["web_fetch", "web_search_tool"],
         "image" | "screenshot" | "picture" => &["image_info"],
-        "git" | "commit" | "branch" | "push" | "pull" => &["git_operations", "shell"],
+        "git" | "commit" | "branch" | "push" | "pull" => &["shell"],
         _ => &[],
     }
 }

@@ -17,7 +17,7 @@ pub use schema::{
     EmbeddingRouteConfig, EstopConfig, GatewayConfig, GeminiCliConfig, GoogleSttConfig,
     GoogleWorkspaceAllowedOperation, GoogleWorkspaceConfig, HardwareConfig, HardwareTransport,
     HeartbeatConfig, HooksConfig, HttpRequestConfig, IMessageConfig, IdentityConfig,
-    ImageGenConfig, ImageProviderDalleConfig, ImageProviderFluxConfig, ImageProviderImagenConfig,
+    ImageProviderDalleConfig, ImageProviderFluxConfig, ImageProviderImagenConfig,
     ImageProviderStabilityConfig, JiraConfig, KnowledgeConfig, LarkConfig, LinkEnricherConfig,
     LinkedInConfig, LinkedInContentConfig, LinkedInImageConfig, LocalWhisperConfig, MatrixConfig,
     McpConfig, McpServerConfig, McpTransport, MediaPipelineConfig, MemoryConfig,

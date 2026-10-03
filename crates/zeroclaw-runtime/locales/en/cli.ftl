@@ -1412,7 +1412,6 @@ channel-approval-opt-reject-with-edit = Reject with edit
 peer-delivery-control-plane-unavailable = in-process peer delivery requires an available durable task store: {$error}
 peer-delivery-registration-failed = peer delivery rejected: {$error}
 peer-delivery-accepted = accepted for in-process delivery to peer agent "{$recipient}" (task_id={$task_id})
-tool-git-operations-error-docker-runtime-write-unsupported = Git write commands are unavailable with the Docker runtime because they cannot be confined to its container.
 
 # ── RPC inbound authentication ──
 rpc-auth-required-token = Authentication required: present auth_token in initialize, or connect from a mapped local uid

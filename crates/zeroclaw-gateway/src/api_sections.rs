@@ -1323,7 +1323,6 @@ mod tests {
                 "glob_search",
                 "content_search",
                 "image_info",
-                "git_operations",
             ]
         );
 

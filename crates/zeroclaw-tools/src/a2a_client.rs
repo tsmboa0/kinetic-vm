@@ -1,8 +1,8 @@
 //! A2A outbound client (caller role): the `a2a_*` tools that delegate tasks
 //! to remote A2A-compliant agents.
 //!
-//! Lives in `zeroclaw-tools` as a sibling to `channel_room` / `http_request` /
-//! `git_forge`, so runtime tool registration depends only on `zeroclaw-tools`
+//! Lives in `zeroclaw-tools` as a sibling to `channel_room` and `http_request`,
+//! so runtime tool registration depends only on `zeroclaw-tools`
 //! (the gateway stays the inbound/server edge). The A2A wire types are shared
 //! with the inbound surface via [`zeroclaw_api::a2a_wire`].
 //!

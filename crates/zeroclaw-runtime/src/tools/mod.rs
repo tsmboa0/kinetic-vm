@@ -59,7 +59,6 @@ pub use zeroclaw_tools::codex_cli::CodexCliTool;
 pub use zeroclaw_tools::composio::ComposioTool;
 pub use zeroclaw_tools::content_search::ContentSearchTool;
 pub use zeroclaw_tools::data_management::DataManagementTool;
-pub use zeroclaw_tools::discord_search::DiscordSearchTool;
 pub use zeroclaw_tools::email_read::EmailReadTool;
 pub use zeroclaw_tools::email_search::EmailSearchTool;
 pub use zeroclaw_tools::escalate::EscalateToHumanTool;
@@ -69,15 +68,12 @@ pub use zeroclaw_tools::file_upload::FileUploadTool;
 pub use zeroclaw_tools::file_upload_bundle::FileUploadBundleTool;
 pub use zeroclaw_tools::file_write::FileWriteTool;
 pub use zeroclaw_tools::gemini_cli::GeminiCliTool;
-pub use zeroclaw_tools::git_forge::GitForgeTool;
-pub use zeroclaw_tools::git_operations::{GitCommandBoundary, GitOperationsTool};
 pub use zeroclaw_tools::glob_search::GlobSearchTool;
 pub use zeroclaw_tools::google_workspace::GoogleWorkspaceTool;
 pub use zeroclaw_tools::hardware_board_info::HardwareBoardInfoTool;
 pub use zeroclaw_tools::hardware_memory_map::HardwareMemoryMapTool;
 pub use zeroclaw_tools::hardware_memory_read::HardwareMemoryReadTool;
 pub use zeroclaw_tools::http_request::HttpRequestTool;
-pub use zeroclaw_tools::image_gen::ImageGenTool;
 pub use zeroclaw_tools::image_info::ImageInfoTool;
 pub use zeroclaw_tools::jira_tool::JiraTool;
 pub use zeroclaw_tools::knowledge_tool::KnowledgeTool;
@@ -105,7 +101,6 @@ pub use zeroclaw_tools::pipeline::PipelineTool;
 pub use zeroclaw_tools::poll::PollTool;
 pub use zeroclaw_tools::project_intel::ProjectIntelTool;
 pub use zeroclaw_tools::proxy_config::ProxyConfigTool;
-pub use zeroclaw_tools::pushover::PushoverTool;
 pub use zeroclaw_tools::reaction::ReactionTool;
 pub use zeroclaw_tools::report_template_tool::ReportTemplateTool;
 pub use zeroclaw_tools::screenshot::ScreenshotTool;
@@ -118,7 +113,6 @@ pub use zeroclaw_tools::sessions::{
 };
 pub use zeroclaw_tools::text_browser::TextBrowserTool;
 pub use zeroclaw_tools::tool_search::ToolSearchTool;
-pub use zeroclaw_tools::weather_tool::WeatherTool;
 pub use zeroclaw_tools::web_fetch::WebFetchTool;
 pub use zeroclaw_tools::web_search_tool::WebSearchTool;
 pub use zeroclaw_tools::wrappers::{PathGuardedTool, RateLimitedTool};
@@ -701,26 +695,6 @@ fn filter_agent_peer_groups(
 struct RuntimeShellAssembly {
     shell_tool: ShellTool,
     sandbox: Arc<dyn Sandbox>,
-}
-
-/// Adapts the runtime's canonical per-agent sandbox to the Git tool without
-/// making the lower-level tools crate depend on the runtime crate.
-struct RuntimeGitCommandBoundary {
-    sandbox: Arc<dyn Sandbox>,
-    runtime_kind: zeroclaw_config::schema::RuntimeKind,
-}
-
-impl GitCommandBoundary for RuntimeGitCommandBoundary {
-    fn wrap_command(&self, command: &mut std::process::Command) -> anyhow::Result<()> {
-        if self.runtime_kind == zeroclaw_config::schema::RuntimeKind::Docker {
-            anyhow::bail!(crate::i18n::get_required_cli_string(
-                "tool-git-operations-error-docker-runtime-write-unsupported"
-            ));
-        }
-        self.sandbox
-            .wrap_command(command)
-            .map_err(anyhow::Error::from)
-    }
 }
 
 /// Pair the canonical runtime kind with one shared sandbox instance for every
@@ -1430,19 +1404,7 @@ fn all_tools_with_runtime_on_thread(
         )),
         Arc::new(ModelSwitchTool::new(security.clone(), config.clone())),
         Arc::new(ProxyConfigTool::new(config.clone(), security.clone())),
-        Arc::new(GitOperationsTool::new_with_command_boundary(
-            security.clone(),
-            Arc::new(RuntimeGitCommandBoundary {
-                sandbox: sandbox.clone(),
-                runtime_kind: root_config.runtime.kind,
-            }),
-        )),
-        Arc::new(PushoverTool::new(
-            security.clone(),
-            workspace_dir.to_path_buf(),
-        )),
         Arc::new(CalculatorTool::new()),
-        Arc::new(WeatherTool::new()),
         Arc::new(CanvasTool::new(canvas_store.unwrap_or_default())),
         Arc::new(TodoWriteTool::new()),
     ];
@@ -1452,27 +1414,6 @@ fn all_tools_with_runtime_on_thread(
     // model out from under the parent (the switch signal is process-wide).
     if is_subagent_caller {
         tool_arcs.retain(|tool| tool.name() != ModelSwitchTool::NAME);
-    }
-
-    // Register discord_search if any configured Discord alias has
-    // archive enabled. Multiple Discord aliases are supported (one per
-    // bot/server set); the search tool reads from a shared archive DB
-    // so it's enabled when at least one alias archives.
-    if root_config.channels.discord.values().any(|d| d.archive) {
-        match zeroclaw_memory::SqliteMemory::new_named("sqlite", &config.data_dir, "discord") {
-            Ok(discord_mem) => {
-                tool_arcs.push(Arc::new(DiscordSearchTool::new(Arc::new(discord_mem))));
-            }
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                    "discord_search: failed to open discord.db"
-                );
-            }
-        }
     }
 
     // email_search — registered when at least one email channel is enabled
@@ -2068,29 +2009,6 @@ fn all_tools_with_runtime_on_thread(
         )));
     }
 
-    // Standalone image generation tool (config-gated)
-    if root_config.image_gen.enabled {
-        match ImageGenTool::new_with_persistence(
-            security.clone(),
-            workspace_dir.to_path_buf(),
-            root_config.image_gen.default_model.clone(),
-            root_config.image_gen.api_key_env.clone(),
-            persistent_writes,
-            root_config.security.nat64_prefixes.clone(),
-        ) {
-            Ok(tool) => tool_arcs.push(Arc::new(tool)),
-            Err(e) => {
-                ::zeroclaw_log::record!(
-                    WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
-                    "image_gen: failed to construct tool, skipping registration"
-                );
-            }
-        }
-    }
-
     // File upload tool — enabled iff [file_upload].url is set
     if root_config
         .file_upload
@@ -2209,12 +2127,6 @@ fn all_tools_with_runtime_on_thread(
     let reaction_handle: PerToolChannelHandle = Arc::new(RwLock::new(HashMap::new()));
     let reaction_tool = ReactionTool::new(security.clone(), Arc::clone(&reaction_handle));
     tool_arcs.push(Arc::new(reaction_tool));
-
-    // Unified forge operations tool, routes through the git channel via the
-    // same late-bound channel map as the reaction tool. Resource/action grid
-    // plus a raw catch-all over the channel's single forge_request transport.
-    let git_forge_tool = GitForgeTool::new(security.clone(), Arc::clone(&reaction_handle));
-    tool_arcs.push(Arc::new(git_forge_tool));
 
     // Channel room-management tool — always registered; owns its own late-bound channel map.
     let channel_room_tool_handle: PerToolChannelHandle = Arc::new(RwLock::new(HashMap::new()));
@@ -2662,202 +2574,6 @@ mod tests {
         ApprovalGroupConfig, ApprovalPolicyConfig, BrowserConfig, Config, FileDownloadConfig,
         MemoryConfig, SopApprovalConfig,
     };
-
-    #[test]
-    fn git_write_boundary_rejects_docker_runtime_writes() {
-        const KEY: &str = "tool-git-operations-error-docker-runtime-write-unsupported";
-        const ENGLISH: &str = "Git write commands are unavailable with the Docker runtime because they cannot be confined to its container.";
-        let boundary = RuntimeGitCommandBoundary {
-            sandbox: Arc::new(crate::security::NoopSandbox),
-            runtime_kind: zeroclaw_config::schema::RuntimeKind::Docker,
-        };
-        let mut command = std::process::Command::new("git");
-
-        let error = boundary.wrap_command(&mut command).unwrap_err();
-        let expected_error = crate::i18n::get_required_cli_string(KEY);
-
-        assert_eq!(
-            error.to_string(),
-            expected_error,
-            "Docker runtime must return its localized Git-write rejection"
-        );
-        assert_ne!(
-            expected_error,
-            format!("{{{KEY}}}"),
-            "Docker runtime must not expose the missing-localization sentinel"
-        );
-        assert_eq!(
-            crate::i18n::get_english_cli_string_with_args(KEY, &[]),
-            ENGLISH,
-            "the English diagnostic contract must remain stable"
-        );
-        assert_eq!(command.get_program(), "git");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn registry_rejects_docker_git_writes_before_hook_execution() {
-        use std::os::unix::fs::PermissionsExt;
-
-        const KEY: &str = "tool-git-operations-error-docker-runtime-write-unsupported";
-
-        let tmp = TempDir::new().unwrap();
-        let repository = tmp.path().join("repository");
-        std::fs::create_dir_all(&repository).unwrap();
-        let run_git = |args: &[&str]| {
-            let status = std::process::Command::new("git")
-                .args(["-C", repository.to_str().unwrap()])
-                .args(args)
-                .status()
-                .unwrap();
-            assert!(status.success(), "test setup git {args:?} failed");
-        };
-        run_git(&["init"]);
-        run_git(&["config", "user.name", "ZeroClaw Test"]);
-        run_git(&["config", "user.email", "test@example.invalid"]);
-        run_git(&["config", "commit.gpgsign", "false"]);
-        run_git(&["config", "tag.gpgsign", "false"]);
-        std::fs::write(repository.join("tracked.txt"), "initial\n").unwrap();
-        run_git(&["add", "tracked.txt"]);
-        run_git(&["commit", "-m", "initial"]);
-        run_git(&["branch", "target"]);
-
-        let marker = tmp.path().join("host-hook-ran");
-        let hook = repository.join(".git/hooks/post-checkout");
-        run_git(&[
-            "config",
-            "core.hooksPath",
-            hook.parent().unwrap().to_str().unwrap(),
-        ]);
-        std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
-        let mut permissions = std::fs::metadata(&hook).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&hook, permissions).unwrap();
-
-        let filter_marker = tmp.path().join("host-filter-ran");
-        let filter = tmp.path().join("clean-filter");
-        std::fs::write(
-            &filter,
-            format!("#!/bin/sh\ntouch {}\ncat\n", filter_marker.display()),
-        )
-        .unwrap();
-        let mut filter_permissions = std::fs::metadata(&filter).unwrap().permissions();
-        filter_permissions.set_mode(0o755);
-        std::fs::set_permissions(&filter, filter_permissions).unwrap();
-        run_git(&["config", "filter.marker.clean", filter.to_str().unwrap()]);
-        std::fs::write(
-            repository.join(".gitattributes"),
-            "filtered.txt filter=marker\n",
-        )
-        .unwrap();
-        std::fs::write(repository.join("filtered.txt"), "filtered\n").unwrap();
-
-        let security = Arc::new(SecurityPolicy {
-            autonomy: crate::security::AutonomyLevel::Full,
-            workspace_dir: repository.clone(),
-            ..SecurityPolicy::default()
-        });
-        let mem_cfg = MemoryConfig {
-            backend: "markdown".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-        let mut cfg = test_config(&tmp);
-        cfg.runtime.kind = zeroclaw_config::schema::RuntimeKind::Docker;
-        let risk = zeroclaw_config::schema::RiskProfileConfig {
-            sandbox_enabled: Some(true),
-            sandbox_backend: Some("docker".to_string()),
-            ..zeroclaw_config::schema::RiskProfileConfig::default()
-        };
-        let tools = all_tools_with_runtime(
-            Arc::new(cfg.clone()),
-            &security,
-            &risk,
-            "test-agent",
-            Arc::new(zeroclaw_config::platform::DockerRuntime::new(
-                cfg.runtime.docker.clone(),
-            )),
-            mem,
-            None,
-            None,
-            &BrowserConfig::default(),
-            &zeroclaw_config::schema::HttpRequestConfig::default(),
-            &zeroclaw_config::schema::WebFetchConfig::default(),
-            repository.as_path(),
-            &HashMap::new(),
-            None,
-            &cfg,
-            None,
-            false,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("production registry must build")
-        .tools;
-        let git_operations = tools
-            .iter()
-            .find(|tool| tool.name() == "git_operations")
-            .expect("production registry must install git_operations");
-        let expected_error = crate::i18n::get_required_cli_string(KEY);
-        assert_ne!(
-            expected_error,
-            format!("{{{KEY}}}"),
-            "Docker runtime must not expose the missing-localization sentinel"
-        );
-        let expected_checkout_error = format!("Checkout failed: {expected_error}");
-        let expected_add_error = format!("Add failed: {expected_error}");
-
-        let result = git_operations
-            .execute(serde_json::json!({
-                "operation": "checkout",
-                "branch": "target",
-                "path": repository,
-            }))
-            .await
-            .expect("git_operations must report a structured tool result");
-
-        assert!(!result.success, "Docker Git write must be rejected");
-        assert_eq!(
-            result.error.as_deref(),
-            Some(expected_checkout_error.as_str())
-        );
-        assert!(
-            !marker.exists(),
-            "Docker registry wiring must reject before host Git can execute a repository hook"
-        );
-
-        let result = git_operations
-            .execute(serde_json::json!({
-                "operation": "add",
-                "paths": "filtered.txt",
-                "path": repository,
-            }))
-            .await
-            .expect("git_operations must report a structured tool result");
-
-        assert!(!result.success, "Docker Git write must be rejected");
-        assert_eq!(result.error.as_deref(), Some(expected_add_error.as_str()));
-        assert!(
-            !filter_marker.exists(),
-            "Docker registry wiring must reject before host Git can execute a clean filter"
-        );
-    }
-
-    #[test]
-    fn git_write_boundary_preserves_native_none_mode() {
-        let boundary = RuntimeGitCommandBoundary {
-            sandbox: Arc::new(crate::security::NoopSandbox),
-            runtime_kind: zeroclaw_config::schema::RuntimeKind::Native,
-        };
-        let mut command = std::process::Command::new("git");
-
-        boundary.wrap_command(&mut command).unwrap();
-
-        assert_eq!(command.get_program(), "git");
-    }
 
     #[tokio::test]
     async fn mcp_capability_tools_respect_policy() {
@@ -4474,17 +4190,8 @@ permissions = ["http_client"]
         let web = zeroclaw_config::schema::WebFetchConfig::default();
         let risk = zeroclaw_config::schema::RiskProfileConfig::default();
 
-        // root_config: shared data_dir + a Discord alias that archives (this is
-        // what gates discord_search registration).
         let mut root_config = test_config(&tmp);
         root_config.data_dir = data_dir.clone();
-        root_config.channels.discord.insert(
-            "oracle".to_string(),
-            zeroclaw_config::schema::DiscordConfig {
-                archive: true,
-                ..Default::default()
-            },
-        );
 
         // `config` (arg 1) carries the canonical shared data_dir — exactly how
         // the production callers pass it (a clone of the runtime config).
@@ -4521,21 +4228,12 @@ permissions = ["http_client"]
 
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(
-            names.contains(&"discord_search"),
-            "discord_search must register when a Discord alias archives"
-        );
-        assert!(
             names.iter().any(|n| n.starts_with("sessions")),
             "session tools must register"
         );
 
-        // The fix: both stores open under the shared data_dir, never the
-        // per-agent workspace. Pre-fix the readers created `memory/discord.db`
-        // and `sessions/sessions.db` under the workspace_dir.
-        assert!(
-            !workspace_dir.join("memory").exists(),
-            "discord_search must not open/create a store under the per-agent workspace_dir"
-        );
+        // The session store opens under the shared data_dir, never the
+        // per-agent workspace.
         assert!(
             !workspace_dir.join("sessions").exists(),
             "session tools must not open/create a store under the per-agent workspace_dir"
@@ -4916,7 +4614,6 @@ permissions = ["http_client"]
         assert!(!names.contains(&"browser"));
         assert!(names.contains(&"schedule"));
         assert!(names.contains(&"model_routing_config"));
-        assert!(names.contains(&"pushover"));
         assert!(names.contains(&"proxy_config"));
     }
 
@@ -5024,7 +4721,6 @@ permissions = ["http_client"]
         );
         assert!(names.contains(&"content_search"));
         assert!(names.contains(&"model_routing_config"));
-        assert!(names.contains(&"pushover"));
         assert!(names.contains(&"proxy_config"));
     }
 
