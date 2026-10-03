@@ -2182,7 +2182,6 @@ impl Agent {
             None,
             None,
             None,
-            None,
         )
         .await
     }
@@ -2196,7 +2195,6 @@ impl Agent {
         acp_delivery: bool,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
         sop_audit: Option<Arc<SopAuditLogger>>,
-        canvas_store: Option<tools::CanvasStore>,
     ) -> Result<Self> {
         Self::from_config_with_session_cwd_and_mcp_backchannel_with_capability(
             config,
@@ -2207,7 +2205,6 @@ impl Agent {
             acp_delivery,
             sop_engine,
             sop_audit,
-            canvas_store,
             None,
         )
         .await
@@ -2222,7 +2219,6 @@ impl Agent {
         acp_delivery: bool,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
         sop_audit: Option<Arc<SopAuditLogger>>,
-        canvas_store: Option<tools::CanvasStore>,
         execution_capability: Option<AgentExecutionCapability>,
     ) -> Result<Self> {
         Self::from_config_with_session_cwd_and_mcp_approval_mode(
@@ -2236,7 +2232,6 @@ impl Agent {
             None,
             sop_engine,
             sop_audit,
-            canvas_store,
             None,
             None,
             None,
@@ -2255,7 +2250,6 @@ impl Agent {
         acp_delivery: bool,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
         sop_audit: Option<Arc<SopAuditLogger>>,
-        canvas_store: Option<tools::CanvasStore>,
         acp_session_store: Arc<zeroclaw_infra::acp_session_store::AcpSessionStore>,
     ) -> Result<Self> {
         Self::from_config_with_session_cwd_and_mcp_approval_mode(
@@ -2269,7 +2263,6 @@ impl Agent {
             None,
             sop_engine,
             sop_audit,
-            canvas_store,
             Some(acp_session_store),
             None,
             None,
@@ -2291,7 +2284,6 @@ impl Agent {
         acp_delivery: bool,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
         sop_audit: Option<Arc<SopAuditLogger>>,
-        canvas_store: Option<tools::CanvasStore>,
     ) -> Result<Self> {
         Self::from_live_config_with_session_cwd_and_mcp_backchannel_with_capability(
             live_config,
@@ -2302,7 +2294,6 @@ impl Agent {
             acp_delivery,
             sop_engine,
             sop_audit,
-            canvas_store,
             None,
         )
         .await
@@ -2317,7 +2308,6 @@ impl Agent {
         acp_delivery: bool,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
         sop_audit: Option<Arc<SopAuditLogger>>,
-        canvas_store: Option<tools::CanvasStore>,
         execution_capability: Option<AgentExecutionCapability>,
     ) -> Result<Self> {
         let config = live_config.read().clone();
@@ -2332,7 +2322,6 @@ impl Agent {
             None,
             sop_engine,
             sop_audit,
-            canvas_store,
             None,
             Some(live_config),
             None,
@@ -2353,7 +2342,6 @@ impl Agent {
         acp_delivery: bool,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
         sop_audit: Option<Arc<SopAuditLogger>>,
-        canvas_store: Option<tools::CanvasStore>,
     ) -> Result<Self> {
         Self::from_pinned_live_config_with_session_cwd_and_mcp_backchannel(
             live_config,
@@ -2364,7 +2352,6 @@ impl Agent {
             acp_delivery,
             sop_engine,
             sop_audit,
-            canvas_store,
         )
         .await
     }
@@ -2378,7 +2365,6 @@ impl Agent {
         acp_delivery: bool,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
         sop_audit: Option<Arc<SopAuditLogger>>,
-        canvas_store: Option<tools::CanvasStore>,
         acp_session_store: Arc<zeroclaw_infra::acp_session_store::AcpSessionStore>,
     ) -> Result<Self> {
         Self::from_live_config_with_session_cwd_and_mcp_backchannel_and_acp_sessions_with_capability(
@@ -2390,7 +2376,6 @@ impl Agent {
             acp_delivery,
             sop_engine,
             sop_audit,
-            canvas_store,
             acp_session_store,
             None,
         )
@@ -2407,7 +2392,6 @@ impl Agent {
         acp_delivery: bool,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
         sop_audit: Option<Arc<SopAuditLogger>>,
-        canvas_store: Option<tools::CanvasStore>,
         acp_session_store: Arc<zeroclaw_infra::acp_session_store::AcpSessionStore>,
         execution_capability: Option<AgentExecutionCapability>,
     ) -> Result<Self> {
@@ -2423,7 +2407,6 @@ impl Agent {
             None,
             sop_engine,
             sop_audit,
-            canvas_store,
             Some(acp_session_store),
             Some(live_config),
             None,
@@ -2484,7 +2467,6 @@ impl Agent {
             tui_env,
             sop_engine,
             sop_audit,
-            None,
             None,
             None,
             None,
@@ -2626,7 +2608,6 @@ impl Agent {
                 tui_env,
                 sop_engine,
                 sop_audit,
-                None,
                 acp_session_store,
                 Some(Arc::clone(&live_config)),
                 Some(live_config),
@@ -2652,7 +2633,6 @@ impl Agent {
         tui_env: Option<std::collections::HashMap<String, String>>,
         sop_engine: Option<Arc<std::sync::Mutex<SopEngine>>>,
         sop_audit: Option<Arc<SopAuditLogger>>,
-        canvas_store: Option<tools::CanvasStore>,
         acp_session_store: Option<Arc<zeroclaw_infra::acp_session_store::AcpSessionStore>>,
         live_config: Option<Arc<parking_lot::RwLock<Config>>>,
         live_model_config: Option<Arc<parking_lot::RwLock<Config>>>,
@@ -2788,7 +2768,6 @@ impl Agent {
             &config.agents,
             agent_model_provider.and_then(|e| e.api_key.as_deref()),
             config,
-            canvas_store,
             false,
             tui_env.clone(),
             sop_engine,
@@ -9486,7 +9465,6 @@ mod tests {
             true,
             None,
             None,
-            None,
             Arc::clone(&store),
         )
         .await
@@ -9500,7 +9478,6 @@ mod tests {
             false,
             true,
             true,
-            None,
             None,
             None,
             Arc::clone(&store),
@@ -16641,7 +16618,6 @@ model_provider = "custom.only"
             false,
             None,
             None,
-            None,
         )
         .await
         .expect("direct Agent construction");
@@ -16696,7 +16672,6 @@ model_provider = "custom.only"
             false,
             true,
             false,
-            None,
             None,
             None,
         )

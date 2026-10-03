@@ -2985,7 +2985,6 @@ pub(crate) async fn assemble_owned_execution_with_admission(
         &config.agents,
         resolved_key.as_deref(),
         config,
-        None,
         false,
         None,
         Some(sop_engine),

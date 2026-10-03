@@ -1593,7 +1593,6 @@ mod tests {
             )),
             device_registry: None,
             pending_pairings: None,
-            canvas_store: zeroclaw_runtime::tools::CanvasStore::new(),
             #[cfg(feature = "webauthn")]
             webauthn: None,
             cancel_tokens: std::sync::Arc::new(std::sync::Mutex::new(

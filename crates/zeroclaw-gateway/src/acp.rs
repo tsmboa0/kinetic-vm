@@ -81,7 +81,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, default_agent: Option
             );
         })
         .ok();
-    let canvas_store = state.canvas_store.clone();
     let server = if let Some(store) = store {
         Arc::new(
             AcpServer::new_with_live_config_and_writer_and_store(
@@ -91,7 +90,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, default_agent: Option
                 output_tx,
                 store,
             )
-            .with_canvas_store(canvas_store)
             .with_sop_engine(state.sop_engine.clone(), state.sop_audit.clone())
             .with_connection_default_agent(default_agent),
         )
@@ -103,7 +101,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, default_agent: Option
                 acp_config,
                 output_tx,
             )
-            .with_canvas_store(canvas_store)
             .with_sop_engine(state.sop_engine.clone(), state.sop_audit.clone())
             .with_connection_default_agent(default_agent),
         )
@@ -299,7 +296,6 @@ mod tests {
             cfg,
             None,
             Some(reload_controls),
-            None,
             None,
             None,
             None,

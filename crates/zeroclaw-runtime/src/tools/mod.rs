@@ -42,8 +42,6 @@ pub use zeroclaw_tools::ask_user::AskUserTool;
 pub use zeroclaw_tools::ask_user::ChannelMapHandle;
 pub use zeroclaw_tools::backup_tool::BackupTool;
 pub use zeroclaw_tools::calculator::CalculatorTool;
-pub use zeroclaw_tools::canvas::{ALLOWED_CONTENT_TYPES, MAX_CONTENT_SIZE};
-pub use zeroclaw_tools::canvas::{CanvasStore, CanvasTool};
 pub use zeroclaw_tools::channel_room::ChannelRoomTool;
 pub use zeroclaw_tools::cli_discovery::{DiscoveredCli, discover_cli_tools};
 pub use zeroclaw_tools::content_search::ContentSearchTool;
@@ -613,7 +611,6 @@ pub fn all_tools(
     agents: &HashMap<String, AliasedAgentConfig>,
     fallback_api_key: Option<&str>,
     root_config: &zeroclaw_config::schema::Config,
-    canvas_store: Option<CanvasStore>,
     is_subagent_caller: bool,
     tui_env: Option<HashMap<String, String>>,
 ) -> anyhow::Result<AllToolsResult> {
@@ -631,7 +628,6 @@ pub fn all_tools(
         agents,
         fallback_api_key,
         root_config,
-        canvas_store,
         is_subagent_caller,
         tui_env,
         None,
@@ -965,7 +961,6 @@ pub fn all_tools_with_runtime(
     agents: &HashMap<String, AliasedAgentConfig>,
     fallback_api_key: Option<&str>,
     root_config: &zeroclaw_config::schema::Config,
-    canvas_store: Option<CanvasStore>,
     is_subagent_caller: bool,
     tui_env: Option<HashMap<String, String>>,
     sop_engine: Option<Arc<Mutex<SopEngine>>>,
@@ -985,7 +980,6 @@ pub fn all_tools_with_runtime(
         agents,
         fallback_api_key,
         root_config,
-        canvas_store,
         is_subagent_caller,
         tui_env.map(Arc::new),
         sop_engine,
@@ -1014,7 +1008,6 @@ pub(crate) fn all_tools_with_runtime_context(
     agents: &HashMap<String, AliasedAgentConfig>,
     fallback_api_key: Option<&str>,
     root_config: &zeroclaw_config::schema::Config,
-    canvas_store: Option<CanvasStore>,
     is_subagent_caller: bool,
     tui_env: Option<ForwardedEnvironment>,
     sop_engine: Option<Arc<Mutex<SopEngine>>>,
@@ -1048,7 +1041,6 @@ pub(crate) fn all_tools_with_runtime_context(
             agents,
             fallback_api_key,
             root_config,
-            canvas_store,
             is_subagent_caller,
             tui_env,
             sop_engine,
@@ -1097,7 +1089,6 @@ pub fn all_tools_with_runtime_and_acp_sessions(
     agents: &HashMap<String, AliasedAgentConfig>,
     fallback_api_key: Option<&str>,
     root_config: &zeroclaw_config::schema::Config,
-    canvas_store: Option<CanvasStore>,
     is_subagent_caller: bool,
     tui_env: Option<ForwardedEnvironment>,
     sop_engine: Option<Arc<Mutex<SopEngine>>>,
@@ -1121,7 +1112,6 @@ pub fn all_tools_with_runtime_and_acp_sessions(
         agents,
         fallback_api_key,
         root_config,
-        canvas_store,
         is_subagent_caller,
         tui_env,
         sop_engine,
@@ -1152,7 +1142,6 @@ pub fn all_tools_with_runtime_and_execution_capability(
     agents: &HashMap<String, AliasedAgentConfig>,
     fallback_api_key: Option<&str>,
     root_config: &zeroclaw_config::schema::Config,
-    canvas_store: Option<CanvasStore>,
     is_subagent_caller: bool,
     tui_env: Option<HashMap<String, String>>,
     sop_engine: Option<Arc<Mutex<SopEngine>>>,
@@ -1173,7 +1162,6 @@ pub fn all_tools_with_runtime_and_execution_capability(
         agents,
         fallback_api_key,
         root_config,
-        canvas_store,
         is_subagent_caller,
         tui_env.map(Arc::new),
         sop_engine,
@@ -1203,7 +1191,6 @@ fn all_tools_with_runtime_on_thread(
     agents: &HashMap<String, AliasedAgentConfig>,
     fallback_api_key: Option<&str>,
     root_config: &zeroclaw_config::schema::Config,
-    canvas_store: Option<CanvasStore>,
     is_subagent_caller: bool,
     tui_env: Option<ForwardedEnvironment>,
     sop_engine: Option<Arc<Mutex<SopEngine>>>,
@@ -1326,7 +1313,6 @@ fn all_tools_with_runtime_on_thread(
         Arc::new(ModelSwitchTool::new(security.clone(), config.clone())),
         Arc::new(ProxyConfigTool::new(config.clone(), security.clone())),
         Arc::new(CalculatorTool::new()),
-        Arc::new(CanvasTool::new(canvas_store.unwrap_or_default())),
         Arc::new(TodoWriteTool::new()),
     ];
 
@@ -2910,7 +2896,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
         )
@@ -2967,7 +2952,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
         )
@@ -3021,7 +3005,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
             None,
@@ -3074,7 +3057,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
             Some(engine),
@@ -3136,7 +3118,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
             Some(engine),
@@ -3190,7 +3171,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
             Some(shared_engine.clone()),
@@ -3211,7 +3191,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
             Some(shared_engine.clone()),
@@ -3335,7 +3314,6 @@ permissions = ["http_client"]
                 &HashMap::new(),
                 None,
                 &cfg,
-                None,
                 false,
                 None,
                 Some(shared_engine.clone()),
@@ -3419,7 +3397,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &root_config,
-            None,
             false,
             None,
             None,
@@ -3507,7 +3484,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &root_config,
-            None,
             false,
             None,
             None,
@@ -3793,7 +3769,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
         )
@@ -3841,7 +3816,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
         )
@@ -3880,7 +3854,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
         )
@@ -3926,7 +3899,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
         )
@@ -3966,7 +3938,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
         )
@@ -4023,7 +3994,6 @@ permissions = ["http_client"]
                 &HashMap::new(),
                 None,
                 &cfg,
-                None,
                 false,
                 None,
                 Some(sop_engine),
@@ -4181,7 +4151,6 @@ permissions = ["http_client"]
             &agents,
             Some("delegate-test-credential"),
             &cfg,
-            None,
             false,
             None,
         )
@@ -4217,7 +4186,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
         )
@@ -4255,7 +4223,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
         )
@@ -4292,7 +4259,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
         )
@@ -4324,7 +4290,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             is_subagent_caller,
             None,
         )
@@ -4378,7 +4343,6 @@ permissions = ["http_client"]
                 &HashMap::new(),
                 None,
                 &cfg,
-                None,
                 false,
                 None,
             )
@@ -4451,7 +4415,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
         )
@@ -4511,7 +4474,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
         )
@@ -4554,7 +4516,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &cfg,
-            None,
             false,
             None,
         )
@@ -4649,7 +4610,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &config,
-            None,
             false,
             None,
             None,
@@ -4729,7 +4689,6 @@ permissions = ["http_client"]
             &HashMap::new(),
             None,
             &root_config,
-            None,
             false,
             None,
             None,

@@ -1293,7 +1293,6 @@ impl DelegateTool {
             &config.agents,
             target_api_key,
             config,
-            None,
             false,
             None,
             None,

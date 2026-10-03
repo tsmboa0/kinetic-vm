@@ -8103,7 +8103,6 @@ const MATRIX_REQUIRED_SAFE_TOOL_ARGUMENTS: &[(&[&str], &[&str])] = &[
     (&["http_request"], &["method"]),
     (&["web_search_tool"], &["query"]),
     (&["image_info"], &["path"]),
-    (&["canvas"], &["action"]),
     (&["backup"], &[]),
     (
         &[
@@ -14161,7 +14160,6 @@ fn hydrate_session_transcript(
 /// Start all configured channels and route messages to the agent
 pub async fn start_channels(
     config: Config,
-    canvas_store: Option<zeroclaw_runtime::tools::CanvasStore>,
     cancel: tokio_util::sync::CancellationToken,
     sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
     sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
@@ -14170,7 +14168,6 @@ pub async fn start_channels(
     let authority = zeroclaw_runtime::LiveConfigAuthority::new_owned(config)?;
     start_channels_with_authority(
         authority,
-        canvas_store,
         cancel,
         sop_engine,
         sop_audit,
@@ -14184,7 +14181,6 @@ pub async fn start_channels(
 #[allow(clippy::too_many_lines)]
 pub async fn start_channels_with_authority(
     authority: zeroclaw_runtime::LiveConfigAuthority,
-    canvas_store: Option<zeroclaw_runtime::tools::CanvasStore>,
     cancel: tokio_util::sync::CancellationToken,
     sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
     sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
@@ -14192,7 +14188,6 @@ pub async fn start_channels_with_authority(
 ) -> Result<()> {
     Box::pin(start_channels_with_authority_and_plugin_webhooks(
         authority,
-        canvas_store,
         cancel,
         sop_engine,
         sop_audit,
@@ -14207,7 +14202,6 @@ pub async fn start_channels_with_authority(
 #[allow(clippy::too_many_lines)]
 pub async fn start_channels_with_plugin_webhooks(
     config: Config,
-    canvas_store: Option<zeroclaw_runtime::tools::CanvasStore>,
     cancel: tokio_util::sync::CancellationToken,
     sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
     sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
@@ -14220,7 +14214,6 @@ pub async fn start_channels_with_plugin_webhooks(
     let authority = zeroclaw_runtime::LiveConfigAuthority::new_owned(config)?;
     start_channels_with_authority_and_plugin_webhooks(
         authority,
-        canvas_store,
         cancel,
         sop_engine,
         sop_audit,
@@ -14248,7 +14241,6 @@ tokio::task_local! {
 #[allow(clippy::too_many_lines)]
 pub async fn start_channels_with_authority_and_plugin_webhooks(
     authority: zeroclaw_runtime::LiveConfigAuthority,
-    canvas_store: Option<zeroclaw_runtime::tools::CanvasStore>,
     cancel: tokio_util::sync::CancellationToken,
     sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
     sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
@@ -14421,7 +14413,6 @@ pub async fn start_channels_with_authority_and_plugin_webhooks(
             &config.agents,
             provider_api_key.as_deref(),
             &config,
-            canvas_store.clone(),
             false,
             None,
             sop_engine.clone(),
@@ -17432,7 +17423,6 @@ pub(crate) mod tests {
             &HashMap::new(),
             None,
             config.as_ref(),
-            None,
             false,
             None,
         )
@@ -18553,7 +18543,6 @@ temperature = 0.3
                         scoped_probe,
                         Box::pin(start_channels_with_authority(
                             startup_authority,
-                            None,
                             startup_cancel,
                             None,
                             None,

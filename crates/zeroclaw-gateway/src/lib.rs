@@ -26,7 +26,6 @@ pub mod api_upload;
 #[cfg(feature = "webauthn")]
 pub mod api_webauthn;
 pub mod auth_rate_limit;
-pub mod canvas;
 pub mod node_tool;
 pub mod nodes;
 pub mod openapi;
@@ -131,7 +130,6 @@ use zeroclaw_runtime::security::pairing::{
     gateway_admin_token_path, is_public_bind,
 };
 use zeroclaw_runtime::tools;
-use zeroclaw_runtime::tools::CanvasStore;
 use zeroclaw_runtime::tools::scoped;
 
 /// Maximum request body size (64KB) — prevents memory exhaustion
@@ -680,8 +678,6 @@ pub struct AppState {
     pub device_registry: Option<Arc<api_pairing::DeviceRegistry>>,
     /// Pending pairing request store
     pub pending_pairings: Option<Arc<api_pairing::PairingStore>>,
-    /// Shared canvas store for Live Canvas (A2UI) system
-    pub canvas_store: CanvasStore,
     /// WebAuthn state for hardware key authentication (optional, requires `webauthn` feature)
     #[cfg(feature = "webauthn")]
     pub webauthn: Option<Arc<api_webauthn::WebAuthnState>>,
@@ -865,7 +861,6 @@ pub async fn run_gateway(
     reload_controls: Option<zeroclaw_runtime::daemon::GatewayReloadControls>,
     // TUI session registry from the daemon for the /api/tuis endpoint.
     tui_registry: Option<Arc<zeroclaw_runtime::rpc::tui_identity::TuiRegistry>>,
-    canvas_store: Option<CanvasStore>,
     // Shared SOP engine from the daemon. `None` when standalone — sessions build their own.
     sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
     sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
@@ -886,7 +881,6 @@ pub async fn run_gateway(
         external_event_bus,
         reload_controls,
         tui_registry,
-        canvas_store,
         sop_engine,
         sop_audit,
         daemon_authority,
@@ -907,7 +901,6 @@ pub async fn run_gateway_with_authority(
     external_event_bus: Option<zeroclaw_runtime::observability::EventBus>,
     reload_controls: Option<zeroclaw_runtime::daemon::GatewayReloadControls>,
     tui_registry: Option<Arc<zeroclaw_runtime::rpc::tui_identity::TuiRegistry>>,
-    canvas_store: Option<CanvasStore>,
     sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
     sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
     daemon_authority: Option<zeroclaw_runtime::daemon::DaemonInboundAuthority>,
@@ -922,7 +915,6 @@ pub async fn run_gateway_with_authority(
         external_event_bus,
         reload_controls,
         tui_registry,
-        canvas_store,
         sop_engine,
         sop_audit,
         daemon_authority,
@@ -947,7 +939,6 @@ pub async fn run_gateway_with_plugin_webhooks(
     external_event_bus: Option<zeroclaw_runtime::observability::EventBus>,
     reload_controls: Option<zeroclaw_runtime::daemon::GatewayReloadControls>,
     tui_registry: Option<Arc<zeroclaw_runtime::rpc::tui_identity::TuiRegistry>>,
-    canvas_store: Option<CanvasStore>,
     sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
     sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
     // The daemon generation's one inbound-auth state, shared with the RPC
@@ -1139,7 +1130,6 @@ pub async fn run_gateway_with_plugin_webhooks(
         config.memory.clone(),
         config.data_dir.clone(),
     ));
-    let canvas_store = canvas_store.unwrap_or_default();
     let agent_alias_opt = default_agent_alias(&config);
 
 
@@ -1179,7 +1169,6 @@ pub async fn run_gateway_with_plugin_webhooks(
                     .model_provider_for_agent(agent_alias)
                     .and_then(|e| e.api_key.as_deref()),
                 &config,
-                Some(canvas_store.clone()),
                 false,
                 None,
                 sop_engine.clone(),
@@ -1310,7 +1299,6 @@ pub async fn run_gateway_with_plugin_webhooks(
                 .model_provider_for_agent(&alias)
                 .and_then(|e| e.api_key.as_deref()),
             &config,
-            Some(canvas_store.clone()),
             false,
             None,
             sop_engine.clone(),
@@ -1758,7 +1746,6 @@ pub async fn run_gateway_with_plugin_webhooks(
         pending_pairings,
         path_prefix: path_prefix.unwrap_or("").to_string(),
         web_dist_dir,
-        canvas_store,
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         tui_registry,
@@ -1992,18 +1979,6 @@ pub async fn run_gateway_with_plugin_webhooks(
         .route(
             "/api/devices/{id}/token/rotate",
             post(api_pairing::rotate_token),
-        )
-        // ── Live Canvas (A2UI) routes ──
-        .route("/api/canvas", get(canvas::handle_canvas_list))
-        .route(
-            "/api/canvas/{id}",
-            get(canvas::handle_canvas_get)
-                .post(canvas::handle_canvas_post)
-                .delete(canvas::handle_canvas_clear),
-        )
-        .route(
-            "/api/canvas/{id}/history",
-            get(canvas::handle_canvas_history),
         );
 
     #[cfg(feature = "plugins-wasm")]
@@ -2058,8 +2033,6 @@ pub async fn run_gateway_with_plugin_webhooks(
         .route("/ws/chat", get(ws::handle_ws_chat))
         // ── WebSocket SOP runs feed ──
         .route("/ws/sops/runs", get(ws_sop_runs::handle_ws_sop_runs))
-        // ── WebSocket canvas updates ──
-        .route("/ws/canvas/{id}", get(canvas::handle_ws_canvas))
         // ── WebSocket node discovery ──
         .route("/ws/nodes", get(nodes::handle_ws_nodes))
         // ── Static assets (web dashboard) ──
@@ -3781,7 +3754,6 @@ async fn dispatch_gateway_turn_streaming_with_agent(
             false,
             state.sop_engine.clone(),
             state.sop_audit.clone(),
-            Some(state.canvas_store.clone()),
         )
         .await?;
     #[cfg(test)]
@@ -4800,7 +4772,6 @@ mod tests {
             )),
             device_registry: registry,
             pending_pairings: None,
-            canvas_store: CanvasStore::new(),
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
@@ -5801,7 +5772,6 @@ path = "{trigger_path}"
                 None,
                 None,
                 None,
-                None,
             )
             .await
         });
@@ -5873,7 +5843,6 @@ path = "{trigger_path}"
                 None,
                 None,
                 None,
-                None,
             )
             .await
         });
@@ -5923,7 +5892,6 @@ path = "{trigger_path}"
                 "127.0.0.1",
                 0,
                 config,
-                None,
                 None,
                 None,
                 None,
@@ -5994,7 +5962,6 @@ path = "{trigger_path}"
                 config,
                 None,
                 Some(reload_controls),
-                None,
                 None,
                 None,
                 None,
@@ -6072,7 +6039,6 @@ path = "{trigger_path}"
             None,
             None,
             None,
-            None,
             Some(readiness),
         )
         .await;
@@ -6126,7 +6092,6 @@ path = "{trigger_path}"
             )),
             device_registry: None,
             pending_pairings: None,
-            canvas_store: CanvasStore::new(),
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
@@ -6200,7 +6165,6 @@ path = "{trigger_path}"
             )),
             device_registry: None,
             pending_pairings: None,
-            canvas_store: CanvasStore::new(),
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
@@ -6835,7 +6799,6 @@ path = "{trigger_path}"
             )),
             device_registry: None,
             pending_pairings: None,
-            canvas_store: CanvasStore::new(),
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
@@ -8407,7 +8370,6 @@ data: [DONE]\n\n";
             )),
             device_registry: None,
             pending_pairings: None,
-            canvas_store: CanvasStore::new(),
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
@@ -9314,7 +9276,6 @@ data: [DONE]\n\n";
             )),
             device_registry: None,
             pending_pairings: None,
-            canvas_store: CanvasStore::new(),
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
@@ -9423,7 +9384,6 @@ data: [DONE]\n\n";
             )),
             device_registry: None,
             pending_pairings: None,
-            canvas_store: CanvasStore::new(),
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
@@ -9511,7 +9471,6 @@ data: [DONE]\n\n";
             )),
             device_registry: None,
             pending_pairings: None,
-            canvas_store: CanvasStore::new(),
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
@@ -9706,7 +9665,6 @@ data: [DONE]\n\n";
             )),
             device_registry: None,
             pending_pairings: None,
-            canvas_store: CanvasStore::new(),
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
@@ -9781,7 +9739,6 @@ data: [DONE]\n\n";
             )),
             device_registry: None,
             pending_pairings: None,
-            canvas_store: CanvasStore::new(),
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
@@ -9861,7 +9818,6 @@ data: [DONE]\n\n";
             )),
             device_registry: None,
             pending_pairings: None,
-            canvas_store: CanvasStore::new(),
             cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             pending_reload: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tui_registry: None,
@@ -10597,7 +10553,6 @@ mod accept_error_tests {
                 "127.0.0.1",
                 0,
                 config,
-                None,
                 None,
                 None,
                 None,

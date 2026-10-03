@@ -108,7 +108,6 @@ fn test_state(config: Config) -> AppState {
         session_queue: Arc::new(gateway::session_queue::SessionActorQueue::new(8, 30, 600)),
         device_registry: None,
         pending_pairings: None,
-        canvas_store: zeroclaw_runtime::tools::CanvasStore::new(),
         #[cfg(feature = "webauthn")]
         webauthn: None,
         cancel_tokens: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

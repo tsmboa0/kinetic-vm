@@ -7234,9 +7234,6 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                 zeroclaw_channels::orchestrator::live_channel_map()
             }));
 
-            let canvas_store = zeroclaw_runtime::tools::CanvasStore::new();
-            let canvas_store_for_gateway = canvas_store.clone();
-            let canvas_store_for_channels = canvas_store.clone();
 
             // Capture the launch command now, before any in-app upgrade can
             // swap the binary on disk (after which `current_exe()` resolves to a
@@ -7273,8 +7270,6 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                 // Per-iteration clones so the subsystem closures (which
                 // `move`-capture) don't consume the outer bindings on the
                 // first iteration; reload would otherwise see a moved value.
-                let canvas_store_for_gateway = canvas_store_for_gateway.clone();
-                let canvas_store_for_channels = canvas_store_for_channels.clone();
                 let mut registry = daemon::DaemonRegistry::new();
                 #[cfg(feature = "agent-runtime")]
                 registry.register_channel_registry_clearer(std::sync::Arc::new(|| {
@@ -7419,7 +7414,6 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                           tui_registry,
                           daemon_authority,
                           ready_tx| {
-                        let canvas_store = canvas_store_for_gateway.clone();
                         let sop_engine = sop_e.clone();
                         let sop_audit = sop_a.clone();
                         let sop_driver_handles = sop_dh.clone();
@@ -7432,7 +7426,6 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                                 tx,
                                 reload_controls,
                                 tui_registry,
-                                Some(canvas_store),
                                 sop_engine,
                                 sop_audit,
                                 daemon_authority,
@@ -7454,7 +7447,6 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                     let sop_ds = sop_driver_sink.clone();
                     let plugin_webhooks = channel_plugin_webhooks.clone();
                     move |authority, cancel| {
-                        let canvas_store = canvas_store_for_channels.clone();
                         let sop_engine = sop_e.clone();
                         let sop_audit = sop_a.clone();
                         let sop_driver_sink = sop_ds.clone();
@@ -7463,7 +7455,6 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                             Box::pin(
                                 zeroclaw_channels::orchestrator::start_channels_with_authority_and_plugin_webhooks(
                                     authority,
-                                    Some(canvas_store),
                                     cancel,
                                     sop_engine,
                                     sop_audit,
@@ -8883,7 +8874,6 @@ Add pricing to the active provider profile or supply a catalog entry."
 
                 let result = Box::pin(channels::start_channels_with_authority(
                     authority,
-                    None,
                     cancel,
                     sop_engine,
                     sop_audit,
@@ -12905,10 +12895,9 @@ async fn run_gateway_if_enabled(
         zeroclaw_runtime::daemon::gateway_start_hook_reporter(hooks, host.to_string(), None);
     // Standalone gateway (no daemon supervisor): pass None for reload_tx so
     // /admin/reload returns 503 with a clear "no supervisor; restart
-    // manually" message, None for tui_registry (no TUI socket), and None
-    // for canvas_store so the gateway falls back to its own default.
+    // manually" message, and None for tui_registry (no TUI socket).
     let result = Box::pin(gateway::run_gateway(
-        host, port, config, event_bus, None, None, None, None, None, None, None, readiness,
+        host, port, config, event_bus, None, None, None, None, None, None, readiness,
     ))
     .await;
     // Self-respawn after the listener is released, if an in-app upgrade

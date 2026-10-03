@@ -22,7 +22,6 @@ use zeroclaw_api::plan::PlanEntry;
 use zeroclaw_config::schema::Config;
 use zeroclaw_infra::acp_session_store::AcpSessionStore;
 use zeroclaw_runtime::agent::agent::{Agent, TurnEvent};
-use zeroclaw_runtime::tools::CanvasStore;
 
 use super::acp_embedded;
 use crate::acp_channel::AcpChannel;
@@ -152,11 +151,6 @@ pub struct AcpServer {
     /// tiny and bounded by the distinct sessions seen.
     session_gates: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     store: Option<Arc<AcpSessionStore>>,
-    /// Shared canvas store from the gateway / daemon supervisor.  When set,
-    /// agents created by this server write canvas frames to the same store
-    /// that `/ws/canvas/:id` WebSocket subscribers read from.  `None` in
-    /// standalone `zeroclaw acp` mode where no gateway is running.
-    canvas_store: Option<CanvasStore>,
     /// Shared SOP engine from the daemon. `None` in standalone mode — agents
     /// build their own engine from config.
     sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
@@ -307,7 +301,6 @@ impl AcpServer {
             loading_sessions: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             session_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
             store,
-            canvas_store: None,
             sop_engine: None,
             sop_audit: None,
             connection_default_agent: None,
@@ -355,7 +348,6 @@ impl AcpServer {
                     true,
                     self.sop_engine.clone(),
                     self.sop_audit.clone(),
-                    self.canvas_store.clone(),
                     Some(zeroclaw_runtime::AgentExecutionCapability::from_parts(
                         Arc::clone(live_config),
                         self.agent_lifecycle.clone(),
@@ -372,7 +364,6 @@ impl AcpServer {
                     true,
                     self.sop_engine.clone(),
                     self.sop_audit.clone(),
-                    self.canvas_store.clone(),
                 )
                 .await
             };
@@ -392,7 +383,6 @@ impl AcpServer {
                 true,
                 self.sop_engine.clone(),
                 self.sop_audit.clone(),
-                self.canvas_store.clone(),
                 Arc::clone(store),
                 Some(execution_capability),
             )
@@ -408,7 +398,6 @@ impl AcpServer {
                 true,
                 self.sop_engine.clone(),
                 self.sop_audit.clone(),
-                self.canvas_store.clone(),
                 Arc::clone(store),
             )
             .await
@@ -426,14 +415,6 @@ impl AcpServer {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        self
-    }
-
-    /// Attach the shared gateway [`CanvasStore`] so that agents created by
-    /// this server write canvas frames to the same store that the
-    /// `/ws/canvas/:id` WebSocket endpoint serves.
-    pub fn with_canvas_store(mut self, canvas_store: CanvasStore) -> Self {
-        self.canvas_store = Some(canvas_store);
         self
     }
 
@@ -3394,7 +3375,7 @@ fn map_tool_kind(name: &str) -> &'static str {
         "ask_user" | "calculator" | "delegate" | "escalate_to_human" | "execute_pipeline"
         | "llm_task" | "schedule" | "shell"
         | "sop_advance" | "sop_approve" | "sop_execute" | "vi_verify" => "execute",
-        "backup" | "canvas" | "cloud_ops" | "file_edit" | "file_write"
+        "backup" | "cloud_ops" | "file_edit" | "file_write"
         | "memory_export" | "memory_store" | "report_template" => "edit",
         "cron_add" | "poll" | "reaction" => "edit",
         "memory_forget" | "memory_purge" => "delete",

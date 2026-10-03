@@ -1618,7 +1618,6 @@ pub async fn run(
             &config.agents,
             agent_model_provider.and_then(|e| e.api_key.as_deref()),
             &config,
-            None,
             is_subagent_caller,
             None,
             sop_engine,
@@ -3541,7 +3540,6 @@ async fn process_message_inner(
                 .as_ref()
                 .and_then(|e| e.api_key.as_deref()),
             &config,
-            None,
             false,
             None,
             sop_engine,
@@ -19338,7 +19336,6 @@ Let me check the result."#;
             &config.agents,
             None,
             &config,
-            None,
             false,
             None,
         )

@@ -205,7 +205,6 @@ impl Gateway {
                 None,
                 None,
                 None,
-                None,
                 Some(readiness),
             )
             .await

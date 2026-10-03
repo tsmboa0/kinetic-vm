@@ -9,7 +9,6 @@ pub mod a2a_client;
 pub mod ask_user;
 pub mod backup_tool;
 pub mod calculator;
-pub mod canvas;
 pub mod channel_room;
 pub mod cli_discovery;
 pub mod content_search;
