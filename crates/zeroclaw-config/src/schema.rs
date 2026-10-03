@@ -592,14 +592,6 @@ pub struct Config {
     #[serde(default)]
     pub locale: Option<String>,
 
-    /// Verifiable Intent (VI) credential issuance and constraint checking
-    /// (`[verifiable_intent]`). No credential chain verifier exists yet, so the
-    /// `vi_verify` tool is not registered for the model and this section does not
-    /// currently enable verification of anything.
-    #[serde(default)]
-    #[nested]
-    #[group = "Agent"]
-    pub verifiable_intent: VerifiableIntentConfig,
 
 
 
@@ -3479,53 +3471,6 @@ impl Default for McpConfig {
             enabled: default_mcp_enabled(),
             deferred_loading: default_deferred_loading(),
             servers: Vec::new(),
-        }
-    }
-}
-
-/// Verifiable Intent (VI) credential issuance and constraint checking
-/// (`[verifiable_intent]` section).
-///
-/// ZeroClaw implements issuance, crypto, types and constraint checking, but not
-/// a credential chain verifier. Until one exists the `vi_verify` tool is
-/// withheld from the model-visible registry, so neither key below enables
-/// verification of a credential. The library paths are unaffected.
-///
-/// Enabling the section reports that gap two ways. The runtime traces it at
-/// each config application, which needs log persistence to be on to reach a
-/// sink. `zeroclaw doctor` and the config API also report it as the
-/// `verifiable_intent_tool_withheld` validation warning, which stays available
-/// when persistence is off.
-#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
-#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
-#[prefix = "verifiable_intent"]
-pub struct VerifiableIntentConfig {
-    /// Opt in to the VI section (default: false).
-    ///
-    /// While the tool is withheld this does not enable credential verification
-    /// on commerce tool calls. It currently causes a warning naming that gap,
-    /// emitted once per config application: at process startup, and again when
-    /// a daemon reload re-reads config from disk.
-    #[serde(default)]
-    pub enabled: bool,
-
-    /// Intended strictness mode for constraint evaluation.
-    ///
-    /// Accepts `"strict"` or `"permissive"`, and defaults to `"strict"`. No
-    /// production code reads it while the tool is withheld.
-    #[serde(default = "default_vi_strictness")]
-    pub strictness: String,
-}
-
-fn default_vi_strictness() -> String {
-    "strict".to_owned()
-}
-
-impl Default for VerifiableIntentConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            strictness: default_vi_strictness(),
         }
     }
 }
@@ -16969,7 +16914,6 @@ impl Default for Config {
             file_download: FileDownloadConfig::default(),
             plugins: PluginsConfig::default(),
             locale: None,
-            verifiable_intent: VerifiableIntentConfig::default(),
             sop: SopConfig::default(),
             shell_tool: ShellToolConfig::default(),
             escalation: EscalationConfig::default(),
@@ -18810,40 +18754,6 @@ impl Config {
         }
     }
 
-    /// Report that opting into `[verifiable_intent]` does not currently enable
-    /// credential verification, because `vi_verify` is withheld from the
-    /// model-visible registry until a chain verifier exists.
-    ///
-    /// The runtime already traces this at config load. That trace reaches a
-    /// sink only when log persistence is on, so under
-    /// `observability.log_persistence = "none"` it is delivered nowhere. This
-    /// warning is the channel that survives: `zeroclaw doctor` prints the
-    /// structured list to stdout and the config API returns it in its
-    /// response, neither of which depends on the log writer.
-    ///
-    /// Same class as `memory_config_knob_inert` — a knob that is set, accepted,
-    /// and currently has no runtime consumer.
-    ///
-    /// The change that re-registers `vi_verify` must delete this check and the
-    /// runtime trace together, or an operator is told the capability is
-    /// unavailable while the model is calling it.
-    fn collect_verifiable_intent_warnings(
-        &self,
-        warnings: &mut Vec<crate::validation_warnings::ValidationWarning>,
-    ) {
-        if !self.verifiable_intent.enabled {
-            return;
-        }
-        warnings.push(crate::validation_warnings::ValidationWarning::new(
-            crate::validation_warnings::VERIFIABLE_INTENT_TOOL_WITHHELD,
-            "verifiable_intent.enabled is set, but the vi_verify tool is withheld from the \
-             model-visible registry until a credential chain verifier exists. Enabling the \
-             section does not enable credential verification on commerce tool calls. The \
-             issuance and verification library paths are unaffected.",
-            "verifiable_intent.enabled",
-        ));
-    }
-
     /// Collect non-fatal validation warnings — config that loads and
     /// validates successfully (`validate()` returns `Ok(())`) but will fail
     /// at runtime because of a logical inconsistency the schema cannot
@@ -18870,7 +18780,6 @@ impl Config {
         // warning when the more specific cross-provider diagnostic already
         // covers the same path.
         self.collect_context_compression_ignored_warnings(&mut warnings);
-        self.collect_verifiable_intent_warnings(&mut warnings);
         self.collect_cron_claim_warnings(&mut warnings);
         warnings.extend(validate_memory_semantics(&self.memory));
         for (alias, wa) in &self.channels.whatsapp {
@@ -20433,24 +20342,8 @@ impl Config {
         // on stderr) and via Config::collect_warnings (gateway HTTP returns
         // structured to dashboard callers). Single source of truth lives in
         // collect_warnings; emit them to tracing here so the existing log
-        // behavior is preserved, with the single documented exception below.
+        // behavior is preserved.
         for w in self.collect_warnings() {
-            // One code is held back from this loop on purpose. The runtime
-            // already records the withheld-capability notice itself, with an
-            // explicit `System` category and the same code and path, once at
-            // every config application. Records emitted here carry no category
-            // and are stored as `internal`, which the dashboard Logs view hides
-            // by default, so tracing it here as well leaves a hidden second copy
-            // of a notice an operator is supposed to read. Every command that
-            // loads config a second time inside a live process writes that pair.
-            //
-            // `collect_warnings` still returns it, so `zeroclaw doctor` and the
-            // config API report it exactly as before; only this tracing copy is
-            // dropped. The change that re-registers the tool retires this skip
-            // together with the runtime record it defers to.
-            if w.code == crate::validation_warnings::VERIFIABLE_INTENT_TOOL_WITHHELD {
-                continue;
-            }
             ::zeroclaw_log::record!(
                 WARN,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
@@ -28336,7 +28229,6 @@ auto_save = true
             file_download: FileDownloadConfig::default(),
             plugins: PluginsConfig::default(),
             locale: None,
-            verifiable_intent: VerifiableIntentConfig::default(),
             sop: SopConfig::default(),
             shell_tool: ShellToolConfig::default(),
             escalation: EscalationConfig::default(),
@@ -29516,7 +29408,6 @@ default_temperature = 0.7
             file_download: FileDownloadConfig::default(),
             plugins: PluginsConfig::default(),
             locale: None,
-            verifiable_intent: VerifiableIntentConfig::default(),
             sop: SopConfig::default(),
             shell_tool: ShellToolConfig::default(),
             escalation: EscalationConfig::default(),
@@ -35168,97 +35059,6 @@ enabled = false
             )
             .is_empty()
         );
-    }
-
-    /// The section is opt-in, so an operator who has not touched it is told
-    /// nothing.
-    #[test]
-    async fn verifiable_intent_disabled_does_not_warn() {
-        let mut config = Config::default();
-        suppress_semantic_memory_warning(&mut config);
-        assert!(!config.verifiable_intent.enabled);
-
-        assert!(
-            !config
-                .collect_warnings()
-                .iter()
-                .any(|w| w.code == "verifiable_intent_tool_withheld"),
-        );
-    }
-
-    /// Opting in produces the structured warning. This is the delivery path
-    /// that survives `observability.log_persistence = "none"`, since
-    /// `zeroclaw doctor` prints this list to stdout and the config API returns
-    /// it, neither of which goes through the log writer.
-    #[test]
-    async fn verifiable_intent_enabled_warns_that_the_tool_is_withheld() {
-        let mut config = Config::default();
-        suppress_semantic_memory_warning(&mut config);
-        config.verifiable_intent.enabled = true;
-
-        let warnings = config.collect_warnings();
-        let withheld: Vec<_> = warnings
-            .iter()
-            .filter(|w| w.code == "verifiable_intent_tool_withheld")
-            .collect();
-
-        assert_eq!(withheld.len(), 1, "exactly one notice, got {warnings:?}");
-        assert_eq!(withheld[0].path, "verifiable_intent.enabled");
-        assert!(
-            withheld[0].message.contains("vi_verify"),
-            "the message must name the withheld tool: {}",
-            withheld[0].message
-        );
-    }
-
-    /// Every `LogPersistence` variant, walked through a `match` rather than
-    /// listed.
-    ///
-    /// Adding a variant makes the `match` non-exhaustive, so a new policy forces
-    /// a decision here instead of being covered silently. An array literal keeps
-    /// compiling unchanged and covers one policy less.
-    ///
-    /// The compile error is the whole of the guarantee. An arm returning `None`
-    /// satisfies it while leaving the variant out of the returned list, so this
-    /// forces the update to be considered rather than making it correct.
-    fn every_log_persistence() -> Vec<LogPersistence> {
-        let mut all = Vec::new();
-        let mut next = Some(LogPersistence::None);
-        while let Some(policy) = next {
-            all.push(policy);
-            next = match policy {
-                LogPersistence::None => Some(LogPersistence::Rolling),
-                LogPersistence::Rolling => Some(LogPersistence::Full),
-                LogPersistence::Full => Some(LogPersistence::Rotating),
-                LogPersistence::Rotating => None,
-            };
-        }
-        all
-    }
-
-    /// The config surface does not consult the observability policy, which is
-    /// the property that makes it a second channel rather than a second copy
-    /// of the same one. Asserting it here pins the independence at the unit
-    /// level; the process-level proof lives in the component test.
-    ///
-    /// Every current variant is covered rather than the three that motivated the
-    /// change. See [`every_log_persistence`] for the extent of that.
-    #[test]
-    async fn verifiable_intent_warning_is_independent_of_log_persistence() {
-        for policy in every_log_persistence() {
-            let mut config = Config::default();
-            suppress_semantic_memory_warning(&mut config);
-            config.verifiable_intent.enabled = true;
-            config.observability.log_persistence = policy;
-
-            assert!(
-                config
-                    .collect_warnings()
-                    .iter()
-                    .any(|w| w.code == "verifiable_intent_tool_withheld"),
-                "the notice must survive log_persistence = {policy:?}",
-            );
-        }
     }
 
     #[cfg(unix)]

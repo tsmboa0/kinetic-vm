@@ -38,7 +38,7 @@ impl VerificationResult {
     }
 }
 
-// ── Base64url helpers (reused from verifiable_intent but kept local to avoid coupling) ──
+// ── Base64url helpers ──
 
 fn b64u_encode(data: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(data)

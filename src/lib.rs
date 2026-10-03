@@ -88,7 +88,6 @@ pub(crate) mod trust;
 #[cfg(feature = "agent-runtime")]
 pub(crate) mod tunnel;
 #[cfg(feature = "agent-runtime")]
-pub mod verifiable_intent;
 
 #[cfg(feature = "plugins-wasm")]
 pub mod plugins;

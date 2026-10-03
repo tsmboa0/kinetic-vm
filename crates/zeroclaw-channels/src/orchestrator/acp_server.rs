@@ -3374,7 +3374,7 @@ fn map_tool_kind(name: &str) -> &'static str {
     match name {
         "ask_user" | "calculator" | "delegate" | "escalate_to_human" | "execute_pipeline"
         | "llm_task" | "schedule" | "shell"
-        | "sop_advance" | "sop_approve" | "sop_execute" | "vi_verify" => "execute",
+        | "sop_advance" | "sop_approve" | "sop_execute" => "execute",
         "backup" | "cloud_ops" | "file_edit" | "file_write"
         | "memory_export" | "memory_store" | "report_template" => "edit",
         "cron_add" | "poll" | "reaction" => "edit",

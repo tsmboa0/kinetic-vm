@@ -962,7 +962,6 @@ mod tunnel;
 #[cfg(feature = "agent-runtime")]
 mod util;
 #[cfg(feature = "agent-runtime")]
-mod verifiable_intent;
 
 use config::Config;
 
@@ -6571,10 +6570,6 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
     }
     #[cfg(feature = "agent-runtime")]
     observability::runtime_trace::init_from_config(&config.observability, &config.data_dir);
-    // Must follow the trace sink init above, or the record has no destination.
-    // The daemon reload arm calls the same helper against its reloaded config.
-    #[cfg(feature = "agent-runtime")]
-    warn_verifiable_intent_withheld(&config);
     // Enrollment's contract is that stdout carries exactly the token and
     // nothing else, so the `oidc` commands are dispatched before any
     // startup prelude that may print: the OTP prelude below discloses a
@@ -8058,11 +8053,6 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                             &current_config.observability,
                             &current_config.data_dir,
                         );
-                        // A reload applies config the process has not seen, so an
-                        // operator who just enabled the section learns why the tool
-                        // is still absent without having to restart.
-                        #[cfg(feature = "agent-runtime")]
-                        warn_verifiable_intent_withheld(&current_config);
                         if let Some(handle) = degraded_nag.take() {
                             handle.abort();
                         }
@@ -9837,15 +9827,6 @@ Add pricing to the active provider profile or supply a catalog entry."
                     }
                 };
 
-                // The withheld-capability notice is recorded once per config
-                // application, and the record written during startup describes
-                // the config as it was loaded. A patch that turns the section on
-                // is a new application of that setting, so the state before the
-                // ops run is captured here to tell that transition apart from a
-                // patch that leaves an already-enabled section alone.
-                #[cfg(feature = "agent-runtime")]
-                let verifiable_intent_was_enabled = config.verifiable_intent.enabled;
-
                 #[cfg(feature = "agent-runtime")]
                 let _offline_ownership = if ops.iter().any(|op| {
                     let op_name = op.get("op").and_then(|value| value.as_str());
@@ -10142,18 +10123,6 @@ Add pricing to the active provider profile or supply a catalog entry."
                     config_patch_fail_json_or_human(json, api_err, human)?;
                 }
                 Box::pin(config.save_dirty()).await?;
-
-                // Report the withheld tool when this patch is what enabled the
-                // section. The helper returns early while it stays disabled, so
-                // the guard is only about the already-enabled case: the startup
-                // call has recorded that one for this process, and recording it
-                // again here would restore the second copy this command used to
-                // write. The trace sink was installed before the command
-                // dispatched, so the record has somewhere to go.
-                #[cfg(feature = "agent-runtime")]
-                if !verifiable_intent_was_enabled {
-                    warn_verifiable_intent_withheld(&config);
-                }
 
                 if json {
                     let body = serde_json::json!({"saved": true, "results": results});
@@ -12090,41 +12059,6 @@ async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Res
             Ok(())
         }
     }
-}
-
-/// Tell the operator that `vi_verify` is withheld from the model-visible
-/// registry while no credential chain verifier exists.
-///
-/// Called once per config application: at process config load, and again when
-/// the daemon reload arm re-reads config from disk. Registry assembly is the
-/// wrong home for it, because that runs on ordinary gateway requests and on
-/// nested SOP and delegation rebuilds. Each call site must sit after its
-/// `runtime_trace::init_from_config`, or the record has no sink.
-#[cfg(feature = "agent-runtime")]
-fn warn_verifiable_intent_withheld(config: &Config) {
-    if !config.verifiable_intent.enabled {
-        return;
-    }
-    ::zeroclaw_log::record!(
-        WARN,
-        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
-            // Operator-facing posture notice, not runtime bookkeeping. An event
-            // with no category stores as `internal`, and the dashboard Logs view
-            // hides that category by default, so an uncategorised notice is
-            // absent from the history an operator actually reads.
-            .with_category(::zeroclaw_log::EventCategory::System)
-            // The config surface reports this same fact as a structured
-            // warning. Carrying its code and path here is what lets an operator
-            // correlate the two rather than read them as separate problems;
-            // `with_attrs` persists them to the trace and serves them from the
-            // logs API, which the ephemeral variant would not.
-            .with_attrs(::serde_json::json!({
-                "code": ::zeroclaw_config::validation_warnings::VERIFIABLE_INTENT_TOOL_WITHHELD,
-                "path": "verifiable_intent.enabled",
-            })),
-        "verifiable_intent: vi_verify is not registered as a model-callable tool because no credential chain verifier exists yet (see #9328)"
-    );
 }
 
 fn running_executable_for_remediation() -> Option<std::path::PathBuf> {

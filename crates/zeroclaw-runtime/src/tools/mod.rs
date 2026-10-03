@@ -32,7 +32,6 @@ pub mod sop_status;
 pub mod sop_workshop;
 pub mod spawn_subagent;
 pub mod todo_write;
-pub mod verifiable_intent;
 
 // Tool types from zeroclaw-tools (direct imports, no shims)
 pub use zeroclaw_tools::a2a_client::{
@@ -125,7 +124,6 @@ pub use sop_status::SopStatusTool;
 pub use sop_workshop::SopWorkshopTool;
 pub use spawn_subagent::SpawnSubagentTool;
 pub use todo_write::TodoWriteTool;
-pub use verifiable_intent::VerifiableIntentTool;
 
 /// Re-entrant agent-spawning tools that must never be collapsed by the
 /// per-turn duplicate-call guard: launching several with the same prompt
@@ -1814,12 +1812,6 @@ fn all_tools_with_runtime_on_thread(
         Some(parent_tools)
     };
 
-    // `vi_verify` is deliberately absent while no chain verifier exists: it checked
-    // caller-supplied constraints against a caller-supplied fulfillment with nothing
-    // establishing that either came from a signed credential. The operator-facing
-    // notice lives at config load, since this function also runs per gateway request
-    // and per nested registry rebuild. Register it again only behind a
-    // verify-and-evaluate path that consumes a verified chain result.
 
     // ── WASM plugin tools (requires plugins-wasm feature) ──
     #[cfg(feature = "plugins-wasm")]
@@ -4483,53 +4475,6 @@ permissions = ["http_client"]
         assert!(
             !names.contains(&"read_skill"),
             "full runtime-profile override should omit read_skill even when global is compact"
-        );
-    }
-
-    /// `vi_verify` checked caller-supplied constraints against a caller-supplied
-    /// fulfillment with nothing establishing that either came from a signed
-    /// credential. Until a chain verifier exists the tool must not reach the model
-    /// even when an operator opts in.
-    #[test]
-    fn vi_verify_is_not_registered_even_when_verifiable_intent_is_enabled() {
-        let tmp = TempDir::new().unwrap();
-        let security = Arc::new(SecurityPolicy::default());
-        let mem_cfg = MemoryConfig {
-            backend: "markdown".into(),
-            ..MemoryConfig::default()
-        };
-        let mem: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-
-        let mut cfg = test_config(&tmp);
-        cfg.verifiable_intent.enabled = true;
-
-        let tools = all_tools(
-            Arc::new(cfg.clone()),
-            &security,
-            &zeroclaw_config::schema::RiskProfileConfig::default(),
-            "test-agent",
-            mem,
-            &zeroclaw_config::schema::HttpRequestConfig::default(),
-            &zeroclaw_config::schema::WebFetchConfig::default(),
-            tmp.path(),
-            &HashMap::new(),
-            None,
-            &cfg,
-            false,
-            None,
-        )
-        .expect("tool registry builds")
-        .tools;
-        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-
-        assert!(
-            !names.contains(&"vi_verify"),
-            "vi_verify must not be model-callable while no chain verifier exists"
-        );
-        assert!(
-            names.contains(&"shell"),
-            "positive control: the registry must still be populated"
         );
     }
 

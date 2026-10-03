@@ -899,7 +899,6 @@ mod tests {
     fn migrated_hand_list_roots_keep_their_groups() {
         let expected = [
             ("sop", SectionGroup::Agent),
-            ("verifiable_intent", SectionGroup::Agent),
             ("shell_tool", SectionGroup::Tools),
             ("observability", SectionGroup::Operations),
             ("gateway", SectionGroup::Network),

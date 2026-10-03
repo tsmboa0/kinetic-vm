@@ -8176,7 +8176,6 @@ const MATRIX_OPTIONAL_SAFE_TOOL_ARGUMENTS: &[(&[&str], &[&str])] = &[
             "execute_pipeline",
             "knowledge",
             "llm_task",
-            "vi_verify",
         ],
         &[],
     ),

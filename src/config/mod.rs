@@ -28,7 +28,7 @@ pub use schema::{
     SkillCreationConfig, SkillImprovementConfig, SkillsConfig, SkillsPromptInjectionMode,
     SlackConfig, SopConfig, SqliteStorageConfig, StorageConfig, StreamMode, TelegramConfig,
     ToolFilterGroup, ToolFilterGroupMode, TranscriptionConfig, TtsConfig,
-    TtsProviderConfig, TunnelConfig, VerifiableIntentConfig, WebFetchConfig, WebSearchConfig,
+    TtsProviderConfig, TunnelConfig, WebFetchConfig, WebSearchConfig,
     WebhookConfig, WhatsAppChatPolicy, WhatsAppWebMode, apply_channel_proxy_to_builder,
     apply_runtime_proxy_to_builder, build_channel_proxy_client,
     build_channel_proxy_client_with_timeouts, build_runtime_proxy_client,

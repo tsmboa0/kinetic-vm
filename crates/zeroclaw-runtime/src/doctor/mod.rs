@@ -1499,9 +1499,6 @@ fn localized_validation_warning_message(
     warning: &zeroclaw_config::validation_warnings::ValidationWarning,
 ) -> String {
     match warning.code.as_str() {
-        zeroclaw_config::validation_warnings::VERIFIABLE_INTENT_TOOL_WITHHELD => {
-            crate::i18n::get_required_cli_string("cli-doctor-verifiable-intent-tool-withheld")
-        }
         zeroclaw_config::validation_warnings::SECURITY_AUDIT_DISABLED_DROPS_CERTIFICATE_RECORD => {
             crate::i18n::get_required_cli_string(
                 "cli-doctor-security-audit-disabled-drops-certificate-record",
@@ -3569,38 +3566,6 @@ mod tests {
             "the non-compact variant must not name the knob: {}",
             warns[0].message
         );
-    }
-
-    /// `doctor` renders this warning through Fluent rather than printing the
-    /// structured message verbatim. The structured message stays English on
-    /// purpose — API consumers key off a stable contract — so the two are
-    /// asserted to differ rather than to agree.
-    #[test]
-    fn verifiable_intent_withheld_warning_uses_fluent() {
-        let structured_message = "verifiable_intent.enabled is set, but the vi_verify tool is \
-                                  withheld from the model-visible registry until a credential \
-                                  chain verifier exists.";
-        let warning = zeroclaw_config::validation_warnings::ValidationWarning::new(
-            zeroclaw_config::validation_warnings::VERIFIABLE_INTENT_TOOL_WITHHELD,
-            structured_message,
-            "verifiable_intent.enabled",
-        );
-
-        let expected =
-            crate::i18n::get_required_cli_string("cli-doctor-verifiable-intent-tool-withheld");
-        assert_eq!(localized_validation_warning_message(&warning), expected);
-        assert_ne!(
-            expected, structured_message,
-            "the localized line must not be the structured API message"
-        );
-        assert_ne!(
-            expected, "{cli-doctor-verifiable-intent-tool-withheld}",
-            "the Fluent key must resolve; a marker means it is absent from every catalog"
-        );
-
-        // The diagnostic path is what an operator edits, so it stays the
-        // config key rather than being folded into the localized sentence.
-        assert_eq!(warning.path, "verifiable_intent.enabled");
     }
 
     #[test]

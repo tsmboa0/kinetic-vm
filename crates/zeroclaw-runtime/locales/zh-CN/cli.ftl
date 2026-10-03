@@ -1122,7 +1122,6 @@ cli-doctor-cache-write-failed = 无法持久化模型缓存：{$error}
 cli-doctor-probe-timeout-message = 模型探测超时。部分提供商目录可能无法访问。您可以重新运行 Doctor 来刷新。
 cli-doctor-degraded-security = 安全关键配置节 `{$path}` 无效，已重置为默认值以便守护进程启动；当前运行的安全态势可能弱于预期。运行 `zeroclaw config migrate` 查看解析错误，然后修复该文件。
 cli-doctor-degraded-section = 配置节 `{$path}` 格式错误，已重置为默认值；该节中的值当前不生效。运行 `zeroclaw config migrate` 查看解析错误，然后修复该文件。
-cli-doctor-verifiable-intent-tool-withheld = verifiable_intent.enabled 已设置，但在凭证链验证器存在之前，vi_verify 工具会从模型可见注册表中隐藏。启用此配置段并不会启用对商务工具调用的凭证验证。签发和验证库路径不受影响。
 sop-approval-deferred-at-capacity = 执行槽位已满，无法恢复运行 {$run_id}。审批仍处于等待状态；请在槽位释放后重试。
 sop-approval-policy-unavailable = 无法使用暂停的 SOP 步骤，审批失败：{$reason}。运行仍处于等待状态。
 sop-rpc-decision-invalid-state = 运行 {$run_id} 无法在当前状态下完成决策。
