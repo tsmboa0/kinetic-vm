@@ -40,13 +40,17 @@ contract KineticTestBase is Test {
         return abi.encodePacked(r, s, v);
     }
 
+    function _deadline() internal view returns (uint256) {
+        return block.timestamp + 1 hours;
+    }
+
     function _claimSig(uint256 pk, address dev, address own) internal view returns (bytes memory) {
-        return _sign(pk, registry.hashClaim(dev, own, registry.claimNonce(dev)));
+        return _sign(pk, registry.hashClaim(dev, own, registry.claimNonce(dev), _deadline()));
     }
 
     function _claim() internal returns (uint256 agentId) {
         bytes memory sig = _claimSig(devicePk, device, owner);
         vm.prank(owner);
-        agentId = registry.claim(device, sig, "ipfs://agent", KineticRegistry.Limits(1 ether, 2 ether));
+        agentId = registry.claim(device, sig, _deadline(), "ipfs://agent", KineticRegistry.Limits(1 ether, 2 ether));
     }
 }

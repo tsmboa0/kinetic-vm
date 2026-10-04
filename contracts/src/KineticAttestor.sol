@@ -7,13 +7,16 @@ import {IERC8004Identity, IERC8004Validation} from "./interfaces/IERC8004.sol";
 import {KineticRegistry} from "./KineticRegistry.sol";
 
 /// @notice ERC-8004 validator for a device action.
-/// The device signs an `ActionProof`. This contract checks that signature
-/// against the key in `KineticRegistry`, then writes the validation.
+/// The device signs an `ActionProof`, including the request URI. This contract
+/// checks that signature against the key in `KineticRegistry`, then writes the
+/// validation. The signature shows the device key authorized this record. It
+/// does not prove the actuator physically moved.
 /// The owner must approve this contract as operator on the agent NFT.
 /// This contract never approves the device key, and it never calls `giveFeedback`.
 contract KineticAttestor is EIP712 {
-    bytes32 private constant ACTION_TYPEHASH =
-        keccak256("ActionProof(uint256 agentId,bytes32 action,bytes32 paramsHash,uint256 timestamp,uint256 nonce)");
+    bytes32 private constant ACTION_TYPEHASH = keccak256(
+        "ActionProof(uint256 agentId,bytes32 action,bytes32 paramsHash,string requestURI,uint256 timestamp,uint256 nonce)"
+    );
 
     uint256 public constant MAX_PROOF_AGE = 10 minutes;
     uint256 public constant MAX_FUTURE_SKEW = 2 minutes;
@@ -24,12 +27,12 @@ contract KineticAttestor is EIP712 {
         uint256 agentId;
         bytes32 action;
         bytes32 paramsHash;
+        string requestURI;
         uint256 timestamp;
         uint256 nonce;
     }
 
     error ZeroAddress();
-    error NotBound();
     error BadSignature();
     error StaleProof();
     error FutureProof();
@@ -52,9 +55,8 @@ contract KineticAttestor is EIP712 {
     }
 
     /// @notice Submit a device-signed action. Anyone can relay the signature.
-    function attest(ActionProof calldata proof, string calldata requestURI, bytes calldata signature) external {
-        address device = registry.agentDevice(proof.agentId);
-        if (device == address(0)) revert NotBound();
+    function attest(ActionProof calldata proof, bytes calldata signature) external {
+        address device = registry.activeDevice(proof.agentId);
         if (nonceUsed[proof.agentId][proof.nonce]) revert NonceUsed();
         if (proof.timestamp + MAX_PROOF_AGE < block.timestamp) revert StaleProof();
         if (proof.timestamp > block.timestamp + MAX_FUTURE_SKEW) revert FutureProof();
@@ -69,10 +71,11 @@ contract KineticAttestor is EIP712 {
         }
 
         nonceUsed[proof.agentId][proof.nonce] = true;
+        bytes32 uriHash = keccak256(bytes(proof.requestURI));
         bytes32 requestHash =
-            keccak256(abi.encode(proof.agentId, proof.action, proof.paramsHash, proof.timestamp, proof.nonce));
+            keccak256(abi.encode(proof.agentId, proof.action, proof.paramsHash, uriHash, proof.timestamp, proof.nonce));
 
-        validation.validationRequest(address(this), proof.agentId, requestURI, requestHash);
+        validation.validationRequest(address(this), proof.agentId, proof.requestURI, requestHash);
         validation.validationResponse(requestHash, VERIFIED_RESPONSE, "", proof.paramsHash, ACTION_TAG);
         emit Attested(proof.agentId, device, requestHash, proof.action);
     }
@@ -84,7 +87,15 @@ contract KineticAttestor is EIP712 {
     function _digest(ActionProof calldata proof) private view returns (bytes32) {
         return _hashTypedDataV4(
             keccak256(
-                abi.encode(ACTION_TYPEHASH, proof.agentId, proof.action, proof.paramsHash, proof.timestamp, proof.nonce)
+                abi.encode(
+                    ACTION_TYPEHASH,
+                    proof.agentId,
+                    proof.action,
+                    proof.paramsHash,
+                    keccak256(bytes(proof.requestURI)),
+                    proof.timestamp,
+                    proof.nonce
+                )
             )
         );
     }

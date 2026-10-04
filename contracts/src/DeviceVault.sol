@@ -29,7 +29,6 @@ contract DeviceVault is IDeviceVault, EIP712, ReentrancyGuard {
     error NotOwner();
     error NotDevice();
     error UnknownAgent();
-    error AlreadyInitialized();
     error BadSignature();
     error Expired();
     error NotALoosen();
@@ -46,6 +45,7 @@ contract DeviceVault is IDeviceVault, EIP712, ReentrancyGuard {
     error NotAllowed();
 
     event Initialized(uint256 indexed agentId, uint256 perTxCap, uint256 dailyCap);
+    event Rebound(uint256 indexed agentId, uint256 perTxCap, uint256 dailyCap);
     event Deposited(uint256 indexed agentId, address indexed from, uint256 amount);
     event Paid(uint256 indexed agentId, address indexed recipient, uint256 amount);
     event GasToppedUp(uint256 indexed agentId, address indexed device, uint256 amount);
@@ -62,7 +62,13 @@ contract DeviceVault is IDeviceVault, EIP712, ReentrancyGuard {
     mapping(uint256 agentId => bool initialized) private _initialized;
     mapping(uint256 agentId => Limits limits) private _limits;
     mapping(uint256 agentId => mapping(address recipient => bool allowed)) private _allowed;
-    mapping(uint256 agentId => mapping(uint256 day => uint256 spent)) private _spent;
+    mapping(uint256 agentId => address[] recipients) private _recipientList;
+    mapping(uint256 agentId => SpendWindow window) private _window;
+
+    struct SpendWindow {
+        uint256 start;
+        uint256 spent;
+    }
     mapping(uint256 agentId => uint256 balance) private _balances;
     mapping(uint256 agentId => uint256 nonce) public loosenNonce;
 
@@ -71,12 +77,18 @@ contract DeviceVault is IDeviceVault, EIP712, ReentrancyGuard {
         registry = KineticRegistry(registry_);
     }
 
-    function initialize(uint256 agentId, uint256 perTxCap, uint256 dailyCap) external {
+    function bindLimits(uint256 agentId, uint256 perTxCap, uint256 dailyCap) external {
         if (msg.sender != address(registry)) revert NotRegistry();
-        if (_initialized[agentId]) revert AlreadyInitialized();
-        _initialized[agentId] = true;
-        _limits[agentId] = Limits({perTxCap: perTxCap, dailyCap: dailyCap, paused: false});
-        emit Initialized(agentId, perTxCap, dailyCap);
+        if (!_initialized[agentId]) {
+            _initialized[agentId] = true;
+            _limits[agentId] = Limits({perTxCap: perTxCap, dailyCap: dailyCap, paused: false});
+            emit Initialized(agentId, perTxCap, dailyCap);
+            return;
+        }
+        _clearAllowlist(agentId);
+        delete _window[agentId];
+        _limits[agentId] = Limits({perTxCap: perTxCap, dailyCap: dailyCap, paused: true});
+        emit Rebound(agentId, perTxCap, dailyCap);
     }
 
     function pauseFromRegistry(uint256 agentId) external {
@@ -95,18 +107,17 @@ contract DeviceVault is IDeviceVault, EIP712, ReentrancyGuard {
 
     /// @notice Device-only payment. This is the only path that sends value to a third party.
     function pay(uint256 agentId, address recipient, uint256 amount) external nonReentrant {
-        if (msg.sender != registry.agentDevice(agentId)) revert NotDevice();
+        if (msg.sender != registry.activeDevice(agentId)) revert NotDevice();
         if (recipient == address(0)) revert ZeroAddress();
         _spend(agentId, recipient, amount, true);
         emit Paid(agentId, recipient, amount);
     }
 
-    /// @notice Send gas to the registered device. It spends the same caps and
-    /// cannot be redirected to any other address.
+    /// @notice Owner sends gas to the active device. The device cannot pull funds itself.
+    /// The transfer still counts against the caps and cannot be redirected.
     function topUpGas(uint256 agentId, uint256 amount) external nonReentrant {
-        address device = registry.agentDevice(agentId);
-        if (device == address(0)) revert NotDevice();
-        if (msg.sender != device && msg.sender != _owner(agentId)) revert NotDevice();
+        if (msg.sender != _owner(agentId)) revert NotOwner();
+        address device = registry.activeDevice(agentId);
         _spend(agentId, device, amount, false);
         emit GasToppedUp(agentId, device, amount);
     }
@@ -163,6 +174,7 @@ contract DeviceVault is IDeviceVault, EIP712, ReentrancyGuard {
             signature
         );
         _allowed[agentId][recipient] = true;
+        _recipientList[agentId].push(recipient);
         emit RecipientAllowed(agentId, recipient);
     }
 
@@ -171,6 +183,7 @@ contract DeviceVault is IDeviceVault, EIP712, ReentrancyGuard {
         _existing(agentId);
         if (!_allowed[agentId][recipient]) revert NotAllowed();
         _allowed[agentId][recipient] = false;
+        _removeRecipient(agentId, recipient);
         emit RecipientDisallowed(agentId, recipient);
     }
 
@@ -204,8 +217,11 @@ contract DeviceVault is IDeviceVault, EIP712, ReentrancyGuard {
         return _balances[agentId];
     }
 
+    /// @notice Amount spent in the current 24-hour window. Zero once that window has elapsed.
     function spentToday(uint256 agentId) external view returns (uint256) {
-        return _spent[agentId][block.timestamp / 1 days];
+        SpendWindow storage window = _window[agentId];
+        if (window.start == 0 || block.timestamp >= window.start + 1 days) return 0;
+        return window.spent;
     }
 
     function isAllowed(uint256 agentId, address recipient) external view returns (bool) {
@@ -238,11 +254,15 @@ contract DeviceVault is IDeviceVault, EIP712, ReentrancyGuard {
         if (amount == 0) revert ZeroAmount();
         if (checkAllowlist && !_allowed[agentId][recipient]) revert NotAllowlisted();
         if (amount > limits.perTxCap) revert PerTxCap();
-        uint256 day = block.timestamp / 1 days;
-        uint256 nextSpent = _spent[agentId][day] + amount;
+        SpendWindow storage window = _window[agentId];
+        if (window.start == 0 || block.timestamp >= window.start + 1 days) {
+            window.start = block.timestamp;
+            window.spent = 0;
+        }
+        uint256 nextSpent = window.spent + amount;
         if (nextSpent > limits.dailyCap) revert DailyCap();
         if (_balances[agentId] < amount) revert InsufficientBalance();
-        _spent[agentId][day] = nextSpent;
+        window.spent = nextSpent;
         _balances[agentId] -= amount;
         (bool ok,) = recipient.call{value: amount}("");
         if (!ok) revert TransferFailed();
@@ -266,6 +286,25 @@ contract DeviceVault is IDeviceVault, EIP712, ReentrancyGuard {
 
     function _owner(uint256 agentId) private view returns (address) {
         return registry.ownerOfAgent(agentId);
+    }
+
+    function _clearAllowlist(uint256 agentId) private {
+        address[] storage list = _recipientList[agentId];
+        for (uint256 i; i < list.length; ++i) {
+            _allowed[agentId][list[i]] = false;
+        }
+        delete _recipientList[agentId];
+    }
+
+    function _removeRecipient(uint256 agentId, address recipient) private {
+        address[] storage list = _recipientList[agentId];
+        uint256 length = list.length;
+        for (uint256 i; i < length; ++i) {
+            if (list[i] != recipient) continue;
+            list[i] = list[length - 1];
+            list.pop();
+            return;
+        }
     }
 
     receive() external payable {

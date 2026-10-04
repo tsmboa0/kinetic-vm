@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {KineticTestBase} from "./KineticTestBase.sol";
 import {DeviceVault} from "../src/DeviceVault.sol";
+import {KineticRegistry} from "../src/KineticRegistry.sol";
 
 contract DeviceVaultTest is KineticTestBase {
     uint256 internal agentId;
@@ -45,13 +46,17 @@ contract DeviceVaultTest is KineticTestBase {
 
         vm.prank(device);
         vault.pay(agentId, recipient, 1 ether);
-        vm.prank(device);
+        vm.prank(owner);
         vault.topUpGas(agentId, 1 ether);
         assertEq(device.balance, 1 ether);
 
         vm.prank(device);
         vm.expectRevert(DeviceVault.DailyCap.selector);
         vault.pay(agentId, recipient, 1);
+
+        vm.prank(device);
+        vm.expectRevert(DeviceVault.NotOwner.selector);
+        vault.topUpGas(agentId, 1);
 
         vm.prank(device);
         vm.expectRevert(DeviceVault.NotAllowlisted.selector);
@@ -63,6 +68,10 @@ contract DeviceVaultTest is KineticTestBase {
         vault.pause(agentId);
 
         vm.prank(device);
+        vm.expectRevert(DeviceVault.NotOwner.selector);
+        vault.topUpGas(agentId, 1);
+
+        vm.prank(owner);
         vm.expectRevert(DeviceVault.Paused.selector);
         vault.topUpGas(agentId, 1);
 
@@ -129,8 +138,51 @@ contract DeviceVaultTest is KineticTestBase {
         registry.revoke(agentId);
 
         vm.prank(device);
-        vm.expectRevert(DeviceVault.NotDevice.selector);
+        vm.expectRevert(KineticRegistry.NotBound.selector);
         vault.pay(agentId, recipient, 0.1 ether);
+    }
+
+    function test_daily_cap_is_a_rolling_day_not_a_calendar_day() public {
+        vm.prank(owner);
+        vault.allowRecipient(agentId, recipient, 0, "");
+
+        uint256 start = block.timestamp;
+        vm.prank(device);
+        vault.pay(agentId, recipient, 1 ether);
+        vm.prank(device);
+        vault.pay(agentId, recipient, 1 ether);
+
+        vm.warp(start + 12 hours);
+        vm.prank(device);
+        vm.expectRevert(DeviceVault.DailyCap.selector);
+        vault.pay(agentId, recipient, 1);
+
+        vm.warp(start + 1 days);
+        assertEq(vault.spentToday(agentId), 0);
+        vm.prank(device);
+        vault.pay(agentId, recipient, 1 ether);
+        assertEq(vault.spentToday(agentId), 1 ether);
+    }
+
+    function test_nft_transfer_stops_spending_until_the_new_owner_links_again() public {
+        vm.prank(owner);
+        vault.allowRecipient(agentId, recipient, 0, "");
+        vm.prank(owner);
+        identity.transferFrom(owner, other, agentId);
+
+        vm.prank(device);
+        vm.expectRevert(KineticRegistry.OwnerChanged.selector);
+        vault.pay(agentId, recipient, 0.1 ether);
+
+        registry.releaseTransferred(agentId);
+        address nextDevice = vm.addr(0xD4);
+        bytes memory sig = _sign(0xD4, registry.hashClaim(nextDevice, other, 0, _deadline()));
+        vm.prank(other);
+        registry.link(agentId, nextDevice, sig, _deadline(), KineticRegistry.Limits(1 ether, 2 ether));
+
+        assertFalse(vault.isAllowed(agentId, recipient));
+        (,, bool paused) = vault.limitsOf(agentId);
+        assertTrue(paused);
     }
 
     function test_raw_ether_is_rejected() public {
