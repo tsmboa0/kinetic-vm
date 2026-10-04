@@ -41,7 +41,6 @@ cli-hardware-about = USBハードウェアを発見・内省
 cli-peripheral-about = ハードウェアペリフェラルを管理
 cli-memory-about = エージェントメモリエントリを管理
 cli-config-about = ZeroClaw設定を管理
-cli-update-about = ZeroClaw更新を確認・適用
 cli-self-test-about = 診断自己テストを実行
 cli-completions-about = シェル補完スクリプトを生成
 cli-desktop-about = コンパニオンデスクトップアプリを起動、またはダウンロードページを開く
@@ -311,20 +310,6 @@ cli-config-long-about =
     zeroclaw config schema > schema.json
 
     プロパティパスタブ補完は `zeroclaw completions <shell>` に自動的に含まれます。
-cli-update-long-about =
-    ZeroClaw 更新を確認して適用します。
-
-    デフォルトでは、6 段階のパイプライン（プリフライト、ダウンロード、バックアップ、検証、スワップ、スモークテスト）で最新リリースをダウンロードしてインストールします。失敗時に自動ロールバックします。
-
-    更新を確認するだけでインストールしない場合は --check を使用してください。
-    インストール確認プロンプトをスキップするには --force を使用してください。
-    最新ではなく特定のリリースをターゲットにするには --version を使用してください。
-
-    例:
-    zeroclaw update                      # 最新をダウンロードしてインストール
-    zeroclaw update --check              # チェックのみ、インストールしない
-    zeroclaw update --force              # 確認なしでインストール
-    zeroclaw update --version 0.6.0      # 特定のバージョンをインストール
 cli-self-test-long-about =
     診断自己テストを実行して ZeroClaw インストールを検証します。
 
@@ -894,12 +879,6 @@ cli-hardware-feature-required = ハードウェア検出には 'hardware' 機能
 cli-hardware-feature-build = ビルド方法: cargo build --features hardware
 cli-hardware-unsupported-platform = このプラットフォームではハードウェア USB 検出はサポートされていません。
 cli-hardware-supported-platforms = 対応プラットフォーム: Linux、macOS、Windows。
-cli-update-already-current = すでに最新です (v{$version})。
-cli-update-success = v{$version} に正常に更新しました！
-cli-update-prebuilt-channel-note = ビルド済み更新は軽量な標準配布セットを使います。Slack やその他の配布対象外チャンネルを使うには、`./install.sh --source --preset full`、`--features channels-full`、または特定の `channel-*` 機能でソースからビルドしてください。
-cli-update-available = 更新が利用可能です: v{$current} -> v{$latest}
-cli-update-forcing-reinstall = 再インストールを強制します: v{$current} -> v{$latest}
-cli-update-not-writable = インストールディレクトリ {$dir} は書き込みできません（{$error}）。権限を昇格して `zeroclaw update` を再実行してください（macOS/Linux では sudo、Windows では管理者コンソール）
 cli-selftest-all-passed = {$total} 件すべてのチェックに合格しました。
 cli-selftest-some-failed = {$failed}/{$total} 件のチェックが失敗しました。
 cli-selftest-channel-config-uncompiled = コンパイル済みチャンネル種別 {$compiled} 件、コンパイル済みかつ設定済み {$configured} 件。設定済みですが未コンパイル: {$names}。ソースから `./install.sh --source --preset full`、`--features channels-full`、または特定の `channel-*` 機能でビルドしてください。

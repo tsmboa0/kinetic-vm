@@ -2,7 +2,6 @@
 # Columns: repository-relative path, violation kind, allowed count, normalized literal.
 src/commands/self_test.rs	println	1	" \x1b[31m{}\x1b[0m"
 src/commands/self_test.rs	println	1	" \x1b[32m{}\x1b[0m"
-src/commands/update.rs	eprintln	1	"Manual recovery: cp {} {}"
 src/cron/mod.rs	println	1	"- {} | {:?} | next={} | last={} ({})"
 src/main.rs	eprintln	1	" \u{26a0} {path} is an encrypted secret \u{2014} using masked input."
 src/main.rs	eprintln	1	" no live catalog for `{provider_type}` — \ enter the model id manually."

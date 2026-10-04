@@ -1556,39 +1556,6 @@ Property path tab completion is included automatically in `zeroclaw completions 
         config_command: ConfigCommands,
     },
 
-    /// Check for and apply updates
-    // i18n-exempt: clap derive help — framework requires a compile-time literal
-    #[command(long_about = "\
-Check for and apply ZeroClaw updates.
-
-By default, downloads and installs the latest release with a \
-6-phase pipeline: preflight, download, backup, validate, swap, \
-and smoke test. Automatic rollback on failure.
-
-Use --check to only check for updates without installing.
-Use --force to skip the confirmation prompt.
-Use --version to target a specific release instead of latest.
-
-Examples:
-  zeroclaw update                      # download and install latest
-  zeroclaw update --check              # check only, don't install
-  zeroclaw update --force              # install without confirmation
-  zeroclaw update --version 0.6.0      # install specific version")]
-    Update {
-        /// Only check for updates, don't install
-        #[arg(long)]
-        check: bool,
-        /// Install even if the target is not newer (reinstall or downgrade/pin to --version)
-        #[arg(long)]
-        force: bool,
-        /// Target version (default: latest)
-        #[arg(long)]
-        version: Option<String>,
-        /// With --check, emit machine-readable JSON instead of human text
-        #[arg(long)]
-        json: bool,
-    },
-
     /// Run diagnostic self-tests
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
@@ -9133,56 +9100,6 @@ Add pricing to the active provider profile or supply a catalog entry."
             let LocalesCommands::Fetch { locale, catalog } = locales_command;
             fetch_locales(&locale, catalog.as_deref()).await?;
             Ok(())
-        }
-
-        Commands::Update {
-            check,
-            force,
-            version,
-            json,
-        } => {
-            if check {
-                let info = commands::update::check(version.as_deref()).await?;
-                if json {
-                    // Machine-readable shape consumed by the gateway's
-                    // `GET /api/version/check`. Keep field names stable.
-                    println!(
-                        "{}",
-                        serde_json::to_string(&serde_json::json!({
-                            "current_version": info.current_version,
-                            "latest_version": info.latest_version,
-                            "is_newer": info.is_newer,
-                            "release_url": info.release_url,
-                            "release_notes": info.release_notes,
-                            "published_at": info.published_at,
-                        }))?
-                    );
-                } else if info.is_newer {
-                    println!(
-                        "{}",
-                        ta(
-                            "cli-update-available",
-                            &[
-                                ("current", &info.current_version),
-                                ("latest", &info.latest_version)
-                            ],
-                            "Update available"
-                        )
-                    );
-                } else {
-                    println!(
-                        "{}",
-                        ta(
-                            "cli-update-already-current",
-                            &[("version", &info.current_version)],
-                            "Already up to date"
-                        )
-                    );
-                }
-                Ok(())
-            } else {
-                commands::update::run(version.as_deref(), force).await
-            }
         }
 
         Commands::SelfTest { quick } => {

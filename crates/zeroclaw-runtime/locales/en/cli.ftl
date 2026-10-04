@@ -42,7 +42,6 @@ cli-hardware-about = Discover and introspect USB hardware
 cli-peripheral-about = Manage hardware peripherals
 cli-memory-about = Manage agent memory entries
 cli-config-about = Manage ZeroClaw configuration
-cli-update-about = Check for and apply ZeroClaw updates
 cli-self-test-about = Run diagnostic self-tests
 cli-completions-about = Generate shell completion scripts
 cli-desktop-about = Launch the companion desktop app, or open its download page
@@ -345,21 +344,6 @@ cli-config-long-about =
       zeroclaw config schema > schema.json
 
     Property path tab completion is included automatically in `zeroclaw completions <shell>`.
-
-cli-update-long-about =
-    Check for and apply ZeroClaw updates.
-
-    By default, downloads and installs the latest release with a 6-phase pipeline: preflight, download, backup, validate, swap, and smoke test. Automatic rollback on failure.
-
-    Use --check to only check for updates without installing.
-    Use --force to skip the confirmation prompt.
-    Use --version to target a specific release instead of latest.
-
-    Examples:
-      zeroclaw update                      # download and install latest
-      zeroclaw update --check              # check only, don't install
-      zeroclaw update --force              # install without confirmation
-      zeroclaw update --version 0.6.0      # install specific version
 
 cli-self-test-long-about =
     Run diagnostic self-tests to verify the ZeroClaw installation.
@@ -1009,15 +993,6 @@ cli-hardware-feature-build = Build with: cargo build --features hardware
 cli-hardware-unsupported-platform = Hardware USB discovery is not supported on this platform.
 cli-hardware-supported-platforms = Supported platforms: Linux, macOS, Windows.
 
-# ── update (zeroclaw update) ──
-cli-update-already-current = Already up to date (v{$version}).
-cli-update-success = Successfully updated to v{$version}!
-cli-update-prebuilt-channel-note = Pre-built updates use the lean standard distribution. Build from source with `./install.sh --source --preset full`, `--features channels-full`, or a specific `channel-*` feature for Slack and other channels outside that distribution.
-cli-update-available = Update available: v{$current} -> v{$latest}
-cli-update-forcing-reinstall = Forcing reinstall: v{$current} -> v{$latest}
-cli-update-not-writable = install directory {$dir} is not writable ({$error}); re-run `zeroclaw update` with elevated privileges (sudo on macOS/Linux, an Administrator console on Windows)
-
-# ── self-test (zeroclaw self-test) ──
 cli-selftest-all-passed = All {$total} checks passed.
 cli-selftest-some-failed = {$failed}/{$total} checks failed.
 cli-selftest-channel-config-uncompiled = {$compiled} compiled channel types, {$configured} compiled/configured; configured but not compiled: {$names}. Build from source with `./install.sh --source --preset full`, `--features channels-full`, or the specific `channel-*` feature.

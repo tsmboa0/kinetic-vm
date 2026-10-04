@@ -5098,16 +5098,14 @@ pub struct GatewayConfig {
     #[serde(default = "default_gateway_long_running_request_timeout_secs")]
     pub long_running_request_timeout_secs: u64,
 
-    /// Poll GitHub for newer releases and show an "update available" indicator
-    /// on the dashboard version tag. Read-only; does not install anything.
+    /// Exposed on `/api/status`. Reserved for a future release check.
     /// (default: true)
     #[serde(default = "default_true")]
     pub check_updates: bool,
 
-    /// Allow triggering a self-upgrade (binary swap via `zeroclaw update`) from
-    /// the dashboard. This is a remote-code-execution-adjacent surface: any
-    /// authenticated dashboard user could replace the running binary. Keep off
-    /// unless you trust every paired client. (default: false)
+    /// Exposed on `/api/status`. Reserved for a future binary updater.
+    /// Keep off: it is the gate for replacing the running binary.
+    /// (default: false)
     #[serde(default)]
     pub allow_self_upgrade: bool,
 }

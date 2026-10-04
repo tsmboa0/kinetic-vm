@@ -41,7 +41,6 @@ cli-hardware-about = Descubre e inspecciona hardware USB
 cli-peripheral-about = Gestiona los periféricos de hardware
 cli-memory-about = Gestiona las entradas de memoria del agente
 cli-config-about = Gestiona la configuración de ZeroClaw
-cli-update-about = Comprueba y aplica las actualizaciones de ZeroClaw
 cli-self-test-about = Ejecuta autopruebas de diagnóstico
 cli-completions-about = Genera scripts de autocompletado del shell
 cli-desktop-about = Inicia la aplicación de escritorio complementaria, o abre su página de descarga
@@ -313,20 +312,6 @@ cli-config-long-about =
     zeroclaw config schema > schema.json
 
     El autocompletado de la ruta de propiedades se incluye automáticamente en `zeroclaw completions <shell>`.
-cli-update-long-about =
-    Comprueba y aplica actualizaciones de ZeroClaw.
-
-    De forma predeterminada, descarga e instala la última versión con un pipeline de 6 fases: verificación previa, descarga, copia de seguridad, validación, intercambio y prueba de humo. Reversión automática en caso de fallo.
-
-    Usa --check para solo comprobar actualizaciones sin instalar.
-    Usa --force para omitir el aviso de confirmación.
-    Usa --version para apuntar a una versión específica en lugar de la última.
-
-    Ejemplos:
-    zeroclaw update                      # descargar e instalar la última
-    zeroclaw update --check              # solo comprobar, no instalar
-    zeroclaw update --force              # instalar sin confirmación
-    zeroclaw update --version 0.6.0      # instalar versión específica
 cli-self-test-long-about =
     Ejecuta autodiagnósticos para verificar la instalación de ZeroClaw.
 
@@ -896,12 +881,6 @@ cli-hardware-feature-required = El descubrimiento de hardware requiere la caract
 cli-hardware-feature-build = Compila con: cargo build --features hardware
 cli-hardware-unsupported-platform = El descubrimiento de USB por hardware no es compatible con esta plataforma.
 cli-hardware-supported-platforms = Plataformas compatibles: Linux, macOS, Windows.
-cli-update-already-current = Ya está actualizado (v{$version}).
-cli-update-success = ¡Actualizado correctamente a v{$version}!
-cli-update-prebuilt-channel-note = Las actualizaciones precompiladas usan la distribución estándar ligera. Compila desde el código fuente con `./install.sh --source --preset full`, `--features channels-full` o una característica `channel-*` específica para Slack y otros canales no incluidos en esa distribución.
-cli-update-available = Actualización disponible: v{$current} -> v{$latest}
-cli-update-forcing-reinstall = Forzando la reinstalación: v{$current} -> v{$latest}
-cli-update-not-writable = el directorio de instalación {$dir} no admite escritura ({$error}); vuelve a ejecutar `zeroclaw update` con privilegios elevados (sudo en macOS/Linux, una consola de administrador en Windows)
 cli-selftest-all-passed = Las {$total} comprobaciones pasaron.
 cli-selftest-some-failed = {$failed}/{$total} comprobaciones fallaron.
 cli-selftest-channel-config-uncompiled = {$compiled} tipos de canal compilados, {$configured} compilados/configurados; configurados pero no compilados: {$names}. Compila desde el código fuente con `./install.sh --source --preset full`, `--features channels-full` o la característica `channel-*` específica.

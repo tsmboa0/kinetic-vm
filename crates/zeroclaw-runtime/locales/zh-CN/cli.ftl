@@ -41,7 +41,6 @@ cli-hardware-about = 发现并检查 USB 硬件
 cli-peripheral-about = 管理硬件外设
 cli-memory-about = 管理智能体记忆条目
 cli-config-about = 管理 ZeroClaw 配置
-cli-update-about = 检查并应用 ZeroClaw 更新
 cli-self-test-about = 运行诊断自检
 cli-completions-about = 生成 shell 补全脚本
 cli-desktop-about = 启动配套桌面应用，或打开其下载页面
@@ -312,20 +311,6 @@ cli-config-long-about =
     zeroclaw config schema > schema.json
 
     属性路径 Tab 补全会自动包含在 `zeroclaw completions <shell>` 中。
-cli-update-long-about =
-    检查并应用 ZeroClaw 更新。
-
-    默认情况下，使用 6 阶段流水线下载并安装最新版本：预检、下载、备份、验证、交换和冒烟测试。失败时自动回滚。
-
-    使用 --check 仅检查更新而不安装。
-    使用 --force 跳过确认提示。
-    使用 --version 指定特定版本而非最新版本。
-
-    示例：
-    zeroclaw update                      # 下载并安装最新版本
-    zeroclaw update --check              # 仅检查，不安装
-    zeroclaw update --force              # 不确认直接安装
-    zeroclaw update --version 0.6.0      # 安装特定版本
 cli-self-test-long-about =
     运行诊断自检以验证 ZeroClaw 安装。
 
@@ -895,12 +880,6 @@ cli-hardware-feature-required = 硬件发现需要 'hardware' 功能。
 cli-hardware-feature-build = 构建命令：cargo build --features hardware
 cli-hardware-unsupported-platform = 此平台不支持硬件 USB 发现。
 cli-hardware-supported-platforms = 支持的平台：Linux、macOS、Windows。
-cli-update-already-current = 已是最新版本（v{$version}）。
-cli-update-success = 已成功更新至 v{$version}！
-cli-update-prebuilt-channel-note = 预构建更新使用精简的标准发行集。如需 Slack 和其他未包含在该发行集中的通道，请从源码构建：`./install.sh --source --preset full`、`--features channels-full`，或指定对应的 `channel-*` 功能。
-cli-update-available = 有可用更新：v{$current} -> v{$latest}
-cli-update-forcing-reinstall = 强制重新安装：v{$current} -> v{$latest}
-cli-update-not-writable = 安装目录 {$dir} 不可写（{$error}）；请使用更高权限重新运行 `zeroclaw update`（在 macOS/Linux 上使用 sudo，在 Windows 上使用管理员控制台）
 cli-selftest-all-passed = 全部 {$total} 项检查通过。
 cli-selftest-some-failed = {$failed}/{$total} 项检查失败。
 cli-selftest-channel-config-uncompiled = {$compiled} 个通道类型已编译，{$configured} 个已编译且已配置；已配置但未编译：{$names}。请从源码构建：`./install.sh --source --preset full`、`--features channels-full`，或指定对应的 `channel-*` 功能。
