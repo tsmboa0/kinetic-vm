@@ -42,7 +42,7 @@ Local caches exist only for offline startup and the chain wins on conflict.
 ## 4. User-Facing Text
 
 User-facing CLI, tool, and onboarding text uses Fluent keys through the
-runtime i18n helpers in `crates/*-runtime/src/i18n.rs` rather than bare
+runtime i18n helpers in `crates/kinetic-runtime/src/i18n.rs` rather than bare
 literals. Logs and tracing stay in English.
 
 ## 5. Validation

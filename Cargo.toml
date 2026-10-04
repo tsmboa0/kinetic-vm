@@ -7,7 +7,7 @@ version = "0.8.5"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/tsmboa0/kinetic-vm"
-homepage = "https://www.zeroclaw.com"
+homepage = "https://github.com/tsmboa0/kinetic-vm"
 rust-version = "1.96.0"
 
 [workspace.dependencies]
@@ -49,7 +49,7 @@ license.workspace = true
 description = "Zero overhead. Zero compromise. 100% Rust. The fastest, smallest AI assistant."
 repository.workspace = true
 homepage.workspace = true
-documentation = "https://docs.zeroclaw.com"
+documentation = "https://github.com/tsmboa0/kinetic-vm"
 readme = "README.md"
 keywords = ["ai", "agent", "cli", "assistant", "chatbot"]
 categories = ["command-line-utilities", "api-bindings"]

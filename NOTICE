@@ -1,43 +1,47 @@
+KineticVM
+
+KineticVM includes code from ZeroClaw © ZeroClaw Labs, MIT OR Apache-2.0.
+
+This repository is https://github.com/tsmboa0/kinetic-vm.
+It is a modified fork. It is not the official ZeroClaw project.
+
+
 ZeroClaw
 Copyright 2025 ZeroClaw Labs
 
-This product includes software developed at ZeroClaw Labs (https://github.com/zeroclaw-labs).
-
-Official Repository
-===================
+This product includes software developed at ZeroClaw Labs
+(https://github.com/zeroclaw-labs).
 
 The only official ZeroClaw repository is:
 https://github.com/zeroclaw-labs/zeroclaw
 
 Any other repository claiming to be ZeroClaw is unauthorized.
-See TRADEMARK.md for the full trademark policy.
+
 
 License
 =======
 
-This software is available under a dual-license model:
+The included ZeroClaw code, and this fork, are available under either:
 
   1. MIT License — see LICENSE-MIT
   2. Apache License 2.0 — see LICENSE-APACHE
 
-You may use either license. Contributors grant rights under both.
-See CLA.md for the contributor license agreement.
+You may use either license. The copyright notice in those files is
+ZeroClaw Labs' and must stay.
+
 
 Contributors
 ============
 
-This NOTICE file is maintained by repository automation.
-For the latest contributor list, see the repository contributors page:
+Contributors to ZeroClaw retain copyright ownership of their contributions.
+Contributions are attributed in the upstream commit history:
 https://github.com/zeroclaw-labs/zeroclaw/graphs/contributors
 
-All contributors retain copyright ownership of their contributions.
-Contributions are permanently attributed in the repository commit history.
 Patent rights are protected for all contributors under Apache License 2.0.
+
 
 Third-Party Dependencies
 ========================
 
-This project uses third-party libraries and components,
-each licensed under their respective terms.
-
-See Cargo.lock for a complete dependency list.
+This project uses third-party libraries and components, each licensed under
+their respective terms. See Cargo.lock for the dependency list.

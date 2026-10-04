@@ -1,68 +1,41 @@
 # Security Policy
 
-## Supported Versions
+## Reporting a vulnerability
 
-Security fixes ship on the latest release line only. There are no maintenance
-branches, and earlier minor versions do not receive backported fixes.
+Do not open a public GitHub issue for a security vulnerability.
 
-| Version                    | Supported          |
-| -------------------------- | ------------------ |
-| Latest released minor line | :white_check_mark: |
-| Earlier minor lines        | :x:                |
+Report it through GitHub private vulnerability reporting on this repository:
 
-For example, if the latest release is `0.8.6`, the supported minor line is `0.8.x`; `0.7.x` and older lines are unsupported.
+https://github.com/tsmboa0/kinetic-vm/security/advisories/new
 
-Upgrade to the latest release before reporting. If the issue still reproduces
-there, report it as described below.
+There is no separate security email yet. Please include:
 
-## Reporting a Vulnerability
+- a description of the vulnerability
+- steps to reproduce
+- what an attacker gains
+- a suggested fix, if you have one
 
-**Please do NOT open a public GitHub issue for security vulnerabilities.**
+## What the runtime enforces
 
-Instead, please report them responsibly:
+Default autonomy is supervised.
 
-1. **Email**: Send details to the maintainers via GitHub private vulnerability reporting
-2. **GitHub**: Use [GitHub Security Advisories](https://github.com/zeroclaw-labs/zeroclaw/security/advisories/new)
+- **ReadOnly** — the agent can read. It cannot write or run a shell.
+- **Supervised** — the agent acts inside allowlists. This is the default.
+- **Full** — the agent has full access inside the workspace sandbox.
 
-### What to Include
+The layers in front of a tool call:
 
-- Description of the vulnerability
-- Steps to reproduce
-- Impact assessment
-- Suggested fix (if any)
+1. Workspace isolation. File operations stay inside the workspace directory.
+2. Path traversal blocking. `..` sequences and absolute paths are rejected.
+3. Command allowlisting. Only approved commands can execute.
+4. Forbidden paths. Critical system paths (`/etc`, `/root`, `~/.ssh`) stay blocked.
+5. Rate and cost limits. Actions per hour and cost per day are capped.
 
-### Response Timeline
+Device signing keys stay behind the signer interface. A device key must never
+hold operator rights over its own identity. Spending, once the vault exists,
+goes through the vault limits only.
 
-- **Acknowledgment**: Within 48 hours
-- **Assessment**: Within 1 week
-- **Fix**: Within 2 weeks for critical issues
-
-## Security Architecture
-
-KineticVM implements defense-in-depth security:
-
-### Autonomy Levels
-- **ReadOnly** — Agent can only read, no shell or write access
-- **Supervised** — Agent can act within allowlists (default)
-- **Full** — Agent has full access within workspace sandbox
-
-### Sandboxing Layers
-1. **Workspace isolation** — All file operations confined to workspace directory
-2. **Path traversal blocking** — `..` sequences and absolute paths rejected
-3. **Command allowlisting** — Only explicitly approved commands can execute
-4. **Forbidden path list** — Critical system paths (`/etc`, `/root`, `~/.ssh`) always blocked
-5. **Rate limiting** — Max actions per hour and cost per day caps
-
-### What We Protect Against
-- Path traversal attacks (`../../../etc/passwd`)
-- Command injection (`rm -rf /`, `curl | sh`)
-- Workspace escape via symlinks or absolute paths
-- Runaway cost from LLM API calls
-- Unauthorized shell command execution
-
-## Security Testing
-
-All security mechanisms are covered by automated tests (129 tests):
+## Tests
 
 ```bash
 cargo test -- security
@@ -70,30 +43,3 @@ cargo test -- tools::shell
 cargo test -- tools::file_read
 cargo test -- tools::file_write
 ```
-
-## Container Security
-
-KineticVM Docker images follow CIS Docker Benchmark best practices:
-
-| Control | Implementation |
-|---------|----------------|
-| **4.1 Non-root user** | Container runs as UID 65534 (distroless nonroot) |
-| **4.2 Minimal base image** | `gcr.io/distroless/cc-debian13:nonroot` — no shell, no package manager |
-| **4.6 HEALTHCHECK** | Not applicable (stateless CLI/gateway) |
-| **5.25 Read-only filesystem** | Supported via `docker run --read-only` with `/workspace` volume |
-
-### Verifying Container Security
-
-```bash
-# Build and verify non-root user
-docker build -t kinetic .
-docker inspect --format='{{.Config.User}}' kinetic
-# Expected: 65534:65534
-
-# Run with read-only filesystem (production hardening)
-docker run --read-only -v /path/to/workspace:/workspace kinetic gateway
-```
-
-### CI Enforcement
-
-The `source-images` job in `.github/workflows/docker-image-pr.yml` verifies that its loaded default and Alpine `linux/amd64` images are configured to run as `65534:65534`.
