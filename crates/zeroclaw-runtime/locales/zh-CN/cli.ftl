@@ -112,7 +112,7 @@ cli-skills-install-into-bundle = { "  " }已安装到技能包 '{$alias}'。在 
 cli-skills-install-global-note = { "  " }注意：已安装到全局技能目录，没有代理会自动加载它。请使用 --bundle <alias> 重新运行，或将某个技能包分配给代理，以使其可加载。
 cli-skills-removed-archived = { "  " }{$status} 技能 '{$name}' 已从技能包 '{$bundle}' 中移除（归档于 shared/skills/_deleted/ 下）。
 cli-skills-removed-global = { "  " }{$status} 技能 '{$name}' 已从全局技能目录中移除。
-cli-skills-install-tier-official = 正在安装 {$name} v{$version} — 官方（zeroclaw-labs 维护）
+cli-skills-install-tier-official = 正在安装 {$name} v{$version} — 官方（KineticVM 维护）
 cli-skills-install-tier-community =
     正在安装 {$name} v{$version} — 社区提交
     此技能未经 ZeroClaw 审计。请检查技能内容，

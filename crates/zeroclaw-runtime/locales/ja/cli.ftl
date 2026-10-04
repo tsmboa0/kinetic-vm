@@ -110,7 +110,7 @@ cli-skills-install-into-bundle = { "  " }バンドル '{$alias}' にインスト
 cli-skills-install-global-note = { "  " }注意: グローバルスキルディレクトリにインストールされましたが、どのエージェントも自動的には読み込みません。読み込み可能にするには --bundle <alias> を付けて再実行するか、バンドルをエージェントに割り当ててください。
 cli-skills-removed-archived = { "  " }{$status} スキル '{$name}' をバンドル '{$bundle}' から削除しました（shared/skills/_deleted/ 配下にアーカイブされました）。
 cli-skills-removed-global = { "  " }{$status} スキル '{$name}' をグローバルスキルディレクトリから削除しました。
-cli-skills-install-tier-official = {$name} v{$version} をインストール中 — 公式（zeroclaw-labs 管理）
+cli-skills-install-tier-official = {$name} v{$version} をインストール中 — 公式（KineticVM 管理）
 cli-skills-install-tier-community =
     {$name} v{$version} をインストール中 — コミュニティ提出
     このスキルは ZeroClaw による監査を受けていません。スキルの内容を確認し、

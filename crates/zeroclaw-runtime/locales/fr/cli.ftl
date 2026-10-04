@@ -112,7 +112,7 @@ cli-skills-install-into-bundle = { "  " }Installé dans le lot '{$alias}'. Les a
 cli-skills-install-global-note = { "  " }Note : installé dans le répertoire global des compétences, qu'aucun agent ne charge automatiquement. Relancez avec --bundle <alias>, ou assignez un lot à un agent, pour le rendre chargeable.
 cli-skills-removed-archived = { "  " }{$status} Compétence '{$name}' retirée du lot '{$bundle}' (archivée sous shared/skills/_deleted/).
 cli-skills-removed-global = { "  " }{$status} Compétence '{$name}' retirée du répertoire global des compétences.
-cli-skills-install-tier-official = Installation de {$name} v{$version} — Officiel (maintenu par zeroclaw-labs)
+cli-skills-install-tier-official = Installation de {$name} v{$version} — Officiel (maintenu par KineticVM)
 cli-skills-install-tier-community =
     Installation de {$name} v{$version} — Soumission communautaire
     Ce skill n'est pas audité par ZeroClaw. Examinez le contenu du skill

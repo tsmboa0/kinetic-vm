@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-const DOWNLOAD_URL: &str = "https://github.com/zeroclaw-labs/zeroclaw/releases/latest";
+const DOWNLOAD_URL: &str = "https://github.com/tsmboa0/kinetic-vm/releases/latest";
 
 fn make_executable(path: &Path, contents: &str) {
     use std::os::unix::fs::PermissionsExt;

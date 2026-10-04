@@ -112,7 +112,7 @@ cli-skills-install-into-bundle = { "  " }Instalado en el paquete '{$alias}'. Los
 cli-skills-install-global-note = { "  " }Nota: se instaló en el directorio global de skills, que ningún agente carga automáticamente. Vuelve a ejecutar con --bundle <alias>, o asigna un paquete a un agente, para que sea cargable.
 cli-skills-removed-archived = { "  " }{$status} La skill '{$name}' se eliminó del paquete '{$bundle}' (archivada en shared/skills/_deleted/).
 cli-skills-removed-global = { "  " }{$status} La skill '{$name}' se eliminó del directorio global de skills.
-cli-skills-install-tier-official = Instalando {$name} v{$version} — Oficial (mantenida por zeroclaw-labs)
+cli-skills-install-tier-official = Instalando {$name} v{$version} — Oficial (mantenida por KineticVM)
 cli-skills-install-tier-community =
     Instalando {$name} v{$version} — Envío de la comunidad
     Esta skill no está auditada por ZeroClaw. Revisa el contenido de la skill

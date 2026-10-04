@@ -5553,9 +5553,9 @@ async fn fetch_locales(locale: &str, catalog: Option<&str>) -> Result<()> {
         bail!("refusing to write outside the FTL data directory");
     }
 
-    // Prefer the tag matching this binary; fall back to master.
+    // Prefer the tag matching this binary; fall back to the repo default branch.
     let version = env!("CARGO_PKG_VERSION");
-    let refs = [format!("v{version}"), "master".to_string()];
+    let refs = [format!("v{version}"), "main".to_string()];
     let client = reqwest::Client::new();
     let mut fetched = 0u32;
 
@@ -5564,7 +5564,7 @@ async fn fetch_locales(locale: &str, catalog: Option<&str>) -> Result<()> {
         let mut body: Option<String> = None;
         for git_ref in &refs {
             let url = format!(
-                "https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/{git_ref}/{repo_path}"
+                "https://raw.githubusercontent.com/tsmboa0/kinetic-vm/{git_ref}/{repo_path}"
             );
             let resp = client.get(&url).send().await?;
             if resp.status().is_success() {
@@ -8910,7 +8910,7 @@ Add pricing to the active provider profile or supply a catalog entry."
             // The marketing download page is not live; point at the GitHub
             // releases page, which hosts the desktop download assets (.deb /
             // .AppImage / .dmg) for the latest release.
-            let download_url = "https://github.com/zeroclaw-labs/zeroclaw/releases/latest";
+            let download_url = "https://github.com/tsmboa0/kinetic-vm/releases/latest";
 
             if do_install {
                 println!(

@@ -42,8 +42,8 @@ const OPEN_SKILLS_REPO_URL: &str = "https://github.com/besoeasy/open-skills";
 const OPEN_SKILLS_SYNC_MARKER: &str = ".zeroclaw-open-skills-sync";
 const OPEN_SKILLS_SYNC_INTERVAL_SECS: u64 = 60 * 60 * 24 * 7;
 
-// ─── Skills registry (zeroclaw-skills) ────────────────────────────────────────
-const SKILLS_REGISTRY_REPO_URL: &str = "https://github.com/zeroclaw-labs/zeroclaw-skills";
+// ─── Skills registry (kinetic-skills) ─────────────────────────────────────────
+const SKILLS_REGISTRY_REPO_URL: &str = "https://github.com/tsmboa0/kinetic-skills";
 const SKILLS_REGISTRY_DIR_NAME: &str = "skills-registry";
 const SKILLS_REGISTRY_SYNC_MARKER: &str = ".zeroclaw-skills-registry-sync";
 const SKILLS_REGISTRY_SYNC_INTERVAL_SECS: u64 = 60 * 60 * 24;
@@ -4205,7 +4205,7 @@ mod registry_tests {
     #[test]
     fn build_install_tier_banner_official_is_single_line() {
         let banner = english_tier_banner("auto-coder", Some("0.3.0"), SkillTier::Official);
-        assert!(banner.contains("Official (zeroclaw-labs maintained)"));
+        assert!(banner.contains("Official (KineticVM maintained)"));
         assert!(banner.contains("Installing auto-coder v0.3.0"));
         assert!(!banner.contains("not audited"));
         // One trailing newline, no warn block.

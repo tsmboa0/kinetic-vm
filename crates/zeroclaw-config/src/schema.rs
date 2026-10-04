@@ -4058,7 +4058,7 @@ pub enum SkillsPromptInjectionMode {
 
 /// An external, user-configured skill registry ZeroClaw can install from.
 ///
-/// Reuses the same git-clone mechanism as the default `zeroclaw-skills`
+/// Reuses the same git-clone mechanism as the default skills
 /// registry. Install a skill from it with `registry:<name>/<skill>`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ExternalRegistryKind {
@@ -4165,7 +4165,7 @@ pub struct SkillsConfig {
     #[serde(default)]
     pub allow_scripts: bool,
     /// URL of the skills registry repository for bare-name installs.
-    /// Default: `https://github.com/zeroclaw-labs/zeroclaw-skills`
+    /// Default: `https://github.com/tsmboa0/kinetic-skills`
     #[serde(default)]
     pub registry_url: Option<String>,
     /// Additional user-configured skill registries, installed via

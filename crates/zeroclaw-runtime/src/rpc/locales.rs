@@ -113,7 +113,7 @@ pub async fn handle_locales_fetch(
         );
 
         let version = env!("CARGO_PKG_VERSION");
-        let refs = [format!("v{version}"), "master".to_string()];
+        let refs = [format!("v{version}"), "main".to_string()];
         let client = reqwest::Client::new();
 
         let mut catalogs = Vec::new();
@@ -123,7 +123,7 @@ pub async fn handle_locales_fetch(
             let mut content: Option<String> = None;
             for git_ref in &refs {
                 let url = format!(
-                    "https://raw.githubusercontent.com/zeroclaw-labs/zeroclaw/{git_ref}/{repo_path}"
+                    "https://raw.githubusercontent.com/tsmboa0/kinetic-vm/{git_ref}/{repo_path}"
                 );
                 let resp = match client.get(&url).send().await {
                     Ok(r) => r,
