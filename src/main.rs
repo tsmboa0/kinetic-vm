@@ -5652,18 +5652,21 @@ fn async_main(command: clap::Command) -> Result<()> {
 }
 
 /// True when a desktop entry's `Name` deliberately identifies KineticVM: it is
-/// exactly "KineticVM" or "KineticVM" followed by a separator (e.g. "KineticVM
-/// Companion"), case-insensitively. Matching the visible application name — not
-/// any field that merely contains the substring "kinetic" — is what stops an
-/// unrelated entry (or a lookalike like `not-kinetic-helper`) from qualifying.
+/// exactly "KineticVM" or "kinetic", or that token followed by a separator
+/// (e.g. "KineticVM Companion"), case-insensitively. The longer token is tried
+/// first so "KineticVMesome" is not accepted as a prefixed "kinetic". Matching
+/// the visible application name — not any field that merely contains the
+/// substring "kinetic" — is what stops an unrelated entry (or a lookalike like
+/// `not-kinetic-helper`) from qualifying.
 #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
 fn is_kinetic_name(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
-    match lower.strip_prefix("kinetic") {
-        Some("") => true,
-        Some(rest) => rest.starts_with([' ', '-', '_']),
-        None => false,
+    for prefix in ["kineticvm", "kinetic"] {
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            return rest.is_empty() || rest.starts_with([' ', '-', '_']);
+        }
     }
+    false
 }
 
 /// Reserved characters that the Desktop Entry Specification requires to be
@@ -5867,14 +5870,17 @@ fn is_kinetic_program(program: &str) -> bool {
 }
 
 /// True when a bare file name is a supported KineticVM AppImage in the published
-/// `KineticVM-*.AppImage` form: it begins with "kinetic-" (the separator is
-/// required) and ends with ".appimage", case-insensitively. Requiring the
-/// separator rejects lookalikes with no boundary such as `KineticVMevil.AppImage`
-/// as well as `not-kinetic-helper.AppImage`.
+/// `KineticVM-*.AppImage` form: it begins with "kineticvm-" or "kinetic-" (the
+/// separator is required) and ends with ".appimage", case-insensitively.
+/// Requiring the separator rejects lookalikes with no boundary such as
+/// `KineticVMevil.AppImage` as well as `not-kinetic-helper.AppImage`.
 #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
 fn is_kinetic_appimage_name(file_name: &str) -> bool {
     let lower = file_name.to_ascii_lowercase();
-    lower.starts_with("kinetic-") && lower.ends_with(".appimage")
+    let Some(stem) = lower.strip_suffix(".appimage") else {
+        return false;
+    };
+    stem.starts_with("kineticvm-") || stem.starts_with("kinetic-")
 }
 
 /// Read the `Exec` target from a desktop entry, but only when the entry is a
