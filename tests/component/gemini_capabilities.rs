@@ -1,7 +1,7 @@
 //! Gemini model_provider capabilities and contract tests.
 
-use zeroclaw::providers::create_model_provider_with_url;
-use zeroclaw::providers::traits::ModelProvider;
+use kinetic::providers::create_model_provider_with_url;
+use kinetic::providers::traits::ModelProvider;
 
 fn gemini_model_provider() -> Box<dyn ModelProvider> {
     create_model_provider_with_url("gemini", Some("test-key"), None)
@@ -50,8 +50,8 @@ fn gemini_supports_vision_returns_true() {
 
 #[test]
 fn gemini_convert_tools_returns_prompt_guided() {
-    use zeroclaw::providers::traits::ToolsPayload;
-    use zeroclaw::tools::ToolSpec;
+    use kinetic::providers::traits::ToolsPayload;
+    use kinetic::tools::ToolSpec;
 
     let model_provider = gemini_model_provider();
     let tools = vec![ToolSpec::new(

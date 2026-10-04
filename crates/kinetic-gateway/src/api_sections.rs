@@ -1,0 +1,2504 @@
+//! Curated config-section endpoints. Used by the `/config` page in the
+//! web dashboard to navigate the schema by curated section rather than
+//! raw prop paths. OpenAPI is authoritative for the exact route set.
+
+use axum::{
+    extract::{Query, State},
+    response::{IntoResponse, Response},
+};
+use kinetic_config::api_error::{ConfigApiCode, ConfigApiError};
+use kinetic_runtime::rpc::types::{
+    CatalogModelProvider, CatalogModelsResult, CatalogResponse, ConfigSectionEntry,
+    ConfigSectionsResult, ConfigStatusResult, PickerItem, PickerResponse, SelectItemResponse,
+};
+use serde::{Deserialize, Serialize};
+
+use super::AppState;
+use super::api_config::{persist_and_swap, try_compute_drift};
+
+/// `GET /api/config/catalog` — list every model provider the CLI wizard knows
+/// about. The dashboard shows these in the "+ Add model provider" picker so
+/// CLI / web stay in sync.
+pub async fn handle_catalog(State(state): State<AppState>) -> Response {
+    let _ = state;
+
+    let model_providers: Vec<CatalogModelProvider> = kinetic_providers::list_model_providers()
+        .into_iter()
+        .map(|p| CatalogModelProvider {
+            name: p.name.to_string(),
+            display_name: p.display_name.to_string(),
+            local: p.local,
+        })
+        .collect();
+
+    axum::Json(CatalogResponse { model_providers }).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+pub struct ModelsQuery {
+    /// ModelProvider name (canonical, from CatalogModelProvider.name).
+    /// `provider` alias matches the query-string name the web dashboard uses.
+    #[serde(alias = "provider")]
+    pub model_provider: String,
+    /// Optional typed-provider alias selected by the configuration form.
+    pub alias: Option<String>,
+}
+
+impl ModelsQuery {
+    /// The dotted `<family>.<alias>` reference is the canonical source for
+    /// catalog resolution (endpoint, credential, headers) for every provider
+    /// family, not just `hailo_ollama` — `model_catalog_with_config_result`
+    /// resolves any configured alias generically via `find_by_name`. Reducing
+    /// non-Hailo families to the bare family name here silently prevented
+    /// their configured alias (custom endpoints, header-only auth, etc.) from
+    /// ever reaching that exact-profile catalog path through the dashboard.
+    fn catalog_provider_ref(&self) -> String {
+        match self.alias.as_deref() {
+            Some(alias) if !alias.trim().is_empty() => {
+                format!("{}.{}", self.model_provider, alias.trim())
+            }
+            _ => self.model_provider.clone(),
+        }
+    }
+}
+
+pub async fn handle_catalog_models(
+    State(state): State<AppState>,
+    Query(q): Query<ModelsQuery>,
+) -> Response {
+    let local = kinetic_runtime::quickstart::model_provider_is_local(&q.model_provider);
+    let catalog_provider_ref = q.catalog_provider_ref();
+    // Snapshot config so the catalog resolves the alias credential and can reach
+    // the native /models endpoint (surfacing new native-only models that the
+    // models.dev snapshot may not carry yet) instead of silently falling back.
+    let cfg = state.config.read().clone();
+    let (models, pricing, live) =
+        match kinetic_runtime::quickstart::model_catalog_with_config_result(
+            Some(&cfg),
+            &catalog_provider_ref,
+        )
+        .await
+        {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                return error_response(ConfigApiError::new(
+                    ConfigApiCode::ValidationFailed,
+                    error.to_string(),
+                ));
+            }
+        };
+    axum::Json(CatalogModelsResult {
+        model_provider: q.model_provider,
+        models,
+        pricing,
+        local,
+        live,
+    })
+    .into_response()
+}
+
+fn error_response(err: ConfigApiError) -> Response {
+    let status = axum::http::StatusCode::from_u16(err.code.http_status())
+        .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    (status, axum::Json(err)).into_response()
+}
+
+// ── Section + picker (mirrors the TUI flow) ──────────────────────────
+
+#[must_use]
+pub fn derive_section_status(cfg: &kinetic_config::schema::Config) -> ConfigStatusResult {
+    let missing = quickstart_missing_requirements(cfg);
+    let ready = missing.is_empty();
+    let has_partial_state = !cfg.onboard_state.completed_sections.is_empty()
+        || cfg.providers.models.iter_entries().next().is_some()
+        || !cfg.risk_profiles.is_empty()
+        || !cfg.runtime_profiles.is_empty()
+        || !cfg.agents.is_empty();
+    let reason = if ready {
+        "has_dispatchable_agent"
+    } else if has_partial_state {
+        "incomplete_agent"
+    } else {
+        "fresh_install"
+    };
+    ConfigStatusResult {
+        needs_quickstart: !ready,
+        reason: reason.to_string(),
+        has_partial_state,
+        missing,
+    }
+}
+
+fn quickstart_missing_requirements(cfg: &kinetic_config::schema::Config) -> Vec<String> {
+    let mut missing = Vec::new();
+    if cfg.providers.models.iter_entries().next().is_none() {
+        missing.push("Add a model provider.".to_string());
+    }
+    if cfg.agents.is_empty() {
+        missing.push("Create an agent.".to_string());
+        return missing;
+    }
+
+    let mut agent_aliases: Vec<&String> = cfg.agents.keys().collect();
+    agent_aliases.sort();
+    let mut has_dispatchable_agent = false;
+    for alias in agent_aliases {
+        let agent_missing = quickstart_agent_missing_requirements(cfg, alias, &cfg.agents[alias]);
+        if agent_missing.is_empty() {
+            has_dispatchable_agent = true;
+            break;
+        }
+        missing.extend(agent_missing);
+    }
+    if has_dispatchable_agent {
+        missing.clear();
+    }
+    missing
+}
+
+fn quickstart_agent_missing_requirements(
+    cfg: &kinetic_config::schema::Config,
+    alias: &str,
+    agent: &kinetic_config::schema::AliasedAgentConfig,
+) -> Vec<String> {
+    let mut missing = Vec::new();
+    if !agent.enabled {
+        missing.push(format!("Enable agent `{alias}`."));
+    }
+
+    let model_ref = agent.model_provider.trim();
+    if model_ref.is_empty() {
+        missing.push(format!("Set a model provider for agent `{alias}`."));
+    } else if let Some((family, _, provider)) = cfg.resolved_model_provider_for_agent(alias) {
+        let has_model = provider
+            .model
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|m| !m.is_empty());
+        if !has_model {
+            missing.push(format!("Choose a model for model provider `{model_ref}`."));
+        } else if !model_provider_alias_usable(
+            provider,
+            kinetic_runtime::quickstart::model_provider_is_local(family),
+        ) {
+            missing.push(format!(
+                "Set credential/auth for model provider `{model_ref}`."
+            ));
+        }
+    } else {
+        missing.push(format!(
+            "Fix agent `{alias}` model provider `{model_ref}`; it does not resolve to a configured provider."
+        ));
+    }
+
+    let risk_ref = agent.risk_profile.trim();
+    if risk_ref.is_empty() {
+        missing.push(format!("Set a risk profile for agent `{alias}`."));
+    } else if !cfg.risk_profiles.contains_key(risk_ref) {
+        missing.push(format!(
+            "Fix agent `{alias}` risk profile `{risk_ref}`; it does not resolve to a configured profile."
+        ));
+    }
+
+    let runtime_ref = agent.runtime_profile.trim();
+    if runtime_ref.is_empty() {
+        missing.push(format!("Set a runtime profile for agent `{alias}`."));
+    } else if !cfg.runtime_profiles.contains_key(runtime_ref) {
+        missing.push(format!(
+            "Fix agent `{alias}` runtime profile `{runtime_ref}`; it does not resolve to a configured profile."
+        ));
+    }
+
+    missing
+}
+
+pub async fn handle_section_status(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().clone();
+    axum::Json(derive_section_status(&cfg)).into_response()
+}
+
+/// All alias-reference choices an agent form needs, in one round-trip.
+/// Channels and model model_providers are returned in dotted form
+/// (`telegram.default`, `anthropic.work`); the bundle/profile/namespace
+/// lists are bare HashMap keys.
+#[derive(Debug, Serialize)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+pub struct AgentOptionsResponse {
+    pub channels: Vec<String>,
+    /// Distinct channel types with at least one configured alias —
+    /// `["discord", "telegram"]`. Source for peer-group channel picker.
+    pub channel_types: Vec<String>,
+    pub model_providers: Vec<String>,
+    pub risk_profiles: Vec<String>,
+    pub runtime_profiles: Vec<String>,
+    pub skill_bundles: Vec<String>,
+    pub knowledge_bundles: Vec<String>,
+    pub agents: Vec<String>,
+}
+
+pub fn build_agent_options(cfg: &kinetic_config::schema::Config) -> AgentOptionsResponse {
+    use kinetic_config::traits::AliasSource;
+
+    let channels = cfg.resolve_alias_source(AliasSource::Channels);
+    let mut channel_types: Vec<String> = channels
+        .iter()
+        .filter_map(|d| d.split_once('.').map(|(t, _)| t.to_string()))
+        .collect();
+    channel_types.sort();
+    channel_types.dedup();
+
+    AgentOptionsResponse {
+        channels,
+        channel_types,
+        model_providers: cfg.resolve_alias_source(AliasSource::ModelProviders),
+        risk_profiles: cfg.resolve_alias_source(AliasSource::RiskProfiles),
+        runtime_profiles: cfg.resolve_alias_source(AliasSource::RuntimeProfiles),
+        skill_bundles: cfg.resolve_alias_source(AliasSource::SkillBundles),
+        knowledge_bundles: cfg.resolve_alias_source(AliasSource::KnowledgeBundles),
+        agents: cfg.resolve_alias_source(AliasSource::Agents),
+    }
+}
+
+/// `GET /api/config/agent-options` — every alias-reference list the
+/// agent form needs, derived from the live config. Mirrors the lists the
+/// TUI computes locally for its alias pickers.
+pub async fn handle_agent_options(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().clone();
+    axum::Json(build_agent_options(&cfg)).into_response()
+}
+
+pub async fn handle_sections(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().clone();
+    let completed: std::collections::HashSet<String> = cfg
+        .onboard_state
+        .completed_sections
+        .iter()
+        .cloned()
+        .collect();
+
+    // First segment of every reachable prop path. BTreeSet for stable
+    // alphabetical order and dedup.
+    let mut roots: std::collections::BTreeSet<String> = cfg
+        .prop_fields()
+        .iter()
+        .filter_map(|f| f.name.split('.').next().map(str::to_string))
+        .collect();
+
+    // System / housekeeping fields the user never edits via the dashboard.
+    for hidden in HIDDEN_TOP_LEVEL {
+        roots.remove(*hidden);
+    }
+
+    let all_map_paths: Vec<&'static str> = kinetic_config::schema::Config::map_key_sections()
+        .iter()
+        .map(|s| s.path)
+        .collect();
+    let section_has_picker_for_key = |key: &str| -> bool {
+        let key_dot = format!("{key}.");
+        all_map_paths.iter().any(|p| {
+            *p == key
+                || p.strip_prefix(&key_dot)
+                    .is_some_and(|rest| !rest.contains('.'))
+        })
+    };
+
+    // Ensure map-keyed sections surface as sidebar entries even when their
+    // HashMap is empty (prop_fields() only yields paths for populated
+    // entries). First segments only — the prefix-dedup pass below drops
+    // bare parent segments when a multi-segment child is present.
+    let map_keyed_roots: std::collections::HashSet<&'static str> = all_map_paths
+        .iter()
+        .filter_map(|p| p.split('.').next())
+        .collect();
+    for &prefix in &map_keyed_roots {
+        roots.insert(prefix.to_string());
+    }
+
+    // Synthetic curated sections — keys that aren't fields on Config
+    // but are part of the wizard flow (personality lives as markdown
+    // files, not TOML). Inject so the canonical-order sort places them
+    // correctly and frontends don't need to know which ones to splice.
+    for s in kinetic_config::sections::QUICKSTART_SECTIONS {
+        roots.insert(s.as_str().to_string());
+    }
+
+    // Drop bare parent-segment entries when a dotted child is present
+    // — `providers` is phantom once `providers.models` etc. are listed.
+    let prefixes_with_children: std::collections::HashSet<String> = roots
+        .iter()
+        .filter_map(|k| k.split_once('.').map(|(parent, _)| parent.to_string()))
+        .collect();
+    roots.retain(|k| k.contains('.') || !prefixes_with_children.contains(k));
+
+    roots.retain(|k| !k.starts_with("cost.rates"));
+
+    let mut ordered: Vec<String> = roots.into_iter().collect();
+    ordered.sort_by(|a, b| {
+        match (
+            kinetic_config::sections::section_index_for_key(a),
+            kinetic_config::sections::section_index_for_key(b),
+        ) {
+            (Some(ai), Some(bi)) => ai.cmp(&bi),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.cmp(b),
+        }
+    });
+
+    let sections: Vec<ConfigSectionEntry> = ordered
+        .into_iter()
+        .map(|key| {
+            let wizard = kinetic_config::sections::Section::from_key(&key);
+            let has_picker = match wizard {
+                Some(w) => !matches!(
+                    w,
+                    kinetic_config::sections::Section::Hardware
+                        | kinetic_config::sections::Section::Skills
+                ),
+                None => section_has_picker_for_key(&key),
+            };
+            let group = kinetic_config::sections::section_group_for_key(&key);
+            ConfigSectionEntry {
+                completed: completed.contains(&key),
+                ready: section_ready(&cfg, &key, completed.contains(&key)),
+                label: kinetic_config::sections::humanize_section_key(&key),
+                help: section_help(&key).to_string(),
+                has_picker,
+                group: group.label().to_string(),
+                group_key: group.key().to_string(),
+                is_quickstart: wizard.is_some(),
+                shape: wizard.map(kinetic_config::sections::Section::shape),
+                cost_category: kinetic_config::schema::cost_category_for_provider_section(&key)
+                    .unwrap_or_default()
+                    .to_string(),
+                key,
+            }
+        })
+        .collect();
+
+    axum::Json(ConfigSectionsResult { sections }).into_response()
+}
+
+fn section_ready(cfg: &kinetic_config::schema::Config, key: &str, completed_marker: bool) -> bool {
+    use kinetic_config::sections::Section;
+    match Section::from_key(key) {
+        Some(Section::ModelProviders) => any_usable_model_provider(cfg),
+        Some(Section::RiskProfiles) => !cfg.risk_profiles.is_empty(),
+        Some(Section::RuntimeProfiles) => !cfg.runtime_profiles.is_empty(),
+        Some(Section::Storage) => cfg
+            .prop_fields()
+            .iter()
+            .any(|field| field.name.starts_with("storage.")),
+        Some(Section::Memory) => completed_marker,
+        Some(Section::Agents) => cfg.agents.iter().any(|(alias, agent)| {
+            quickstart_agent_missing_requirements(cfg, alias, agent).is_empty()
+        }),
+        _ => completed_marker,
+    }
+}
+
+/// Top-level fields that exist on `Config` but are never user-editable
+/// from the dashboard (schema bookkeeping, resolved at runtime).
+const HIDDEN_TOP_LEVEL: &[&str] = &[
+    "schema_version",
+    "onboard_state",
+    "onboard-state",
+    "config_path",
+    "workspace_dir",
+    "env_overridden_paths",
+    "pre_override_snapshots",
+];
+
+/// Help text for a section. Delegates to `kinetic_config::sections::section_help`
+/// so gateway, CLI, and TUI all read from one source — wizard variants
+/// pull from `Section::help`, everything else from the matching
+/// `#[nested]` field's `///` docstring on the `Config` struct.
+fn section_help(key: &str) -> &'static str {
+    kinetic_config::sections::section_help(key)
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+pub struct SectionPath {
+    pub section: String,
+}
+
+pub async fn handle_section_picker(
+    State(state): State<AppState>,
+    axum::extract::Path(SectionPath { section }): axum::extract::Path<SectionPath>,
+) -> Response {
+    let cfg = state.config.read().clone();
+
+    use kinetic_config::sections::Section;
+    let Some(section_enum) = Section::from_key(&section) else {
+        return error_response(
+            ConfigApiError::new(
+                ConfigApiCode::PathNotFound,
+                format!(
+                    "section `{section}` has no picker; render its fields \
+                     via GET /api/config/list?prefix={section}"
+                ),
+            )
+            .with_path(section.as_str()),
+        );
+    };
+    let help = section_help(section_enum.as_str()).to_string();
+    let items = match picker_items_for(section_enum, &cfg) {
+        PickerDispatch::Items(items) => items,
+        PickerDispatch::DirectForm => {
+            return error_response(
+                ConfigApiError::new(
+                    ConfigApiCode::PathNotFound,
+                    format!(
+                        "section `{section_enum}` is a direct-form section with no picker; \
+                         render fields via GET /api/config/list?prefix={section_enum}"
+                    ),
+                )
+                .with_path(section_enum.as_str()),
+            );
+        }
+    };
+
+    axum::Json(PickerResponse {
+        section,
+        items,
+        help,
+    })
+    .into_response()
+}
+
+enum PickerDispatch {
+    Items(Vec<PickerItem>),
+    DirectForm,
+}
+
+/// Per-section picker dispatch. Exhaustive over [`Section`] so adding a
+/// variant fails to compile until it gets a routing arm. The DRY
+/// version of what the dashboard's per-section view boils down to.
+fn picker_items_for(
+    section: kinetic_config::sections::Section,
+    cfg: &kinetic_config::schema::Config,
+) -> PickerDispatch {
+    use kinetic_config::sections::Section;
+    match section {
+        Section::ModelProviders => PickerDispatch::Items(providers_picker(cfg)),
+        // TTS / transcription share the typed-family two-tier shape. Each
+        // family enumerates its picker via `schema_walk_picker(<family>)`
+        // — the same machinery channels uses, so no per-section catalog
+        // table to drift.
+        Section::TtsProviders | Section::TranscriptionProviders => {
+            PickerDispatch::Items(schema_walk_picker(cfg, section.as_str()))
+        }
+        Section::Memory => PickerDispatch::Items(memory_picker(cfg)),
+        Section::Channels => PickerDispatch::Items(schema_walk_picker(cfg, "channels")),
+        Section::Tunnel => PickerDispatch::Items(tunnel_provider_picker(cfg)),
+        Section::Agents => PickerDispatch::Items(agents_picker(cfg)),
+        // Storage is two-tier (`storage.<kind>.<alias>`) — same shape
+        // and walker as channels and the typed-provider families.
+        Section::Storage => PickerDispatch::Items(storage_picker(cfg)),
+        // OneTierAliasMap explorer sections: pick a key from the live
+        // HashMap. Generic walker covers every section whose schema is
+        // `<section>.<alias>` (operator-named keys, no closed kind set).
+        Section::PeerGroups
+        | Section::DecisionModels
+        | Section::Cron
+        | Section::KnowledgeBundles
+        | Section::SkillBundles
+        | Section::RiskProfiles
+        | Section::RuntimeProfiles
+        | Section::ModelRoutes
+        | Section::EmbeddingRoutes => {
+            PickerDispatch::Items(one_tier_alias_map_picker(cfg, section.as_str()))
+        }
+        Section::Hardware | Section::Skills | Section::QuickstartState => {
+            PickerDispatch::DirectForm
+        }
+    }
+}
+
+fn providers_picker(cfg: &kinetic_config::schema::Config) -> Vec<PickerItem> {
+    kinetic_providers::list_model_providers()
+        .into_iter()
+        .map(|p| PickerItem {
+            key: p.name.to_string(),
+            label: p.display_name.to_string(),
+            description: if p.local {
+                Some("Local — no API key required".to_string())
+            } else {
+                None
+            },
+            badge: provider_type_badge(cfg, p.name, p.local),
+        })
+        .collect()
+}
+
+fn any_usable_model_provider(cfg: &kinetic_config::schema::Config) -> bool {
+    cfg.providers
+        .models
+        .iter_entries()
+        .any(|(family, _, base)| {
+            model_provider_alias_usable(
+                base,
+                kinetic_runtime::quickstart::model_provider_is_local(family),
+            )
+        })
+}
+
+fn provider_type_badge(
+    cfg: &kinetic_config::schema::Config,
+    family: &str,
+    local: bool,
+) -> Option<String> {
+    let mut has_alias = false;
+    let mut has_usable_alias = false;
+    for (ty, _, base) in cfg.providers.models.iter_entries() {
+        if ty != family {
+            continue;
+        }
+        has_alias = true;
+        if model_provider_alias_usable(base, local) {
+            has_usable_alias = true;
+        }
+    }
+    if has_usable_alias {
+        Some("configured".to_string())
+    } else if has_alias {
+        Some("needs setup".to_string())
+    } else {
+        None
+    }
+}
+
+fn model_provider_alias_usable(
+    base: &kinetic_config::schema::ModelProviderConfig,
+    local: bool,
+) -> bool {
+    let has_model = base
+        .model
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|model| !model.is_empty());
+    if !has_model {
+        return false;
+    }
+    base.api_key
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|key| !key.is_empty())
+        || base.requires_openai_auth
+        || local
+}
+
+fn storage_picker(cfg: &kinetic_config::schema::Config) -> Vec<PickerItem> {
+    let mut items = schema_walk_picker(cfg, "storage");
+    for item in &mut items {
+        item.description = storage_description(&item.key).map(str::to_string);
+        if item.badge.as_deref() == Some("configured") {
+            item.badge = Some("created".to_string());
+        }
+    }
+    items.sort_by_key(|item| storage_rank(&item.key));
+    items
+}
+
+fn storage_rank(key: &str) -> usize {
+    match key {
+        "sqlite" => 0,
+        "postgres" => 1,
+        "qdrant" => 2,
+        "markdown" => 3,
+        "lucid" => 4,
+        _ => 99,
+    }
+}
+
+fn storage_description(key: &str) -> Option<&'static str> {
+    match key {
+        "sqlite" => Some(
+            "Safe default for single-node installs: file-based, zero-config, no external service.",
+        ),
+        "postgres" => {
+            Some("Shared or multi-instance deployments that need durable server-backed storage.")
+        }
+        "qdrant" => {
+            Some("Vector database backend for semantic search when you already run Qdrant.")
+        }
+        "markdown" => {
+            Some("Human-readable files with simple local storage and no database service.")
+        }
+        "lucid" => {
+            Some("Bridge to local lucid-memory CLI while keeping SQLite-style local operation.")
+        }
+        _ => None,
+    }
+}
+
+fn memory_picker(cfg: &kinetic_config::schema::Config) -> Vec<PickerItem> {
+    let current = cfg.memory.backend.clone();
+    let memory_completed = cfg
+        .onboard_state
+        .completed_sections
+        .iter()
+        .any(|section| section == "memory");
+    kinetic_memory::selectable_memory_backends()
+        .iter()
+        .map(|b| PickerItem {
+            key: b.key.to_string(),
+            label: b.label.to_string(),
+            description: None,
+            badge: if b.key == current && memory_completed {
+                Some("active".to_string())
+            } else {
+                None
+            },
+        })
+        .collect()
+}
+
+fn schema_walk_picker(cfg: &kinetic_config::schema::Config, section: &str) -> Vec<PickerItem> {
+    let prefix_with_dot = format!("{section}.");
+
+    // Configured: any alias present on this type (has at least one entry in its HashMap).
+    let configured: std::collections::BTreeSet<String> = cfg
+        .prop_fields()
+        .iter()
+        .filter_map(|f| f.name.strip_prefix(&prefix_with_dot))
+        .filter_map(|suffix| suffix.split_once('.').map(|(head, _)| head.to_string()))
+        .collect();
+
+    // All known channel/section types from schema metadata — statically known,
+    // no HashMap entries needed.
+    let all: std::collections::BTreeSet<String> =
+        kinetic_config::schema::Config::map_key_sections()
+            .into_iter()
+            .filter_map(|s| {
+                s.path
+                    .strip_prefix(&prefix_with_dot)
+                    .filter(|rest| !rest.contains('.'))
+                    .map(String::from)
+            })
+            .collect();
+
+    all.into_iter()
+        .map(|name| {
+            // Channel configs no longer carry an `enabled` field; a channel is
+            // active when an enabled agent references it. Badge = "configured" when
+            // at least one alias exists, absent otherwise.
+            let badge = if configured.contains(&name) {
+                Some("configured".to_string())
+            } else {
+                None
+            };
+            PickerItem {
+                key: name.clone(),
+                label: name.clone(),
+                description: None,
+                badge,
+            }
+        })
+        .collect()
+}
+
+fn one_tier_alias_map_picker(
+    cfg: &kinetic_config::schema::Config,
+    section: &str,
+) -> Vec<PickerItem> {
+    let prefix_with_dot = format!("{section}.");
+    let mut keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for field in cfg.prop_fields() {
+        let Some(suffix) = field.name.strip_prefix(&prefix_with_dot) else {
+            continue;
+        };
+        let head = suffix.split_once('.').map_or(suffix, |(h, _)| h);
+        if head.is_empty() {
+            continue;
+        }
+        keys.insert(head.to_string());
+    }
+    keys.into_iter()
+        .map(|key| PickerItem {
+            key: key.clone(),
+            label: key,
+            description: None,
+            badge: Some("configured".to_string()),
+        })
+        .collect()
+}
+
+/// Agents picker: walks `cfg.agents` and returns each alias with an activity badge.
+/// `active` = agent exists and `enabled = true`; `configured` = exists but disabled.
+fn agents_picker(cfg: &kinetic_config::schema::Config) -> Vec<PickerItem> {
+    let mut items: Vec<PickerItem> = cfg
+        .agents
+        .iter()
+        .map(|(alias, agent)| PickerItem {
+            key: alias.clone(),
+            label: alias.clone(),
+            description: None,
+            badge: if agent.enabled {
+                Some("active".to_string())
+            } else {
+                Some("configured".to_string())
+            },
+        })
+        .collect();
+    items.sort_by(|a, b| a.key.cmp(&b.key));
+    items
+}
+
+fn apply_first_run_agent_defaults(cfg: &mut kinetic_config::schema::Config, alias: &str) {
+    let model_provider = cfg
+        .providers
+        .models
+        .iter_entries()
+        .next()
+        .map(|(ty, alias, _)| format!("{ty}.{alias}"));
+    let risk_profile = first_alias(cfg.risk_profiles.keys());
+    let runtime_profile = first_alias(cfg.runtime_profiles.keys());
+
+    let Some(agent) = cfg.agents.get_mut(alias) else {
+        return;
+    };
+    if agent.model_provider.trim().is_empty()
+        && let Some(model_provider) = model_provider
+    {
+        agent.model_provider = model_provider.into();
+    }
+    if agent.risk_profile.trim().is_empty()
+        && let Some(risk_profile) = risk_profile
+    {
+        agent.risk_profile = risk_profile.into();
+    }
+    if agent.runtime_profile.trim().is_empty()
+        && let Some(runtime_profile) = runtime_profile
+    {
+        agent.runtime_profile = runtime_profile.into();
+    }
+}
+
+fn mark_section_completed(cfg: &mut kinetic_config::schema::Config, section: &str) -> bool {
+    if cfg
+        .onboard_state
+        .completed_sections
+        .iter()
+        .any(|completed| completed == section)
+    {
+        return false;
+    }
+    cfg.onboard_state
+        .completed_sections
+        .push(section.to_string());
+    cfg.mark_dirty("onboard_state.completed_sections");
+    true
+}
+
+fn first_alias<'a>(aliases: impl Iterator<Item = &'a String>) -> Option<String> {
+    let mut aliases: Vec<&String> = aliases.collect();
+    aliases.sort();
+    aliases.first().map(|alias| (*alias).clone())
+}
+
+fn tunnel_provider_picker(cfg: &kinetic_config::schema::Config) -> Vec<PickerItem> {
+    // The canonical prop name uses an underscore (`tunnel_provider`); the
+    // hyphenated form is unknown to get_prop and silently yields "" (no active
+    // provider ever badged).
+    let active = cfg.get_prop("tunnel.tunnel_provider").unwrap_or_default();
+    let mut items = vec![PickerItem {
+        key: "none".to_string(),
+        label: "none".to_string(),
+        description: Some("Localhost only — no public tunnel.".to_string()),
+        badge: if active == "none" || active.is_empty() {
+            Some("active".to_string())
+        } else {
+            None
+        },
+    }];
+    for entry in cfg.tunnel.nested_option_entries() {
+        let badge = if entry.field == active {
+            Some("active".to_string())
+        } else if entry.present {
+            Some("configured".to_string())
+        } else {
+            None
+        };
+        items.push(PickerItem {
+            key: entry.field.to_string(),
+            label: entry.display_name.to_string(),
+            description: if entry.description.is_empty() {
+                None
+            } else {
+                Some(entry.description.to_string())
+            },
+            badge,
+        });
+    }
+    items
+}
+
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+pub struct SectionItemPath {
+    pub section: String,
+    pub key: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+pub struct SectionSelectBody {
+    pub alias: Option<String>,
+}
+
+pub async fn handle_section_select(
+    State(state): State<AppState>,
+    principal: crate::principal_gate::RequestPrincipal,
+    axum::extract::Path(SectionItemPath { section, key }): axum::extract::Path<SectionItemPath>,
+    body: Option<axum::extract::Json<SectionSelectBody>>,
+) -> Response {
+    let alias = body
+        .and_then(|b| b.0.alias)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "default".to_string());
+
+    use kinetic_config::sections::Section;
+    if matches!(Section::from_key(&section), Some(Section::Agents)) {
+        let reservation = match state.agent_lifecycle.reserve_config_mutation(&key) {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                return error_response(
+                    ConfigApiError::new(ConfigApiCode::ValidationFailed, error.to_string())
+                        .with_path(format!("agents.{key}")),
+                );
+            }
+        };
+        // persist_and_swap retains its save. Retain admission until that save
+        // and publication finish, even if the requesting handler is cancelled.
+        let task = kinetic_runtime::live_config_authority::spawn_agent_lifecycle_job(Box::pin(
+            async move {
+                let _reservation = reservation;
+                select_section(state, principal, section, key, alias).await
+            },
+        ));
+        return match task.await {
+            Ok(response) => response,
+            Err(error) => error_response(ConfigApiError::new(
+                ConfigApiCode::ValidationFailed,
+                format!("Agent creation completion failed: {error}"),
+            )),
+        };
+    }
+    select_section(state, principal, section, key, alias).await
+}
+
+async fn select_section(
+    state: AppState,
+    principal: crate::principal_gate::RequestPrincipal,
+    section: String,
+    key: String,
+    alias: String,
+) -> Response {
+    // Held through the swap at the end of this handler so a concurrent
+    // config writer can't land between this read and the save below.
+    let _cfg_guard = std::sync::Arc::clone(&state.config_write_lock)
+        .lock_owned()
+        .await;
+    let mut working = state.config.read().clone();
+
+    use kinetic_config::sections::Section;
+    let Some(section_enum) = Section::from_key(&section) else {
+        return error_response(
+            ConfigApiError::new(
+                ConfigApiCode::PathNotFound,
+                format!("no picker semantics defined for section `{section}`"),
+            )
+            .with_path(section.as_str()),
+        );
+    };
+
+    let (fields_prefix, created) = match section_enum {
+        Section::ModelProviders | Section::TtsProviders | Section::TranscriptionProviders => {
+            let family = section_enum.as_str();
+            let created = working
+                .create_map_key(&format!("{family}.{key}"), &alias)
+                .map_err(|msg| {
+                    error_response(
+                        ConfigApiError::new(
+                            ConfigApiCode::PathNotFound,
+                            format!("could not select {family} `{key}` alias `{alias}`: {msg}"),
+                        )
+                        .with_path(format!("{family}.{key}")),
+                    )
+                });
+            let created = match created {
+                Ok(c) => c,
+                Err(resp) => return resp,
+            };
+            // Per-family typed configs derive their own default endpoint
+            // URI via family traits at runtime construction time.
+            (format!("{family}.{key}.{alias}"), created)
+        }
+        Section::Channels => {
+            let created = working
+                .create_map_key(&format!("channels.{key}"), &alias)
+                .map_err(|msg| {
+                    error_response(
+                        ConfigApiError::new(
+                            ConfigApiCode::PathNotFound,
+                            format!("could not select channel `{key}` alias `{alias}`: {msg}"),
+                        )
+                        .with_path(format!("channels.{key}")),
+                    )
+                });
+            let created = match created {
+                Ok(c) => c,
+                Err(resp) => return resp,
+            };
+            if created {
+                let enabled_path = format!("channels.{key}.{alias}.enabled");
+                if let Err(e) = working.set_prop_persistent(&enabled_path, "true") {
+                    ::kinetic_log::record!(
+                        WARN,
+                        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                            .with_outcome(::kinetic_log::EventOutcome::Unknown)
+                            .with_attrs(
+                                ::serde_json::json!({"path": enabled_path, "error": format!("{}", e)})
+                            ),
+                        "failed to default-enable newly created channel; operator must toggle manually"
+                    );
+                }
+            }
+            (format!("channels.{key}.{alias}"), created)
+        }
+        Section::Agents
+        | Section::PeerGroups
+        | Section::DecisionModels
+        | Section::Cron
+        | Section::KnowledgeBundles
+        | Section::SkillBundles
+        | Section::RiskProfiles
+        | Section::RuntimeProfiles
+        | Section::ModelRoutes
+        | Section::EmbeddingRoutes => {
+            let section_key = section_enum.as_str();
+            let created = match kinetic_config::alias_refs::create_map_key_checked(
+                &mut working,
+                section_key,
+                &key,
+            ) {
+                Ok(c) => c,
+                Err(kinetic_config::alias_refs::CreateError::Reserved(a)) => {
+                    return error_response(
+                        ConfigApiError::new(
+                            ConfigApiCode::ValidationFailed,
+                            format!("alias `{a}` is reserved and cannot be created"),
+                        )
+                        .with_path(format!("{section_key}.{key}")),
+                    );
+                }
+                Err(kinetic_config::alias_refs::CreateError::Invalid(msg)) => {
+                    return error_response(
+                        ConfigApiError::new(
+                            ConfigApiCode::PathNotFound,
+                            format!("could not select {section_key} alias `{key}`: {msg}"),
+                        )
+                        .with_path(section_key),
+                    );
+                }
+            };
+            // Agents need a per-alias workspace dir on disk so the
+            // PersonalityEditor and the runtime have somewhere to read
+            // and write IDENTITY.md / SOUL.md / USER.md / etc.
+            if created && matches!(section_enum, Section::Agents) {
+                apply_first_run_agent_defaults(&mut working, &key);
+                let workspace_dir = working.agent_workspace_dir(&key);
+                if let Err(err) = tokio::fs::create_dir_all(&workspace_dir).await {
+                    return error_response(
+                        ConfigApiError::new(
+                            ConfigApiCode::ValidationFailed,
+                            format!(
+                                "created agent `{key}` but failed to scaffold workspace at {}: {err}",
+                                workspace_dir.display()
+                            ),
+                        )
+                        .with_path(section_key),
+                    );
+                }
+                if let Err(err) = kinetic_runtime::agent::personality::seed_default_personality(
+                    &working,
+                    &key,
+                    &workspace_dir,
+                )
+                .await
+                {
+                    ::kinetic_log::record!(WARN, ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note).with_outcome(::kinetic_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"agent": key, "workspace": workspace_dir.display().to_string(), "err": err.to_string()})), "agent workspace scaffolded but personality seed failed (continuing)");
+                }
+            }
+            (format!("{section_key}.{key}"), created)
+        }
+        Section::Storage => {
+            let created = working
+                .create_map_key(&format!("storage.{key}"), &alias)
+                .map_err(|msg| {
+                    error_response(
+                        ConfigApiError::new(
+                            ConfigApiCode::PathNotFound,
+                            format!("could not select storage `{key}` alias `{alias}`: {msg}"),
+                        )
+                        .with_path(format!("storage.{key}")),
+                    )
+                });
+            let created = match created {
+                Ok(c) => c,
+                Err(resp) => return resp,
+            };
+            mark_section_completed(&mut working, "storage");
+            (format!("storage.{key}.{alias}"), created)
+        }
+        Section::Memory => {
+            // Set memory.backend to the picked key. Fields_prefix points at
+            // `memory` so the form renders the whole memory section
+            // (the active backend's specific fields show up there).
+            let selection_changed = working.memory.backend != key;
+            if selection_changed && let Err(e) = working.set_prop_persistent("memory.backend", &key)
+            {
+                return error_response(
+                    ConfigApiError::new(
+                        ConfigApiCode::ValidationFailed,
+                        format!("could not set memory.backend = `{key}`: {e}"),
+                    )
+                    .with_path("memory.backend"),
+                );
+            }
+            let completion_changed = mark_section_completed(&mut working, "memory");
+            (
+                "memory".to_string(),
+                selection_changed || completion_changed,
+            )
+        }
+        Section::Tunnel => {
+            let selection_changed = working.tunnel.tunnel_provider != key;
+            if selection_changed
+                && let Err(e) = working.set_prop_persistent("tunnel.tunnel_provider", &key)
+            {
+                return error_response(
+                    ConfigApiError::new(
+                        ConfigApiCode::ValidationFailed,
+                        format!("could not set tunnel.tunnel_provider = `{key}`: {e}"),
+                    )
+                    .with_path("tunnel.tunnel_provider"),
+                );
+            }
+            let (prefix, defaults_changed) = if key == "none" {
+                ("tunnel".to_string(), false)
+            } else {
+                let p = format!("tunnel.{key}");
+                let initialized = working.init_defaults(Some(&p));
+                (p, !initialized.is_empty())
+            };
+            (prefix, selection_changed || defaults_changed)
+        }
+        Section::Hardware | Section::Skills | Section::QuickstartState => {
+            return error_response(
+                ConfigApiError::new(
+                    ConfigApiCode::PathNotFound,
+                    format!(
+                        "section `{}` is a direct-form section with no picker; \
+                         render fields via GET /api/config/list?prefix={}",
+                        section_enum, section_enum
+                    ),
+                )
+                .with_path(section_enum.as_str()),
+            );
+        }
+    };
+
+    if created {
+        working.mark_dirty(&fields_prefix);
+    }
+
+    if working.dirty_paths.is_empty() {
+        let drifted = match section_enum {
+            Section::Memory | Section::Tunnel => match try_compute_drift(&working).await {
+                Ok(drifted) => drifted,
+                Err(error) => return error_response(error),
+            },
+            _ => Vec::new(),
+        };
+        let tunnel_prefix =
+            (section_enum == Section::Tunnel && key != "none").then(|| format!("tunnel.{key}."));
+        let conflict_paths: Vec<String> = drifted
+            .into_iter()
+            .filter(|drift| match section_enum {
+                Section::Memory => drift.path == "memory.backend",
+                Section::Tunnel => {
+                    drift.path == "tunnel.tunnel_provider"
+                        || tunnel_prefix
+                            .as_deref()
+                            .is_some_and(|prefix| drift.path.starts_with(prefix))
+                }
+                _ => false,
+            })
+            .map(|drift| drift.path)
+            .collect();
+        if !conflict_paths.is_empty() {
+            return error_response(ConfigApiError::new(
+                ConfigApiCode::ConfigChangedExternally,
+                format!(
+                    "on-disk config has drifted from in-memory state on {} path(s) required by this selection: {}. Reload the config or GET /api/config/drift to inspect first.",
+                    conflict_paths.len(),
+                    conflict_paths.join(", "),
+                ),
+            ));
+        }
+        return axum::Json(SelectItemResponse {
+            fields_prefix,
+            created,
+        })
+        .into_response();
+    }
+
+    // Selecting an existing item writes nothing; creating one writes the
+    // new item's fields. Authorized before the save either way.
+    let before = state.config.read().clone();
+    let mut writes = crate::principal_gate::ConfigWriteSet::by_effect(
+        &before,
+        &working,
+        working.dirty_paths.iter().map(String::as_str),
+    );
+    if created {
+        writes = writes.with(fields_prefix.clone(), kinetic_api::grants::Verb::Create);
+    }
+    let authorization =
+        match crate::principal_gate::authorize_config_write(&principal, writes, &_cfg_guard) {
+            Ok(authorization) => authorization,
+            Err(denied) => return denied.into_response(),
+        };
+    if let Err(e) = persist_and_swap(&state, authorization, working, _cfg_guard).await {
+        return e;
+    }
+
+    axum::Json(SelectItemResponse {
+        fields_prefix,
+        created,
+    })
+    .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DEV_CONFIG_TEMPLATE: &str = include_str!("../../../dev/config.template.toml");
+    const DEV_HARNESS_TEMPLATE: &str = include_str!("../../../dev/config.harness-test.toml");
+
+    #[test]
+    fn models_query_uses_hailo_alias_for_catalog_resolution() {
+        let query = ModelsQuery {
+            model_provider: "hailo_ollama".to_string(),
+            alias: Some("edge".to_string()),
+        };
+        assert_eq!(query.catalog_provider_ref(), "hailo_ollama.edge");
+    }
+
+    #[test]
+    fn models_query_uses_configured_alias_for_every_provider_family() {
+        // Every provider family's configured alias must reach the exact-profile
+        // catalog path, not just hailo_ollama: `model_catalog_with_config_result`
+        // resolves any `<family>.<alias>` dotted reference generically.
+        let query = ModelsQuery {
+            model_provider: "openai".to_string(),
+            alias: Some("edge".to_string()),
+        };
+        assert_eq!(query.catalog_provider_ref(), "openai.edge");
+    }
+
+    #[test]
+    fn models_query_falls_back_to_bare_family_without_an_alias() {
+        let query = ModelsQuery {
+            model_provider: "openai".to_string(),
+            alias: None,
+        };
+        assert_eq!(query.catalog_provider_ref(), "openai");
+    }
+
+    fn parse_dev_template(raw: &str, name: &str) -> kinetic_config::schema::Config {
+        toml::from_str(raw).unwrap_or_else(|err| panic!("{name} must parse as schema V3: {err}"))
+    }
+
+    fn assert_common_dev_template_contract(cfg: &kinetic_config::schema::Config) {
+        assert_eq!(cfg.schema_version, 3);
+
+        let provider = cfg
+            .providers
+            .models
+            .ollama
+            .get("default")
+            .expect("Ollama default provider must exist");
+        assert_eq!(provider.base.model.as_deref(), Some("llama3.2"));
+        assert_eq!(
+            provider.base.uri.as_deref(),
+            Some("http://host.docker.internal:11434")
+        );
+        assert_eq!(provider.base.api_key, None);
+        assert_eq!(provider.base.temperature, Some(0.7));
+
+        let agent = cfg.agents.get("default").expect("default agent must exist");
+        assert!(agent.enabled);
+        assert_eq!(agent.model_provider.as_str(), "ollama.default");
+        assert_eq!(agent.risk_profile.as_str(), "default");
+        assert_eq!(agent.runtime_profile.as_str(), "default");
+        assert_eq!(
+            cfg.agent_workspace_dir("default"),
+            std::path::PathBuf::from("/kinetic-data/workspace")
+        );
+
+        let risk = cfg
+            .risk_profiles
+            .get("default")
+            .expect("default risk profile must exist");
+        assert_eq!(
+            risk.level,
+            kinetic_config::autonomy::AutonomyLevel::Supervised
+        );
+        assert!(cfg.runtime_profile_for_agent("default").is_some());
+
+        let status = derive_section_status(cfg);
+        assert!(!status.needs_quickstart, "missing: {:?}", status.missing);
+        assert_eq!(status.reason, "has_dispatchable_agent");
+
+        assert_eq!(cfg.gateway.port, 42617);
+        assert_eq!(cfg.gateway.host, "[::]");
+        assert!(cfg.gateway.allow_public_bind);
+        assert!(!cfg.gateway.require_pairing);
+    }
+
+    #[test]
+    fn dev_config_template_preserves_dispatch_contract() {
+        let cfg = parse_dev_template(DEV_CONFIG_TEMPLATE, "dev/config.template.toml");
+        assert_common_dev_template_contract(&cfg);
+
+        assert_eq!(
+            cfg.gateway.web_dist_dir.as_deref(),
+            Some("/usr/share/kineticlabs/web/dist")
+        );
+        assert!(!cfg.cost.enabled);
+        assert_eq!(cfg.cost.daily_limit_usd, 10.0);
+        assert_eq!(cfg.cost.monthly_limit_usd, 100.0);
+        assert_eq!(cfg.cost.warn_at_percent, 80);
+        assert!(!cfg.cost.allow_override);
+    }
+
+    #[test]
+    fn dev_harness_template_preserves_runtime_contract() {
+        let cfg = parse_dev_template(DEV_HARNESS_TEMPLATE, "dev/config.harness-test.toml");
+        assert_common_dev_template_contract(&cfg);
+
+        let runtime = cfg
+            .runtime_profile_for_agent("default")
+            .expect("harness agent must resolve its runtime profile");
+        assert_eq!(runtime.max_tool_iterations, 50);
+        assert_eq!(runtime.max_tool_result_chars, Some(50_000));
+        assert_eq!(runtime.max_context_tokens, Some(32_000));
+        assert!(!runtime.context_compression.enabled);
+        assert_eq!(runtime.context_compression.tool_result_retrim_chars, 2_000);
+        assert_eq!(
+            cfg.risk_profiles["default"].auto_approve,
+            [
+                "file_read",
+                "file_write",
+                "file_edit",
+                "memory_recall",
+                "memory_store",
+                "web_search_tool",
+                "web_fetch",
+                "calculator",
+                "glob_search",
+                "content_search",
+                "image_info",
+            ]
+        );
+
+        assert_eq!(cfg.memory.backend, "sqlite");
+        assert!(cfg.memory.auto_save);
+        assert!(cfg.memory.hygiene_enabled);
+        assert_eq!(cfg.memory.archive_after_days, 7);
+        assert_eq!(cfg.memory.purge_after_days, 30);
+        assert_eq!(cfg.memory.embedding_provider, "none");
+    }
+
+    #[test]
+    fn build_agent_options_returns_every_configured_alias() {
+        let mut cfg = kinetic_config::schema::Config::default();
+        cfg.create_map_key("providers.models.anthropic", "default")
+            .unwrap();
+        cfg.create_map_key("risk_profiles", "alpha_risk").unwrap();
+        cfg.create_map_key("runtime_profiles", "alpha_runtime")
+            .unwrap();
+        cfg.create_map_key("skill_bundles", "alpha_skills").unwrap();
+        cfg.create_map_key("knowledge_bundles", "alpha_knowledge")
+            .unwrap();
+        cfg.create_map_key("agents", "alpha_agent").unwrap();
+
+        let resp = build_agent_options(&cfg);
+
+        assert_eq!(resp.model_providers, vec!["anthropic.default".to_string()]);
+        assert_eq!(resp.risk_profiles, vec!["alpha_risk".to_string()]);
+        assert_eq!(resp.runtime_profiles, vec!["alpha_runtime".to_string()]);
+        assert_eq!(resp.skill_bundles, vec!["alpha_skills".to_string()]);
+        assert_eq!(resp.knowledge_bundles, vec!["alpha_knowledge".to_string()],);
+        assert_eq!(resp.agents, vec!["alpha_agent".to_string()]);
+    }
+
+    #[test]
+    fn typed_provider_catalog_keys_create_snake_config_sections() {
+        let mut cfg = kinetic_config::schema::Config::default();
+        let cases = [
+            ("providers.models", "hailo_ollama"),
+            ("providers.transcription", "local_whisper"),
+        ];
+
+        for (family, key) in cases {
+            let path = format!("{family}.{key}");
+            cfg.create_map_key(&path, "default")
+                .unwrap_or_else(|e| panic!("{key} should map to `{path}`: {e}"));
+        }
+
+        assert!(
+            cfg.providers.models.hailo_ollama.contains_key("default"),
+            "created Hailo-Ollama alias should land in the hailo_ollama provider map",
+        );
+        assert!(
+            cfg.providers
+                .transcription
+                .local_whisper
+                .contains_key("default"),
+            "created Local Whisper alias should land in the local_whisper provider map",
+        );
+    }
+
+    #[test]
+    fn derive_section_status_requires_dispatchable_agent() {
+        let mut cfg = kinetic_config::schema::Config::default();
+        let resp = derive_section_status(&cfg);
+        assert!(resp.needs_quickstart);
+        assert_eq!(resp.reason, "fresh_install");
+
+        cfg.create_map_key("providers.models.anthropic", "default")
+            .unwrap();
+        let resp = derive_section_status(&cfg);
+        assert!(
+            resp.needs_quickstart,
+            "provider configured without a bound agent must not flip needs_quickstart"
+        );
+        assert_eq!(resp.reason, "incomplete_agent");
+        assert!(resp.has_partial_state);
+
+        cfg.create_map_key("risk_profiles", "default").unwrap();
+        cfg.create_map_key("runtime_profiles", "default").unwrap();
+        cfg.create_map_key("agents", "default").unwrap();
+        let resp = derive_section_status(&cfg);
+        assert!(
+            resp.needs_quickstart,
+            "agent without provider/profile bindings must still need onboarding"
+        );
+        assert_eq!(resp.reason, "incomplete_agent");
+        assert!(
+            resp.missing
+                .iter()
+                .any(|m| m == "Set a model provider for agent `default`.")
+        );
+
+        let agent = cfg.agents.get_mut("default").unwrap();
+        agent.model_provider = "anthropic.default".into();
+        agent.risk_profile = "default".into();
+        agent.runtime_profile = "default".into();
+        let resp = derive_section_status(&cfg);
+        assert!(
+            resp.needs_quickstart,
+            "provider alias without a selected model must still need onboarding"
+        );
+        assert!(
+            resp.missing
+                .iter()
+                .any(|m| m == "Choose a model for model provider `anthropic.default`.")
+        );
+
+        cfg.set_prop("providers.models.anthropic.default.model", "claude-sonnet")
+            .unwrap();
+        let resp = derive_section_status(&cfg);
+        assert!(
+            resp.needs_quickstart,
+            "hosted provider alias without credential/auth must still need onboarding"
+        );
+        assert!(
+            resp.missing
+                .iter()
+                .any(|m| m == "Set credential/auth for model provider `anthropic.default`.")
+        );
+
+        cfg.set_prop("providers.models.anthropic.default.api_key", "sk-test")
+            .unwrap();
+        let resp = derive_section_status(&cfg);
+        assert!(!resp.needs_quickstart);
+        assert_eq!(resp.reason, "has_dispatchable_agent");
+        assert!(!resp.has_partial_state || resp.missing.is_empty());
+    }
+
+    #[test]
+    fn derive_section_status_completed_sections_without_dispatchable_agent_stays_pending() {
+        let mut cfg = kinetic_config::schema::Config::default();
+        cfg.onboard_state
+            .completed_sections
+            .push("providers.models".into());
+        let resp = derive_section_status(&cfg);
+        assert!(
+            resp.needs_quickstart,
+            "completed_sections marker without a dispatchable agent must NOT flip the redirect"
+        );
+        assert_eq!(resp.reason, "incomplete_agent");
+    }
+
+    #[test]
+    fn apply_first_run_agent_defaults_binds_existing_provider_and_profiles() {
+        let mut cfg = kinetic_config::schema::Config::default();
+        cfg.create_map_key("providers.models.anthropic", "work")
+            .unwrap();
+        cfg.create_map_key("risk_profiles", "default").unwrap();
+        cfg.create_map_key("runtime_profiles", "deep_work").unwrap();
+        cfg.create_map_key("agents", "default").unwrap();
+
+        apply_first_run_agent_defaults(&mut cfg, "default");
+
+        let agent = cfg.agents.get("default").unwrap();
+        assert_eq!(agent.model_provider.as_str(), "anthropic.work");
+        assert_eq!(agent.risk_profile, "default");
+        assert_eq!(agent.runtime_profile, "deep_work");
+    }
+
+    #[test]
+    fn memory_section_ready_tracks_onboarding_progress_not_default_backend() {
+        let cfg = kinetic_config::schema::Config::default();
+        assert!(
+            !section_ready(&cfg, "memory", false),
+            "fresh onboarding should not show Memory checked merely because a default backend exists"
+        );
+        assert!(
+            section_ready(&cfg, "memory", true),
+            "Memory should show checked after the user has advanced through that section"
+        );
+    }
+
+    fn empty_cfg() -> kinetic_config::schema::Config {
+        kinetic_config::schema::Config::default()
+    }
+
+    #[tokio::test]
+    async fn agent_section_creation_reserves_url_key_through_cleanup() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = kinetic_config::schema::Config {
+            data_dir: tmp.path().join("data"),
+            config_path: tmp.path().join("config.toml"),
+            ..Default::default()
+        };
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        config.save().await.unwrap();
+        let disk_before = std::fs::read(&config.config_path).unwrap();
+        let workspace = config.agent_workspace_dir("recreated");
+        let state = section_test_state(config);
+        let mut cleanup = state.agent_lifecycle.begin_delete("recreated").unwrap();
+        cleanup.commit_destructive_mutation();
+        let path = || {
+            axum::extract::Path(SectionItemPath {
+                section: "agents".into(),
+                key: "recreated".into(),
+            })
+        };
+        let body = || {
+            Some(axum::Json(SectionSelectBody {
+                alias: Some("other".into()),
+            }))
+        };
+        let response = handle_section_select(State(state.clone()), None, path(), body()).await;
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(!state.config.read().agents.contains_key("recreated"));
+        assert_eq!(
+            std::fs::read(&state.config.read().config_path).unwrap(),
+            disk_before
+        );
+        assert!(!workspace.exists());
+        drop(cleanup);
+        let response = handle_section_select(State(state.clone()), None, path(), body()).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert!(state.config.read().agents.contains_key("recreated"));
+        assert!(!state.config.read().agents.contains_key("other"));
+        assert!(workspace.exists());
+    }
+
+    fn section_test_state(config: kinetic_config::schema::Config) -> AppState {
+        let memory: std::sync::Arc<dyn kinetic_api::memory_traits::Memory> =
+            std::sync::Arc::new(kinetic_memory::NoneMemory::new("none"));
+        AppState {
+            config: std::sync::Arc::new(parking_lot::RwLock::new(config)),
+            config_write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            agent_lifecycle: Default::default(),
+            model_provider: std::sync::Arc::new(crate::UnconfiguredModelProvider),
+            model: "test-model".to_string(),
+            temperature: None,
+            mem: memory.clone(),
+            memory_strategy: std::sync::Arc::new(
+                kinetic_runtime::agent::memory_strategy::DefaultMemoryStrategy::with_config(
+                    memory,
+                    kinetic_config::schema::MemoryConfig::default(),
+                    std::path::PathBuf::new(),
+                ),
+            ),
+            auto_save: false,
+            pairing: std::sync::Arc::new(kinetic_runtime::security::pairing::PairingGuard::new(
+                false,
+                &[],
+                kinetic_config::pairing::PairingCodePolicy::default(),
+            )),
+            trust_forwarded_headers: false,
+            rate_limiter: std::sync::Arc::new(crate::GatewayRateLimiter::new(100, 100, 100)),
+            auth_limiter: std::sync::Arc::new(crate::auth_rate_limit::AuthRateLimiter::new()),
+            idempotency_store: std::sync::Arc::new(crate::IdempotencyStore::new(
+                std::time::Duration::from_secs(300),
+                1000,
+            )),
+            observer: std::sync::Arc::new(kinetic_runtime::observability::NoopObserver),
+            tools_registry: std::sync::Arc::new(Vec::new()),
+            tools_registry_by_agent: std::sync::Arc::new(std::collections::HashMap::new()),
+            cost_tracker: None,
+            event_tx: tokio::sync::broadcast::channel(16).0,
+            event_buffer: std::sync::Arc::new(crate::sse::EventBuffer::new(16)),
+            shutdown_tx: tokio::sync::watch::channel(false).0,
+            reload_tx: None,
+            node_registry: std::sync::Arc::new(crate::nodes::NodeRegistry::new(16)),
+            mdns_peer_registry: crate::nodes::mdns::MdnsPeerRegistry::default(),
+            path_prefix: String::new(),
+            web_dist_dir: None,
+            session_backend: None,
+            session_queue: std::sync::Arc::new(crate::session_queue::SessionActorQueue::new(
+                8, 30, 600,
+            )),
+            device_registry: None,
+            pending_pairings: None,
+            #[cfg(feature = "webauthn")]
+            webauthn: None,
+            cancel_tokens: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            pending_reload: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tui_registry: None,
+            sop_engine: None,
+            sop_audit: None,
+            sop_driver_handles: None,
+        }
+    }
+
+    #[test]
+    fn handle_sections_derives_every_top_level_field_from_schema() {
+        // Regression: the section list must be schema-driven, not the old
+        // hardcoded 6. Adding a new top-level field to `Config` should make
+        // it appear here automatically.
+        let cfg = empty_cfg();
+        let mut roots: std::collections::BTreeSet<String> = cfg
+            .prop_fields()
+            .iter()
+            .filter_map(|f| f.name.split('.').next().map(str::to_string))
+            .collect();
+        // Mirror handle_sections: map-keyed sections surface even when
+        // their HashMap is empty (prop_fields only emits paths for
+        // populated entries).
+        for s in kinetic_config::schema::Config::map_key_sections() {
+            if let Some(first) = s.path.split('.').next() {
+                roots.insert(first.to_string());
+            }
+        }
+        for hidden in HIDDEN_TOP_LEVEL {
+            roots.remove(*hidden);
+        }
+        // The 5 onboarding sections must still be in the derived set.
+        for required in ["providers", "channels", "memory", "hardware", "tunnel"] {
+            assert!(
+                roots.contains(required),
+                "derived sections must include onboarding section `{required}`; got {roots:?}",
+            );
+        }
+        // Plus a sample of the runtime sections that used to be invisible.
+        for runtime in ["gateway", "observability", "scheduler", "security"] {
+            assert!(
+                roots.contains(runtime),
+                "derived sections must include runtime section `{runtime}`; got {roots:?}",
+            );
+        }
+        // System / housekeeping fields must NOT surface.
+        for hidden in HIDDEN_TOP_LEVEL {
+            assert!(
+                !roots.contains(*hidden),
+                "hidden top-level `{hidden}` must not appear",
+            );
+        }
+        for hidden in ["onboard_state", "onboard-state"] {
+            assert!(
+                !roots.contains(hidden),
+                "onboarding bookkeeping root `{hidden}` must not appear",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_sections_emits_stable_group_key_with_english_fallback() {
+        use http_body_util::BodyExt;
+
+        let response = handle_sections(State(section_test_state(empty_cfg()))).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let result: ConfigSectionsResult = serde_json::from_slice(&body).unwrap();
+        let cron = result
+            .sections
+            .iter()
+            .find(|section| section.key == "cron")
+            .expect("schema-derived response should include cron");
+        assert_eq!(cron.group, "Agent");
+        assert_eq!(cron.group_key, "agent");
+    }
+
+    #[test]
+    fn channels_select_initializes_subsection_so_set_prop_works() {
+        let mut cfg = empty_cfg();
+        assert!(cfg.channels.matrix.is_empty(), "fresh config: matrix unset");
+
+        cfg.create_map_key("channels.matrix", "mymatrixalias")
+            .expect("create_map_key must succeed for channels.matrix");
+        assert!(
+            cfg.channels.matrix.contains_key("mymatrixalias"),
+            "channels.matrix must have alias after create_map_key",
+        );
+
+        // The form would issue a PATCH whose set_prop call hits this path.
+        cfg.set_prop(
+            "channels.matrix.mymatrixalias.allowed_rooms",
+            r#"["alice","bob"]"#,
+        )
+        .expect("set_prop on initialized matrix subsection must succeed");
+        assert_eq!(
+            cfg.channels
+                .matrix
+                .get("mymatrixalias")
+                .unwrap()
+                .allowed_rooms,
+            vec!["alice".to_string(), "bob".to_string()],
+        );
+    }
+
+    #[test]
+    fn providers_picker_sources_from_list_providers() {
+        // Single source of truth: kinetic_providers::list_model_providers().
+        // Anthropic / OpenAI / OpenRouter must surface in the picker.
+        let cfg = empty_cfg();
+        let items = providers_picker(&cfg);
+        let names: Vec<&str> = items.iter().map(|i| i.key.as_str()).collect();
+        assert!(
+            names.contains(&"anthropic"),
+            "expected anthropic in picker, got: {names:?}"
+        );
+        assert!(names.contains(&"openai"), "expected openai in picker");
+        assert!(
+            names.contains(&"openrouter"),
+            "expected openrouter in picker"
+        );
+
+        // Display name is human-readable, not the canonical key.
+        let anthropic = items.iter().find(|i| i.key == "anthropic").unwrap();
+        assert_eq!(anthropic.label, "Anthropic");
+
+        // Local-only model_providers carry a description hint.
+        let local = items.iter().find(|i| i.description.is_some());
+        assert!(
+            local.is_some(),
+            "at least one model_provider should be marked local"
+        );
+
+        // Empty config has no model_provider aliases — no badges yet.
+        assert!(
+            items.iter().all(|i| i.badge.is_none()),
+            "fresh config shouldn't mark any model_provider as present"
+        );
+    }
+
+    #[test]
+    fn providers_picker_marks_alias_readiness() {
+        // Typed-family layout: each canonical family is a map-keyed
+        // sub-section at `model_providers.<family>` whose entries are
+        // operator-named aliases. Creating the alias alone is not enough
+        // for chat dispatch; it still needs model + credential/auth.
+        let mut cfg = empty_cfg();
+        cfg.create_map_key("providers.models.anthropic", "default")
+            .expect("create_map_key");
+        let items = providers_picker(&cfg);
+        let anthropic = items.iter().find(|i| i.key == "anthropic").unwrap();
+        assert_eq!(
+            anthropic.badge.as_deref(),
+            Some("needs setup"),
+            "anthropic should need setup after adding an empty alias"
+        );
+
+        cfg.set_prop(
+            "providers.models.anthropic.default.model",
+            "claude-sonnet-4-5",
+        )
+        .expect("set model");
+        cfg.set_prop("providers.models.anthropic.default.api_key", "sk-test")
+            .expect("set api key");
+        let items = providers_picker(&cfg);
+        let anthropic = items.iter().find(|i| i.key == "anthropic").unwrap();
+        assert_eq!(
+            anthropic.badge.as_deref(),
+            Some("configured"),
+            "anthropic should be marked configured once required chat fields are present"
+        );
+    }
+
+    #[test]
+    fn memory_picker_sources_from_selectable_backends() {
+        let cfg = empty_cfg();
+        let items = memory_picker(&cfg);
+        // Mirrors kinetic_memory::selectable_memory_backends() exactly.
+        let keys: Vec<&str> = items.iter().map(|i| i.key.as_str()).collect();
+        assert!(keys.contains(&"sqlite"));
+        assert!(keys.contains(&"none"));
+        // Fresh onboarding should not imply the user selected the default.
+        let active = items.iter().find(|i| i.badge.as_deref() == Some("active"));
+        assert!(
+            active.is_none(),
+            "fresh onboarding should not mark a memory backend active before the user confirms the step"
+        );
+    }
+
+    #[test]
+    fn channels_picker_walks_schema_via_init_defaults() {
+        // Pure schema discovery — same trick the TUI uses. Whatever channels
+        // the build has compiled in (matrix / discord / slack / etc.) appears
+        // in the picker without any hand-maintained list. Test asserts a
+        // representative sample compiled into the default `ci-all` build.
+        let cfg = empty_cfg();
+        let items = schema_walk_picker(&cfg, "channels");
+        let keys: Vec<&str> = items.iter().map(|i| i.key.as_str()).collect();
+        assert!(!keys.is_empty(), "channel picker must not be empty");
+        // Channels that are unconditionally compiled (no feature gate)
+        // should always appear:
+        for expected in ["telegram", "slack", "discord"] {
+            assert!(
+                keys.contains(&expected),
+                "expected `{expected}` in channels picker, got: {keys:?}"
+            );
+        }
+        // Fresh config — nothing configured yet.
+        assert!(
+            items.iter().all(|i| i.badge.is_none()),
+            "fresh config shouldn't mark any channel as configured"
+        );
+    }
+
+    #[test]
+    fn channels_picker_marks_configured_after_create_map_key() {
+        let mut cfg = empty_cfg();
+        cfg.create_map_key("channels.matrix", "mymatrixalias")
+            .expect("create_map_key must succeed for channels.matrix");
+        let items = schema_walk_picker(&cfg, "channels");
+        let matrix = items.iter().find(|i| i.key == "matrix").unwrap();
+        assert_eq!(
+            matrix.badge.as_deref(),
+            Some("configured"),
+            "matrix should be marked configured after create_map_key"
+        );
+    }
+
+    #[test]
+    fn tunnel_picker_includes_synthetic_none() {
+        let cfg = empty_cfg();
+        let items = tunnel_provider_picker(&cfg);
+        assert_eq!(
+            items[0].key, "none",
+            "`none` must be the first entry in the tunnel picker"
+        );
+        // `none` is the active default for a fresh config.
+        assert_eq!(items[0].badge.as_deref(), Some("active"));
+    }
+
+    #[test]
+    fn tunnel_picker_surfaces_all_option_backed_providers_on_fresh_config() {
+        let cfg = empty_cfg();
+        let items = tunnel_provider_picker(&cfg);
+        let keys: std::collections::BTreeSet<&str> = items.iter().map(|i| i.key.as_str()).collect();
+        for required in [
+            "none",
+            "cloudflare",
+            "tailscale",
+            "ngrok",
+            "openvpn",
+            "pinggy",
+            "custom",
+        ] {
+            assert!(
+                keys.contains(required),
+                "tunnel picker on a fresh config must include `{required}`; got: {:?}",
+                keys.into_iter().collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    #[test]
+    fn tunnel_picker_marks_active_provider_from_configured_section() {
+        let mut cfg = empty_cfg();
+        cfg.tunnel.tunnel_provider = "tailscale".to_string();
+        let items = tunnel_provider_picker(&cfg);
+        let active: Vec<&str> = items
+            .iter()
+            .filter(|i| i.badge.as_deref() == Some("active"))
+            .map(|i| i.key.as_str())
+            .collect();
+        assert_eq!(
+            active,
+            vec!["tailscale"],
+            "exactly one entry should be active after setting `tunnel.tunnel_provider = tailscale`"
+        );
+        assert_eq!(
+            items[0].key, "none",
+            "`none` is still the first picker entry even when another provider is active"
+        );
+    }
+
+    #[test]
+    fn tunnel_picker_badges_present_option_fields_as_configured() {
+        let mut cfg = empty_cfg();
+        cfg.tunnel.tunnel_provider = "cloudflare".to_string();
+        // Materialize the cloudflare nested Option directly so the picker sees
+        // it as present, without writing the developer's real config.
+        cfg.tunnel.cloudflare = Some(kinetic_config::schema::CloudflareTunnelConfig::default());
+        let items = tunnel_provider_picker(&cfg);
+        let cloudflare = items
+            .iter()
+            .find(|i| i.key == "cloudflare")
+            .expect("cloudflare should appear in the picker");
+        assert_eq!(
+            cloudflare.badge.as_deref(),
+            Some("active"),
+            "cloudflare is the active provider"
+        );
+        // `tailscale` is statically known but the user hasn't configured
+        // it — its Option is still None, so no badge.
+        let tailscale = items
+            .iter()
+            .find(|i| i.key == "tailscale")
+            .expect("tailscale should appear in the picker");
+        assert!(
+            tailscale.badge.is_none(),
+            "tailscale's Option is None, so no badge; got: {:?}",
+            tailscale.badge
+        );
+    }
+
+    #[tokio::test]
+    async fn tunnel_select_updates_canonical_provider_and_active_picker_badge() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = kinetic_config::schema::Config {
+            config_path: tmp.path().join("config.toml"),
+            ..Default::default()
+        };
+        let state = section_test_state(cfg);
+
+        let response = handle_section_select(
+            State(state.clone()),
+            None,
+            axum::extract::Path(SectionItemPath {
+                section: "tunnel".to_string(),
+                key: "cloudflare".to_string(),
+            }),
+            None,
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let cfg = state.config.read().clone();
+        assert_eq!(cfg.tunnel.tunnel_provider, "cloudflare");
+        assert!(
+            state
+                .pending_reload
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        let raw = tokio::fs::read_to_string(&cfg.config_path).await.unwrap();
+        let disk_value: toml::Value = toml::from_str(&raw).unwrap();
+        assert_eq!(
+            disk_value
+                .get("tunnel")
+                .and_then(|value| value.get("tunnel_provider"))
+                .and_then(toml::Value::as_str),
+            Some(cfg.tunnel.tunnel_provider.as_str()),
+            "section selection must persist and publish the selected provider"
+        );
+        let items = tunnel_provider_picker(&cfg);
+        let cloudflare = items
+            .iter()
+            .find(|item| item.key == "cloudflare")
+            .expect("cloudflare should appear in the picker");
+        assert_eq!(cloudflare.badge.as_deref(), Some("active"));
+    }
+
+    #[tokio::test]
+    async fn existing_section_selection_without_changes_skips_reload() {
+        use http_body_util::BodyExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let config_path = tmp.path().join("config.toml");
+        let mut cfg = kinetic_config::schema::Config {
+            config_path: config_path.clone(),
+            ..Default::default()
+        };
+        cfg.create_map_key("providers.models.anthropic", "default")
+            .expect("seed model provider alias");
+        cfg.save().await.expect("seed disk config");
+        let disk_before = tokio::fs::read(&config_path)
+            .await
+            .expect("read seed config");
+        let state = section_test_state(cfg);
+        let live_before = state.config.read().clone();
+
+        let response = handle_section_select(
+            State(state.clone()),
+            None,
+            axum::extract::Path(SectionItemPath {
+                section: "providers.models".to_string(),
+                key: "anthropic".to_string(),
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body")
+            .to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json response");
+        assert_eq!(json["fields_prefix"], "providers.models.anthropic.default");
+        assert_eq!(json["created"], false);
+
+        assert_eq!(tokio::fs::read(&config_path).await.unwrap(), disk_before);
+        let live_after = state.config.read().clone();
+        let live_before_value = toml::Value::try_from(&live_before).unwrap();
+        let live_after_value = toml::Value::try_from(&live_after).unwrap();
+        assert_eq!(
+            live_after_value, live_before_value,
+            "an existing selection must not replace the live snapshot"
+        );
+        assert!(
+            !state
+                .pending_reload
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_memory_and_tunnel_selections_skip_reload() {
+        use http_body_util::BodyExt;
+
+        let memory_tmp = tempfile::tempdir().expect("memory tempdir");
+        let memory_path = memory_tmp.path().join("config.toml");
+        let mut memory_cfg = kinetic_config::schema::Config {
+            config_path: memory_path.clone(),
+            ..Default::default()
+        };
+        memory_cfg.memory.backend = "sqlite".to_string();
+        memory_cfg
+            .onboard_state
+            .completed_sections
+            .push("memory".to_string());
+        memory_cfg.save().await.expect("seed memory config");
+        let memory_disk_before = tokio::fs::read(&memory_path)
+            .await
+            .expect("read seed memory config");
+        let memory_state = section_test_state(memory_cfg);
+        let memory_live_before = memory_state.config.read().clone();
+
+        let memory_response = handle_section_select(
+            State(memory_state.clone()),
+            None,
+            axum::extract::Path(SectionItemPath {
+                section: "memory".to_string(),
+                key: "sqlite".to_string(),
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(memory_response.status(), axum::http::StatusCode::OK);
+        let memory_body = memory_response
+            .into_body()
+            .collect()
+            .await
+            .expect("memory response body")
+            .to_bytes();
+        let memory_json: serde_json::Value =
+            serde_json::from_slice(&memory_body).expect("memory json response");
+        assert_eq!(memory_json["fields_prefix"], "memory");
+        assert_eq!(memory_json["created"], false);
+        assert_eq!(
+            tokio::fs::read(&memory_path).await.unwrap(),
+            memory_disk_before
+        );
+        assert_eq!(
+            toml::Value::try_from(&*memory_state.config.read()).unwrap(),
+            toml::Value::try_from(&memory_live_before).unwrap(),
+            "an unchanged memory selection must not replace the live snapshot"
+        );
+        assert!(
+            !memory_state
+                .pending_reload
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+
+        let tunnel_tmp = tempfile::tempdir().expect("tunnel tempdir");
+        let tunnel_path = tunnel_tmp.path().join("config.toml");
+        let mut tunnel_cfg = kinetic_config::schema::Config {
+            config_path: tunnel_path.clone(),
+            ..Default::default()
+        };
+        tunnel_cfg.tunnel.tunnel_provider = "cloudflare".to_string();
+        tunnel_cfg.tunnel.cloudflare = Some(Default::default());
+        tunnel_cfg.save().await.expect("seed tunnel config");
+        let tunnel_disk_before = tokio::fs::read(&tunnel_path)
+            .await
+            .expect("read seed tunnel config");
+        let tunnel_state = section_test_state(tunnel_cfg);
+        let tunnel_live_before = tunnel_state.config.read().clone();
+
+        let tunnel_response = handle_section_select(
+            State(tunnel_state.clone()),
+            None,
+            axum::extract::Path(SectionItemPath {
+                section: "tunnel".to_string(),
+                key: "cloudflare".to_string(),
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(tunnel_response.status(), axum::http::StatusCode::OK);
+        let tunnel_body = tunnel_response
+            .into_body()
+            .collect()
+            .await
+            .expect("tunnel response body")
+            .to_bytes();
+        let tunnel_json: serde_json::Value =
+            serde_json::from_slice(&tunnel_body).expect("tunnel json response");
+        assert_eq!(tunnel_json["fields_prefix"], "tunnel.cloudflare");
+        assert_eq!(tunnel_json["created"], false);
+        assert_eq!(
+            tokio::fs::read(&tunnel_path).await.unwrap(),
+            tunnel_disk_before
+        );
+        assert_eq!(
+            toml::Value::try_from(&*tunnel_state.config.read()).unwrap(),
+            toml::Value::try_from(&tunnel_live_before).unwrap(),
+            "an unchanged tunnel selection must not replace the live snapshot"
+        );
+        assert!(
+            !tunnel_state
+                .pending_reload
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_memory_selection_rejects_disk_drift() {
+        use http_body_util::BodyExt;
+
+        let tmp = tempfile::tempdir().expect("memory tempdir");
+        let config_path = tmp.path().join("config.toml");
+        let mut live_cfg = kinetic_config::schema::Config {
+            config_path: config_path.clone(),
+            ..Default::default()
+        };
+        live_cfg.memory.backend = "sqlite".to_string();
+        live_cfg
+            .onboard_state
+            .completed_sections
+            .push("memory".to_string());
+        live_cfg.save().await.expect("seed live memory config");
+        let state = section_test_state(live_cfg);
+
+        let mut disk_cfg = state.config.read().clone();
+        disk_cfg.memory.backend = "postgres".to_string();
+        disk_cfg.save().await.expect("write external memory drift");
+        let disk_before = tokio::fs::read(&config_path)
+            .await
+            .expect("read drifted memory config");
+        let live_before = state.config.read().clone();
+
+        let response = handle_section_select(
+            State(state.clone()),
+            None,
+            axum::extract::Path(SectionItemPath {
+                section: "memory".to_string(),
+                key: "sqlite".to_string(),
+            }),
+            None,
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("memory response body")
+            .to_bytes();
+        let error: ConfigApiError = serde_json::from_slice(&body).expect("memory error response");
+        assert_eq!(error.code, ConfigApiCode::ConfigChangedExternally);
+        assert_eq!(tokio::fs::read(&config_path).await.unwrap(), disk_before);
+        assert_eq!(
+            toml::Value::try_from(&*state.config.read()).unwrap(),
+            toml::Value::try_from(&live_before).unwrap(),
+            "a rejected memory selection must preserve the live snapshot"
+        );
+        assert!(
+            !state
+                .pending_reload
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_tunnel_selection_rejects_default_disk_drift() {
+        use http_body_util::BodyExt;
+
+        let tmp = tempfile::tempdir().expect("tunnel tempdir");
+        let config_path = tmp.path().join("config.toml");
+        let mut live_cfg = kinetic_config::schema::Config {
+            config_path: config_path.clone(),
+            ..Default::default()
+        };
+        live_cfg.tunnel.tunnel_provider = "tailscale".to_string();
+        live_cfg.tunnel.tailscale = Some(Default::default());
+        live_cfg.save().await.expect("seed live tunnel config");
+        let state = section_test_state(live_cfg);
+
+        let mut disk_cfg = state.config.read().clone();
+        disk_cfg
+            .tunnel
+            .tailscale
+            .as_mut()
+            .expect("tailscale defaults")
+            .funnel = true;
+        disk_cfg.save().await.expect("write external tunnel drift");
+        let disk_before = tokio::fs::read(&config_path)
+            .await
+            .expect("read drifted tunnel config");
+        let live_before = state.config.read().clone();
+
+        let response = handle_section_select(
+            State(state.clone()),
+            None,
+            axum::extract::Path(SectionItemPath {
+                section: "tunnel".to_string(),
+                key: "tailscale".to_string(),
+            }),
+            None,
+        )
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("tunnel response body")
+            .to_bytes();
+        let error: ConfigApiError = serde_json::from_slice(&body).expect("tunnel error response");
+        assert_eq!(error.code, ConfigApiCode::ConfigChangedExternally);
+        assert_eq!(tokio::fs::read(&config_path).await.unwrap(), disk_before);
+        assert_eq!(
+            toml::Value::try_from(&*state.config.read()).unwrap(),
+            toml::Value::try_from(&live_before).unwrap(),
+            "a rejected tunnel selection must preserve the live snapshot"
+        );
+        assert!(
+            !state
+                .pending_reload
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_memory_and_tunnel_selections_reject_uninspectable_config() {
+        use http_body_util::BodyExt;
+
+        for (section, key) in [("memory", "sqlite"), ("tunnel", "cloudflare")] {
+            for malformed in [false, true] {
+                let tmp = tempfile::tempdir().expect("section tempdir");
+                let config_path = tmp.path().join("config.toml");
+                let mut live_cfg = kinetic_config::schema::Config {
+                    config_path: config_path.clone(),
+                    ..Default::default()
+                };
+                if section == "memory" {
+                    live_cfg.memory.backend = key.to_string();
+                    live_cfg
+                        .onboard_state
+                        .completed_sections
+                        .push(section.to_string());
+                } else {
+                    live_cfg.tunnel.tunnel_provider = key.to_string();
+                    live_cfg.tunnel.cloudflare = Some(Default::default());
+                }
+
+                let malformed_contents = b"[memory\nbackend = \"sqlite\"";
+                if malformed {
+                    tokio::fs::write(&config_path, malformed_contents)
+                        .await
+                        .expect("write malformed config");
+                } else {
+                    std::fs::create_dir(&config_path).expect("create unreadable config path");
+                }
+
+                let state = section_test_state(live_cfg);
+                let live_before = state.config.read().clone();
+                let response = handle_section_select(
+                    State(state.clone()),
+                    None,
+                    axum::extract::Path(SectionItemPath {
+                        section: section.to_string(),
+                        key: key.to_string(),
+                    }),
+                    None,
+                )
+                .await;
+
+                assert_eq!(
+                    response.status(),
+                    axum::http::StatusCode::CONFLICT,
+                    "{section} must reject an {} canonical config",
+                    if malformed { "malformed" } else { "unreadable" }
+                );
+                let body = response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("section response body")
+                    .to_bytes();
+                let error: ConfigApiError =
+                    serde_json::from_slice(&body).expect("section error response");
+                assert_eq!(error.code, ConfigApiCode::ConfigChangedExternally);
+                if malformed {
+                    assert_eq!(
+                        tokio::fs::read(&config_path).await.unwrap(),
+                        malformed_contents
+                    );
+                } else {
+                    assert!(config_path.is_dir());
+                }
+                assert_eq!(
+                    toml::Value::try_from(&*state.config.read()).unwrap(),
+                    toml::Value::try_from(&live_before).unwrap(),
+                    "a rejected {section} selection must preserve the live snapshot"
+                );
+                assert!(
+                    !state
+                        .pending_reload
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn section_select_snapshot_read_failure_stops_before_save() {
+        use http_body_util::BodyExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::create_dir_all(&config_path).unwrap();
+        let state = section_test_state(kinetic_config::schema::Config {
+            config_path: config_path.clone(),
+            ..Default::default()
+        });
+        let live_before = state.config.read().clone();
+
+        let response = handle_section_select(
+            State(state.clone()),
+            None,
+            axum::extract::Path(SectionItemPath {
+                section: "tunnel".to_string(),
+                key: "cloudflare".to_string(),
+            }),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("snapshot failure response body")
+            .to_bytes();
+        let error: ConfigApiError =
+            serde_json::from_slice(&body).expect("snapshot failure response");
+        assert_eq!(error.code, ConfigApiCode::ReloadFailed);
+        assert!(
+            error
+                .message
+                .contains("failed to snapshot existing config before save"),
+            "the handler must reject the unreadable snapshot before attempting a save: {}",
+            error.message
+        );
+        assert!(
+            config_path.is_dir(),
+            "snapshot admission failure must retain the prior disk state"
+        );
+        assert_eq!(
+            toml::Value::try_from(&*state.config.read()).unwrap(),
+            toml::Value::try_from(&live_before).unwrap(),
+            "snapshot admission failure must not publish the working snapshot"
+        );
+        assert!(
+            !state
+                .pending_reload
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn one_tier_alias_map_picker_is_empty_for_unconfigured_section() {
+        let cfg = empty_cfg();
+        for section in [
+            "peer_groups",
+            "cron",
+            "knowledge_bundles",
+            "skill_bundles",
+            "risk_profiles",
+            "runtime_profiles",
+        ] {
+            let items = one_tier_alias_map_picker(&cfg, section);
+            assert!(
+                items.is_empty(),
+                "`{section}` picker must be empty on a fresh config, got: {:?}",
+                items.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    #[test]
+    fn one_tier_alias_map_picker_surfaces_created_aliases() {
+        let cases: &[(&str, &str)] = &[
+            ("peer_groups", "team_chat"),
+            ("cron", "daily_brief"),
+            ("knowledge_bundles", "house_docs"),
+            ("skill_bundles", "ops_skills"),
+            ("risk_profiles", "tight"),
+            ("runtime_profiles", "fast_model"),
+        ];
+        for (section, alias) in cases {
+            let mut cfg = empty_cfg();
+            cfg.create_map_key(section, alias)
+                .unwrap_or_else(|e| panic!("create_map_key({section}, {alias}) failed: {e}"));
+            let items = one_tier_alias_map_picker(&cfg, section);
+            assert!(
+                items.iter().any(|i| i.key == *alias),
+                "`{section}` picker should surface `{alias}` after create_map_key; got: {:?}",
+                items.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(),
+            );
+            let entry = items.iter().find(|i| i.key == *alias).unwrap();
+            assert_eq!(
+                entry.badge.as_deref(),
+                Some("configured"),
+                "`{section}.{alias}` should be badged `configured`",
+            );
+        }
+    }
+
+    #[test]
+    fn picker_dispatch_covers_every_section_variant() {
+        use kinetic_config::sections::Section;
+        let cfg = empty_cfg();
+        // The full Section surface = wizard steps + explorer-only.
+        // Spelling them out here pins both groups, so adding a row to
+        // the `sections!` macro forces an update here too.
+        let all: &[Section] = &[
+            Section::ModelProviders,
+            Section::TtsProviders,
+            Section::TranscriptionProviders,
+            Section::Channels,
+            Section::Memory,
+            Section::Hardware,
+            Section::Tunnel,
+            Section::Agents,
+            Section::PeerGroups,
+            Section::Storage,
+            Section::Cron,
+            Section::KnowledgeBundles,
+            Section::SkillBundles,
+            Section::RiskProfiles,
+            Section::RuntimeProfiles,
+        ];
+        let direct_form = [Section::Hardware];
+        for section in all {
+            match picker_items_for(*section, &cfg) {
+                PickerDispatch::Items(_items) => {
+                    assert!(
+                        !direct_form.contains(section),
+                        "{section:?} is marked DirectForm but dispatched to Items",
+                    );
+                }
+                PickerDispatch::DirectForm => {
+                    assert!(
+                        direct_form.contains(section),
+                        "{section:?} returned DirectForm but is not in the DirectForm set; \
+                         either give it a picker arm or add it to the DirectForm list",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn storage_picker_lists_all_kinds_and_marks_created() {
+        let cfg = empty_cfg();
+        let items = storage_picker(&cfg);
+        let keys: Vec<&str> = items.iter().map(|i| i.key.as_str()).collect();
+        for expected in ["sqlite", "postgres", "qdrant", "markdown", "lucid"] {
+            assert!(
+                keys.contains(&expected),
+                "storage picker must list `{expected}`, got: {keys:?}",
+            );
+        }
+        // Fresh config — no kind should be badged.
+        assert!(
+            items.iter().all(|i| i.badge.is_none()),
+            "fresh config: no storage kind should be marked configured",
+        );
+
+        // Create a sqlite instance; the sqlite row should flip to configured.
+        let mut cfg2 = empty_cfg();
+        cfg2.create_map_key("storage.sqlite", "primary")
+            .expect("create_map_key(storage.sqlite, primary) must succeed");
+        let items = storage_picker(&cfg2);
+        let sqlite = items.iter().find(|i| i.key == "sqlite").unwrap();
+        assert_eq!(
+            sqlite.badge.as_deref(),
+            Some("created"),
+            "storage.sqlite should be marked created after adding an alias",
+        );
+        assert!(
+            sqlite.description.is_some(),
+            "storage picker should explain each backend tradeoff",
+        );
+    }
+}

@@ -2,7 +2,7 @@
 //!
 //! The manifest **declares**; the operator's config **grants**. Installation is
 //! the one moment where those two can be reconciled without an operator typing
-//! anything, so `zeroclaw plugin install` seeds a *newly created*
+//! anything, so `kinetic plugin install` seeds a *newly created*
 //! `[[plugins.entries]]` row from the declaration and prints what it granted.
 //!
 //! Everything after that is a diff, never a write: a package upgrade whose
@@ -16,7 +16,7 @@
 //! This module owns only the comparison and command construction; every
 //! user-facing string stays in the CLI so it routes through Fluent.
 
-use zeroclaw_infra::net_guard::{egress_pattern_contains, normalize_egress_pattern};
+use kinetic_infra::net_guard::{egress_pattern_contains, normalize_egress_pattern};
 
 /// The config path holding an instance's granted allowlist.
 ///
@@ -30,7 +30,7 @@ pub fn egress_hosts_path(instance_key: &str) -> String {
     format!("plugins.entries.{instance_key}.egress_hosts")
 }
 
-/// The exact `zeroclaw config set` invocation that makes `hosts` the instance
+/// The exact `kinetic config set` invocation that makes `hosts` the instance
 /// row's granted allowlist.
 ///
 /// `config set` on a string array **replaces** the list rather than appending
@@ -43,7 +43,7 @@ pub fn egress_hosts_path(instance_key: &str) -> String {
 /// manifest, which is publisher-controlled text, and the operator pastes this
 /// command into their shell with their own authority: a POSIX shell performs
 /// `$(...)`, backtick and `$var` substitution inside double quotes, so a
-/// declared `$(id).example.com` would run `id` before ZeroClaw saw the
+/// declared `$(id).example.com` would run `id` before KineticVM saw the
 /// argument. The value is therefore quoted so that the operator's shell on
 /// this host passes every byte literally, including the `*` that starts a
 /// suffix pattern (see [`ShellDialect`]); on Windows, where the shell cannot
@@ -53,8 +53,8 @@ pub fn egress_hosts_path(instance_key: &str) -> String {
 /// argument is nothing.
 ///
 /// The directory carries the same treatment. `--config-dir` (and the
-/// `ZEROCLAW_CONFIG_DIR` it sets) is process-local, so a command copied out of
-/// `zeroclaw --config-dir /srv/a plugin list` and pasted into the operator's
+/// `KINETIC_CONFIG_DIR` it sets) is process-local, so a command copied out of
+/// `kinetic --config-dir /srv/a plugin list` and pasted into the operator's
 /// shell would otherwise load the ambient default configuration. The canonical
 /// row key names the package, capability and binding but not the profile, so
 /// that command would replace *another* profile's allowlist with a list
@@ -82,7 +82,7 @@ pub fn egress_set_command_for(
     let (dialect, marker) = dialect.command_form(&[&config_dir.to_string_lossy(), &joined]);
     format!(
         "{marker}{} config set {} {}",
-        zeroclaw_invocation_for(dialect, config_dir),
+        kinetic_invocation_for(dialect, config_dir),
         egress_hosts_path(instance_key),
         dialect.quote_literal(&joined)
     )
@@ -133,28 +133,28 @@ pub fn egress_create_command_for(
     };
     format!(
         "{marker}{feed} | {} config patch -",
-        zeroclaw_invocation_for(dialect, config_dir)
+        kinetic_invocation_for(dialect, config_dir)
     )
 }
 
-/// `zeroclaw --config-dir '<dir>'`: the invocation prefix every printed
+/// `kinetic --config-dir '<dir>'`: the invocation prefix every printed
 /// operator command starts with, so it acts on the configuration the operator
 /// inspected rather than whichever one their shell resolves by default,
 /// rendered for an explicit shell dialect.
 #[must_use]
-pub fn zeroclaw_invocation_for(dialect: ShellDialect, config_dir: &std::path::Path) -> String {
+pub fn kinetic_invocation_for(dialect: ShellDialect, config_dir: &std::path::Path) -> String {
     format!(
-        "zeroclaw --config-dir {}",
+        "kinetic --config-dir {}",
         dialect.quote_literal(&config_dir.to_string_lossy())
     )
 }
 
 /// The quoting dialect of the shell an operator pastes a printed command into.
 ///
-/// The commands this module renders are copied out of `zeroclaw plugin install`
-/// and `zeroclaw plugin list` output and pasted into the operator's interactive
+/// The commands this module renders are copied out of `kinetic plugin install`
+/// and `kinetic plugin list` output and pasted into the operator's interactive
 /// shell, so a value is quoted for *that* shell, not for the shell the runtime
-/// uses to execute tools. ZeroClaw cannot see which shell its output lands in.
+/// uses to execute tools. KineticVM cannot see which shell its output lands in.
 /// On Linux and macOS every supported shell shares the POSIX single-quote
 /// form. On Windows the operator may be in either of two shells, `cmd.exe`
 /// (the default the native runtime documents) or PowerShell (the default
@@ -393,7 +393,7 @@ impl EgressDeclarationDiff {
 /// grammar keeps `*.example.com` and its apex `example.com` distinct: a suffix
 /// grant never covers its apex, so a declared apex stays a gap.
 ///
-/// [c]: zeroclaw_infra::net_guard::egress_pattern_contains
+/// [c]: kinetic_infra::net_guard::egress_pattern_contains
 #[must_use]
 pub fn diff_declaration(declared: &[String], granted: &[String]) -> EgressDeclarationDiff {
     let declared = canonical_hosts(declared);
@@ -513,7 +513,7 @@ pub fn runtime_rejection(
     allow_private: &[String],
     runtime: &EgressRuntimeInputs,
 ) -> Option<RuntimeRejection> {
-    use zeroclaw_plugins::egress::{EgressError, EgressPolicy};
+    use kinetic_plugins::egress::{EgressError, EgressPolicy};
     match EgressPolicy::new(
         hosts,
         allow_private,
@@ -773,7 +773,7 @@ pub fn plan_egress_gap(
 mod tests {
     /// The configuration every test command is computed against.
     fn dir() -> &'static std::path::Path {
-        std::path::Path::new("/srv/zeroclaw/profile-a")
+        std::path::Path::new("/srv/kinetic/profile-a")
     }
 
     #[test]
@@ -787,11 +787,11 @@ mod tests {
         );
         assert_eq!(
             command,
-            "zeroclaw --config-dir '/tmp/it'\\''s here/profile a' config set \
+            "kinetic --config-dir '/tmp/it'\\''s here/profile a' config set \
              plugins.entries.zpi1_k.egress_hosts 'api.example.com'"
         );
         assert!(
-            command.starts_with(&super::zeroclaw_invocation_for(
+            command.starts_with(&super::kinetic_invocation_for(
                 super::ShellDialect::Posix,
                 awkward
             )),
@@ -839,11 +839,11 @@ mod tests {
             "it's.example.com",
         ]
         .map(String::from);
-        let dir = std::path::Path::new(r"C:\Users\op erator\it's\.zeroclaw");
+        let dir = std::path::Path::new(r"C:\Users\op erator\it's\.kinetic");
         let command =
             super::egress_set_command_for(super::ShellDialect::PowerShell, dir, "zpi1_k", &hosts);
         let expected = concat!(
-            r"zeroclaw --config-dir 'C:\Users\op erator\it''s\.zeroclaw' ",
+            r"kinetic --config-dir 'C:\Users\op erator\it''s\.kinetic' ",
             "config set plugins.entries.zpi1_k.egress_hosts ",
             "'$(id).example.com,`id`.example.com,$env:username.example.com,",
             "*.cdn.example.com,it''s.example.com'"
@@ -863,17 +863,17 @@ mod tests {
     #[test]
     fn the_windows_form_is_one_double_quoted_argument_for_both_windows_shells() {
         let hosts = ["api.example.com", "*.cdn.example.com"].map(String::from);
-        let dir = std::path::Path::new(r"C:\Users\op erator\.zeroclaw");
+        let dir = std::path::Path::new(r"C:\Users\op erator\.kinetic");
         let command =
             super::egress_set_command_for(super::ShellDialect::Windows, dir, "zpi1_k", &hosts);
         assert_eq!(
             command,
             concat!(
-                r#"zeroclaw --config-dir "C:\Users\op erator\.zeroclaw" "#,
+                r#"kinetic --config-dir "C:\Users\op erator\.kinetic" "#,
                 r#"config set plugins.entries.zpi1_k.egress_hosts "api.example.com,*.cdn.example.com""#
             )
         );
-        assert!(command.starts_with(&super::zeroclaw_invocation_for(
+        assert!(command.starts_with(&super::kinetic_invocation_for(
             super::ShellDialect::Windows,
             dir
         )));
@@ -890,7 +890,7 @@ mod tests {
     /// inside double quotes.
     #[test]
     fn the_windows_form_refuses_a_value_either_windows_shell_would_expand() {
-        let plain_dir = std::path::Path::new(r"C:\Users\operator\.zeroclaw");
+        let plain_dir = std::path::Path::new(r"C:\Users\operator\.kinetic");
         for host in [
             "$(id).example.com",
             "`id`.example.com",
@@ -921,8 +921,8 @@ mod tests {
             );
         }
         for dir in [
-            r"C:\Users\op erator\.zeroclaw\",
-            r"C:\%USERPROFILE%\.zeroclaw",
+            r"C:\Users\op erator\.kinetic\",
+            r"C:\%USERPROFILE%\.kinetic",
         ] {
             assert!(!super::windows_form_is_literal(dir), "{dir}");
             let command = super::egress_set_command_for(
@@ -942,15 +942,15 @@ mod tests {
             "api.example.com",
             "*.cdn.example.com",
             "it's.example.com",
-            r"C:\Users\op erator\.zeroclaw",
+            r"C:\Users\op erator\.kinetic",
         ] {
             assert!(super::windows_form_is_literal(plain), "{plain}");
         }
     }
 
-    /// The Windows shells, driven for real. `zeroclaw` is swapped for a native
+    /// The Windows shells, driven for real. `kinetic` is swapped for a native
     /// argv echo: `powershell -File echo.ps1`, whose arguments arrive through
-    /// the same C-runtime command-line parsing a native `zeroclaw.exe` would
+    /// the same C-runtime command-line parsing a native `kinetic.exe` would
     /// see, so what the script prints is what `config set` would receive.
     #[cfg(windows)]
     mod windows_shells {
@@ -983,10 +983,10 @@ mod tests {
             }
         }
 
-        /// The printed line with `zeroclaw` replaced by the argv echo.
+        /// The printed line with `kinetic` replaced by the argv echo.
         fn line_with_echo(echo: &ArgvEcho, command: &str) -> String {
             command
-                .strip_prefix("zeroclaw ")
+                .strip_prefix("kinetic ")
                 .map(|rest| format!("{} {rest}", echo.invocation))
                 .expect("the command starts with the binary name")
         }
@@ -1057,7 +1057,7 @@ mod tests {
         fn the_windows_form_survives_cmd_exe_as_the_intended_arguments() {
             let echo = argv_echo();
             let hosts = ["api.example.com", "*.cdn.example.com"].map(String::from);
-            let dir = std::path::Path::new(r"C:\Users\op erator\.zeroclaw");
+            let dir = std::path::Path::new(r"C:\Users\op erator\.kinetic");
             let command = super::super::egress_set_command(dir, "zpi1_k", &hosts);
             assert!(!command.starts_with(super::super::POWERSHELL_ONLY_MARKER));
             let output = cmd_exe(&line_with_echo(&echo, &command));
@@ -1070,7 +1070,7 @@ mod tests {
         fn the_windows_form_survives_powershell_as_the_intended_arguments() {
             let echo = argv_echo();
             let hosts = ["api.example.com", "*.cdn.example.com"].map(String::from);
-            let dir = std::path::Path::new(r"C:\Users\op erator\.zeroclaw");
+            let dir = std::path::Path::new(r"C:\Users\op erator\.kinetic");
             let command = super::super::egress_set_command(dir, "zpi1_k", &hosts);
             let output = powershell(&line_with_echo(&echo, &command));
             assert_eq!(argv(&output), expected(dir, &hosts), "{command}");
@@ -1089,7 +1089,7 @@ mod tests {
                 "*.cdn.example.com",
             ]
             .map(String::from);
-            let dir = std::path::Path::new(r"C:\Users\op erator\.zeroclaw");
+            let dir = std::path::Path::new(r"C:\Users\op erator\.kinetic");
             let command = super::super::egress_set_command(dir, "zpi1_k", &hosts);
             let rest = command
                 .strip_prefix(super::super::POWERSHELL_ONLY_MARKER)
@@ -1120,7 +1120,7 @@ mod tests {
 
     /// The printed command is pasted into the operator's shell, so the proof
     /// has to be the shell's own argument parsing, not a substring check: a
-    /// POSIX `sh` tokenises the command with `zeroclaw` swapped for `printf`,
+    /// POSIX `sh` tokenises the command with `kinetic` swapped for `printf`,
     /// and every declared host, including ones that carry command-substitution
     /// syntax, a glob and a quote, must arrive as one literal argument.
     #[cfg(unix)]
@@ -1137,7 +1137,7 @@ mod tests {
         let dir = std::path::Path::new("/srv/it's here/profile a");
         let command = super::egress_set_command(dir, "zpi1_k", &hosts);
         let script = command
-            .strip_prefix("zeroclaw ")
+            .strip_prefix("kinetic ")
             .map(|rest| format!("printf '%s\\n' {rest}"))
             .expect("the command starts with the binary name");
         let output = std::process::Command::new("sh")
@@ -1266,7 +1266,7 @@ mod tests {
             cmd,
             format!(
                 "{} config set plugins.entries.{key}.egress_hosts {quoted}",
-                zeroclaw_invocation_for(ShellDialect::host(), dir())
+                kinetic_invocation_for(ShellDialect::host(), dir())
             )
         );
         assert!(
@@ -1407,7 +1407,7 @@ mod tests {
         );
         assert!(posix.starts_with("printf '%s\\n' '[{"), "{posix}");
         assert!(
-            posix.ends_with("| zeroclaw --config-dir '/srv/zeroclaw/profile-a' config patch -"),
+            posix.ends_with("| kinetic --config-dir '/srv/kinetic/profile-a' config patch -"),
             "{posix}"
         );
         let windows = super::egress_create_command_for(

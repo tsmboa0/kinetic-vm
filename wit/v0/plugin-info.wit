@@ -1,6 +1,6 @@
-package zeroclaw:plugin@0.1.0;
+package kinetic:plugin@0.1.0;
 
-/// Self-identification interface exported by all ZeroClaw plugin types.
+/// Self-identification interface exported by all KineticVM plugin types.
 ///
 /// The reported name and version identify the component itself, independent of
 /// the manifest that ships next to it. The host does not yet call these

@@ -1,4 +1,4 @@
-# Clippy configuration for ZeroClaw.
+# Clippy configuration for KineticVM.
 # Thresholds tuned to match codebase patterns and reduce noise from
 # existing allow-attributes while still catching genuinely complex code.
 
@@ -13,55 +13,55 @@ too-many-lines-threshold = 200
 array-size-threshold = 65536
 
 # Hard ban on direct tracing/log/print log-event macros workspace-wide.
-# Every log emission goes through `::zeroclaw_log::record!` so events
+# Every log emission goes through `::kinetic_log::record!` so events
 # carry the structured `zc_*` shape, the alias-bound attribution span
 # fields, and the rest of the project's observability discipline.
-# zeroclaw-log itself bootstraps the pipeline and allows the macros
+# kinetic-log itself bootstraps the pipeline and allows the macros
 # locally via `#![allow(clippy::disallowed_macros)]` on the few files
 # that need them. Every other crate is denied here. With `-D warnings`
 # in CI, any attempt to add `tracing::info!`, `println!`, etc. fails
 # the build with a message that names the right replacement.
 disallowed-macros = [
-    { path = "tracing::trace", reason = "use ::zeroclaw_log::record!(TRACE, ...) instead" },
-    { path = "tracing::debug", reason = "use ::zeroclaw_log::record!(DEBUG, ...) instead" },
-    { path = "tracing::info",  reason = "use ::zeroclaw_log::record!(INFO, ...) instead" },
-    { path = "tracing::warn",  reason = "use ::zeroclaw_log::record!(WARN, ...) instead" },
-    { path = "tracing::error", reason = "use ::zeroclaw_log::record!(ERROR, ...) instead" },
-    { path = "log::trace",     reason = "use ::zeroclaw_log::record!(TRACE, ...) instead" },
-    { path = "log::debug",     reason = "use ::zeroclaw_log::record!(DEBUG, ...) instead" },
-    { path = "log::info",      reason = "use ::zeroclaw_log::record!(INFO, ...) instead" },
-    { path = "log::warn",      reason = "use ::zeroclaw_log::record!(WARN, ...) instead" },
-    { path = "log::error",     reason = "use ::zeroclaw_log::record!(ERROR, ...) instead" },
-    { path = "std::dbg",       reason = "use ::zeroclaw_log::record!(DEBUG, ...) instead; dbg! bypasses the log pipeline" },
+    { path = "tracing::trace", reason = "use ::kinetic_log::record!(TRACE, ...) instead" },
+    { path = "tracing::debug", reason = "use ::kinetic_log::record!(DEBUG, ...) instead" },
+    { path = "tracing::info",  reason = "use ::kinetic_log::record!(INFO, ...) instead" },
+    { path = "tracing::warn",  reason = "use ::kinetic_log::record!(WARN, ...) instead" },
+    { path = "tracing::error", reason = "use ::kinetic_log::record!(ERROR, ...) instead" },
+    { path = "log::trace",     reason = "use ::kinetic_log::record!(TRACE, ...) instead" },
+    { path = "log::debug",     reason = "use ::kinetic_log::record!(DEBUG, ...) instead" },
+    { path = "log::info",      reason = "use ::kinetic_log::record!(INFO, ...) instead" },
+    { path = "log::warn",      reason = "use ::kinetic_log::record!(WARN, ...) instead" },
+    { path = "log::error",     reason = "use ::kinetic_log::record!(ERROR, ...) instead" },
+    { path = "std::dbg",       reason = "use ::kinetic_log::record!(DEBUG, ...) instead; dbg! bypasses the log pipeline" },
     # Bare `anyhow!(...)` interpolates attribution-relevant context (agent_id,
     # key, alias, …) into a string blob that loses the Attributable span
     # binding by the time the error surfaces. Emit the structured event via
-    # `::zeroclaw_log::record!` (which inherits the wrapping span's typed
+    # `::kinetic_log::record!` (which inherits the wrapping span's typed
     # attribution attrs) then return a plain error via `anyhow::bail!`,
     # `anyhow::Error::msg`, or a typed error. Do not sidestep this by
     # re-importing the macro under another name.
-    { path = "anyhow::anyhow", reason = "emit ::zeroclaw_log::record! at the call site so span attribution propagates; then anyhow::bail! / anyhow::Error::msg for the returned error" },
+    { path = "anyhow::anyhow", reason = "emit ::kinetic_log::record! at the call site so span attribution propagates; then anyhow::bail! / anyhow::Error::msg for the returned error" },
 ]
 
 # Hard ban on direct `tokio::spawn` workspace-wide. Every fire-and-forget
-# task must go through `::zeroclaw_spawn::spawn!`, which threads the
+# task must go through `::kinetic_spawn::spawn!`, which threads the
 # caller's current tracing span into the child task so log events stay
 # attributed (session_key, channel, agent_id, …) instead of orphaning at
-# the tokio root. The macro itself lives in `zeroclaw-spawn` and must call
+# the tokio root. The macro itself lives in `kinetic-spawn` and must call
 # `tokio::spawn` to do its job; `apps/zerocode` is the one other exemption
 # (standalone TUI client, not daemon-path, owns its own session id). Both
 # carry a local `#![allow(clippy::disallowed_methods)]`.
 disallowed-methods = [
-    { path = "tokio::spawn", reason = "use ::zeroclaw_spawn::spawn!(...) so the spawned task inherits the caller's attribution span" },
+    { path = "tokio::spawn", reason = "use ::kinetic_spawn::spawn!(...) so the spawned task inherits the caller's attribution span" },
 ]
 # `std::println` / `std::eprintln` — DAEMON-PATH INTENT: these must NOT be
-# used in daemon/supervisor code paths (zeroclaw-channels orchestrator,
-# zeroclaw-runtime daemon). All daemon-path output must go through
-# `::zeroclaw_log::record!` so it flows through the structured log pipeline.
+# used in daemon/supervisor code paths (kinetic-channels orchestrator,
+# kinetic-runtime daemon). All daemon-path output must go through
+# `::kinetic_log::record!` so it flows through the structured log pipeline.
 # They are NOT in disallowed-macros yet because ~430 existing violations across
 # the codebase would break CI. Tracked for cleanup. New daemon-path code must
-# use `::zeroclaw_log::record!` — reviewers must reject any new `println!`
-# in crates/zeroclaw-channels/src/orchestrator/ and crates/zeroclaw-runtime/src/daemon/.
+# use `::kinetic_log::record!` — reviewers must reject any new `println!`
+# in crates/kinetic-channels/src/orchestrator/ and crates/kinetic-runtime/src/daemon/.
 # Build scripts emit cargo directives (`cargo:rerun-if-changed`) via println;
 # CLI-facing commands (doctor, bind-identity, send-message) use them for
 # human-readable stdout. Those are the only legitimate uses outside tests.

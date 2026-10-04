@@ -1,0 +1,10 @@
+[package]
+name = "kinetic-log-attribution-macro-consumer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+kinetic-log.workspace = true
+kinetic-log-attribution-macro-support = { path = "../attribution-macro-support" }

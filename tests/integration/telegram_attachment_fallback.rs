@@ -1,10 +1,10 @@
 //! Regression tests for Telegram attachment fallback behavior.
 
+use kinetic::channels::telegram::TelegramChannel;
+use kinetic::channels::{Channel, SendMessage};
 use std::sync::Arc;
 use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zeroclaw::channels::telegram::TelegramChannel;
-use zeroclaw::channels::{Channel, SendMessage};
 
 fn test_channel(mock_url: &str) -> TelegramChannel {
     let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(|| vec!["*".into()]);

@@ -1,9 +1,9 @@
+use kinetic::channels::Channel;
+use kinetic::channels::telegram::TelegramChannel;
 use serde_json::json;
 use std::sync::Arc;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-use zeroclaw::channels::Channel;
-use zeroclaw::channels::telegram::TelegramChannel;
 
 fn test_channel(mock_url: &str) -> TelegramChannel {
     let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::new(|| vec!["*".into()]);

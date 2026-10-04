@@ -1,7 +1,7 @@
 //! E2E test for vision support in model_providers.
 
 use anyhow::Result;
-use zeroclaw::providers::{ChatMessage, ChatRequest, ModelProviderRuntimeOptions};
+use kinetic::providers::{ChatMessage, ChatRequest, ModelProviderRuntimeOptions};
 
 /// Moderate temperature for vision E2E probes; the test asserts on request
 /// shape and success rather than output determinism, so 0.7 (historical
@@ -13,7 +13,7 @@ const VISION_PROBE_TEMPERATURE: f64 = 0.7;
 async fn provider_vision_support() -> Result<()> {
     // Use Gemini model_provider (OpenAI Codex is rate-limited until 21 Feb)
     println!("Creating Gemini model_provider...");
-    let model_provider = zeroclaw::providers::create_model_provider("gemini", None)?;
+    let model_provider = kinetic::providers::create_model_provider("gemini", None)?;
     let provider_name = "gemini";
     let model = "gemini-2.5-pro";
 
@@ -134,7 +134,7 @@ async fn openai_codex_second_vision_support() -> Result<()> {
     };
 
     let model_provider =
-        zeroclaw::providers::create_model_provider_with_options("openai-codex", None, &opts)?;
+        kinetic::providers::create_model_provider_with_options("openai-codex", None, &opts)?;
     let provider_name = "openai.codex:second";
     let model = "gpt-5.3-codex";
 

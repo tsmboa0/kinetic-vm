@@ -39,7 +39,7 @@ Instead, please report them responsibly:
 
 ## Security Architecture
 
-ZeroClaw implements defense-in-depth security:
+KineticVM implements defense-in-depth security:
 
 ### Autonomy Levels
 - **ReadOnly** — Agent can only read, no shell or write access
@@ -73,7 +73,7 @@ cargo test -- tools::file_write
 
 ## Container Security
 
-ZeroClaw Docker images follow CIS Docker Benchmark best practices:
+KineticVM Docker images follow CIS Docker Benchmark best practices:
 
 | Control | Implementation |
 |---------|----------------|
@@ -86,12 +86,12 @@ ZeroClaw Docker images follow CIS Docker Benchmark best practices:
 
 ```bash
 # Build and verify non-root user
-docker build -t zeroclaw .
-docker inspect --format='{{.Config.User}}' zeroclaw
+docker build -t kinetic .
+docker inspect --format='{{.Config.User}}' kinetic
 # Expected: 65534:65534
 
 # Run with read-only filesystem (production hardening)
-docker run --read-only -v /path/to/workspace:/workspace zeroclaw gateway
+docker run --read-only -v /path/to/workspace:/workspace kinetic gateway
 ```
 
 ### CI Enforcement

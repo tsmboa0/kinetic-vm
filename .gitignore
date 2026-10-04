@@ -14,7 +14,7 @@ firmware/*/target
 credentials.json
 
 # Local agent state
-.zeroclaw/*
+.kinetic/*
 *.db
 *.db-journal
 *.db-wal

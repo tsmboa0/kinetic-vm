@@ -13,7 +13,7 @@ risk_profile = "default"
 runtime_profile = "default"
 
 [agents.default.workspace]
-path = "/zeroclaw-data/workspace"
+path = "/kinetic-data/workspace"
 
 [risk_profiles.default]
 level = "supervised"

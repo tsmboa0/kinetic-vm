@@ -1,1 +1,1 @@
-pub use zeroclaw_tools::proxy_config::*;
+pub use kinetic_tools::proxy_config::*;

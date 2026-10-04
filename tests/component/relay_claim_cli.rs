@@ -1,10 +1,10 @@
-//! Binary-spawn coverage for `zeroclaw relay claim`.
+//! Binary-spawn coverage for `kinetic relay claim`.
 //!
 //! The in-crate tests exercise `handle_claim` and its helpers directly.
 //! None of them go through the shipped binary: clap dispatch, the global config
 //! load, the default-vs-`--config-dir` data dir, the persisted config write, and
 //! the process exit status are only exercised end-to-end here. This test spawns
-//! the real `zeroclaw relay claim …` against an isolated config dir and a mock
+//! the real `kinetic relay claim …` against an isolated config dir and a mock
 //! control endpoint, then asserts the process exit status and the config write.
 
 use std::process::Command;
@@ -39,7 +39,7 @@ async fn relay_claim_binary_writes_config_on_success() {
     let control = server.uri();
     let dir = config_dir.path().to_path_buf();
     let output = std::thread::spawn(move || {
-        Command::new(env!("CARGO_BIN_EXE_zeroclaw"))
+        Command::new(env!("CARGO_BIN_EXE_kinetic"))
             .env("RUST_LOG", "off")
             .args([
                 "--config-dir",
@@ -51,15 +51,15 @@ async fn relay_claim_binary_writes_config_on_success() {
                 &control,
             ])
             .output()
-            .expect("run zeroclaw relay claim")
+            .expect("run kinetic relay claim")
     })
     .join()
-    .expect("zeroclaw relay claim process must not panic");
+    .expect("kinetic relay claim process must not panic");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "`zeroclaw relay claim` must exit 0 on success; stderr:\n{stderr}\nstdout:\n{}",
+        "`kinetic relay claim` must exit 0 on success; stderr:\n{stderr}\nstdout:\n{}",
         String::from_utf8_lossy(&output.stdout)
     );
 
@@ -102,7 +102,7 @@ async fn relay_claim_binary_refuses_cleartext_non_loopback_control() {
 
     let dir = config_dir.path().to_path_buf();
     let output = std::thread::spawn(move || {
-        Command::new(env!("CARGO_BIN_EXE_zeroclaw"))
+        Command::new(env!("CARGO_BIN_EXE_kinetic"))
             .env("RUST_LOG", "off")
             .args([
                 "--config-dir",
@@ -114,10 +114,10 @@ async fn relay_claim_binary_refuses_cleartext_non_loopback_control() {
                 "http://control.zerorelay.net",
             ])
             .output()
-            .expect("run zeroclaw relay claim")
+            .expect("run kinetic relay claim")
     })
     .join()
-    .expect("zeroclaw relay claim process must not panic");
+    .expect("kinetic relay claim process must not panic");
 
     assert!(
         !output.status.success(),

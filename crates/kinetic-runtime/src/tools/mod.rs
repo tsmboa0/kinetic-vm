@@ -1,0 +1,4553 @@
+//! Tool subsystem for agent-callable capabilities.
+
+pub mod attribution;
+pub mod cron_add;
+pub(crate) mod cron_common;
+pub mod cron_list;
+pub mod cron_remove;
+pub mod cron_run;
+pub mod cron_runs;
+pub mod cron_update;
+pub mod delegate;
+pub mod deliver_file;
+pub mod file_read;
+pub mod model_switch;
+pub mod param_options;
+pub mod read_skill;
+mod runtime_command_error;
+pub mod schedule;
+pub mod scoped;
+pub mod send_message_to_peer;
+pub mod shell;
+pub(crate) mod shell_env;
+pub(crate) mod shell_output;
+pub mod skill_http;
+pub mod skill_manage;
+pub mod skill_tool;
+pub mod sop_advance;
+pub mod sop_approve;
+pub mod sop_execute;
+pub mod sop_list;
+pub mod sop_status;
+pub mod sop_workshop;
+pub mod spawn_subagent;
+pub mod todo_write;
+
+// Tool types from kinetic-tools (direct imports, no shims)
+pub use kinetic_tools::a2a_client::{
+    A2aCancelTool, A2aDiscoverTool, A2aGetTaskTool, A2aHttpClient, A2aSendTool,
+};
+pub use kinetic_tools::ask_user::AskUserTool;
+pub use kinetic_tools::ask_user::ChannelMapHandle;
+pub use kinetic_tools::backup_tool::BackupTool;
+pub use kinetic_tools::calculator::CalculatorTool;
+pub use kinetic_tools::channel_room::ChannelRoomTool;
+pub use kinetic_tools::cli_discovery::{DiscoveredCli, discover_cli_tools};
+pub use kinetic_tools::content_search::ContentSearchTool;
+pub use kinetic_tools::data_management::DataManagementTool;
+pub use kinetic_tools::escalate::EscalateToHumanTool;
+pub use kinetic_tools::file_download::{FileDownloadSsrfPolicy, FileDownloadTool};
+pub use kinetic_tools::file_edit::FileEditTool;
+pub use kinetic_tools::file_upload::FileUploadTool;
+pub use kinetic_tools::file_upload_bundle::FileUploadBundleTool;
+pub use kinetic_tools::file_write::FileWriteTool;
+pub use kinetic_tools::glob_search::GlobSearchTool;
+pub use kinetic_tools::hardware_board_info::HardwareBoardInfoTool;
+pub use kinetic_tools::hardware_memory_map::HardwareMemoryMapTool;
+pub use kinetic_tools::hardware_memory_read::HardwareMemoryReadTool;
+pub use kinetic_tools::http_request::HttpRequestTool;
+pub use kinetic_tools::image_info::ImageInfoTool;
+pub use kinetic_tools::knowledge_tool::KnowledgeTool;
+pub use kinetic_tools::llm_task::LlmTaskTool;
+pub use kinetic_tools::mcp_deferred::ActivatedToolSet;
+pub use kinetic_tools::memory_export::MemoryExportTool;
+pub use kinetic_tools::memory_forget::MemoryForgetTool;
+pub use kinetic_tools::memory_purge::MemoryPurgeTool;
+pub use kinetic_tools::memory_recall::MemoryRecallTool;
+pub use kinetic_tools::memory_store::MemoryStoreTool;
+pub use kinetic_tools::model_routing_config::ModelRoutingConfigTool;
+pub use kinetic_tools::pipeline::PipelineTool;
+pub use kinetic_tools::poll::PollTool;
+pub use kinetic_tools::proxy_config::ProxyConfigTool;
+pub use kinetic_tools::reaction::ReactionTool;
+pub use kinetic_tools::send_via::{
+    AgentPeerGroupResolver, SendViaTool, TURN_ROUTING, TurnRoutingHandle,
+};
+pub use kinetic_tools::sessions::{
+    AcpSessionReadView, SessionDeleteTool, SessionResetTool, SessionsCurrentTool,
+    SessionsHistoryTool, SessionsListTool, SessionsSendTool,
+};
+pub use kinetic_tools::web_fetch::WebFetchTool;
+pub use kinetic_tools::web_search_tool::WebSearchTool;
+pub use kinetic_tools::wrappers::{PathGuardedTool, RateLimitedTool};
+
+use crate::live_config_authority::AgentExecutionCapability;
+
+// Traits from kinetic-api
+pub use kinetic_api::schema::{CleaningStrategy, SchemaCleanr};
+pub use kinetic_api::tool::{Tool, ToolOutput, ToolResult, ToolSpec};
+
+// Local tool re-exports (tools with root deps, kept in misc)
+pub use cron_add::CronAddTool;
+pub use cron_list::CronListTool;
+pub use cron_remove::CronRemoveTool;
+pub use cron_run::CronRunTool;
+pub use cron_runs::CronRunsTool;
+pub use cron_update::CronUpdateTool;
+pub use delegate::DelegateTool;
+pub use deliver_file::{
+    DeliverFileTool, MAX_DELIVER_FILE_BYTES, attachment_deliver_uri,
+    read_delivered_artifact_bounded,
+};
+pub use file_read::FileReadTool;
+pub use model_switch::ModelSwitchTool;
+pub use read_skill::ReadSkillTool;
+pub use schedule::ScheduleTool;
+pub use send_message_to_peer::SendMessageToPeerTool;
+pub use shell::ShellTool;
+pub use skill_http::SkillHttpTool;
+pub use skill_tool::{SkillBuiltinTool, SkillShellTool};
+pub use sop_advance::SopAdvanceTool;
+pub use sop_approve::SopApproveTool;
+pub use sop_execute::SopExecuteTool;
+pub use sop_list::SopListTool;
+pub use sop_status::SopStatusTool;
+pub use sop_workshop::SopWorkshopTool;
+pub use spawn_subagent::SpawnSubagentTool;
+pub use todo_write::TodoWriteTool;
+
+/// Re-entrant agent-spawning tools that must never be collapsed by the
+/// per-turn duplicate-call guard: launching several with the same prompt
+/// (redundancy, sampling, fan-out) is intentional, not an accidental
+/// repeat. Unioned with config-provided exemptions in the tool-call loop.
+pub const REENTRANT_AGENT_TOOLS: &[&str] = &[SpawnSubagentTool::NAME, DelegateTool::NAME];
+
+use crate::platform::{NativeRuntime, RuntimeAdapter};
+use crate::security::{SecurityPolicy, create_sandbox};
+use crate::sop::audit::SopAuditLogger;
+use crate::sop::engine::SopEngine;
+use async_trait::async_trait;
+use kinetic_config::schema::{AliasedAgentConfig, Config};
+use kinetic_memory::Memory;
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::sync::{Arc, Mutex};
+
+pub type PerToolChannelHandle =
+    Arc<RwLock<HashMap<String, Arc<dyn kinetic_api::channel::Channel>>>>;
+
+/// Shared handle to the delegate tool's parent-tools list.
+/// Callers can push additional tools (e.g. MCP wrappers) after construction.
+pub type DelegateParentToolsHandle = Arc<RwLock<Vec<Arc<dyn Tool>>>>;
+
+/// Thin wrapper that makes an `Arc<dyn Tool>` usable as `Box<dyn Tool>`.
+pub struct ArcToolRef(pub Arc<dyn Tool>);
+// ArcToolRef is the public constructor name for ArcToolWrapper
+
+#[async_trait]
+impl Tool for ArcToolRef {
+    fn requires_unrestricted_principal(&self) -> bool {
+        self.0.requires_unrestricted_principal()
+    }
+
+    fn name(&self) -> &str {
+        self.0.name()
+    }
+
+    fn description(&self) -> &str {
+        self.0.description()
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        self.0.parameters_schema()
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        self.0.output_schema()
+    }
+
+    fn param_domains(&self) -> Vec<(&'static str, ::kinetic_api::tool::OptionDomain)> {
+        self.0.param_domains()
+    }
+
+    // Forward `spec()` so inner overrides keep their `Arc`-shared parameter
+    // schemas; the trait default would rebuild the spec from
+    // `parameters_schema()`, deep-cloning MCP schemas every loop iteration.
+    fn spec(&self) -> kinetic_api::tool::ToolSpec {
+        self.0.spec()
+    }
+
+    fn invocation_triggers(&self) -> Vec<String> {
+        self.0.invocation_triggers()
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        self.0.execute(args).await
+    }
+}
+
+/// Serply credential override state for `WebSearchTool`.
+///
+/// `Some(_)` when the config loader applied `KINETIC_web_search__serply_api_key`
+/// (the inner value is the in-memory credential, `None` for a blank override),
+/// so the schema-mirror value wins for this process. `None` when no override is
+/// active, in which case the tool keeps resolving `[web_search] serply_api_key`
+/// from `config.toml` at use time so rotation and removal take effect without a
+/// restart.
+fn serply_api_key_override(root_config: &Config) -> Option<Option<String>> {
+    root_config
+        .prop_is_env_overridden("web_search.serply_api_key")
+        .then(|| root_config.web_search.serply_api_key.clone())
+}
+
+#[derive(Clone)]
+struct ArcDelegatingTool {
+    inner: Arc<dyn Tool>,
+}
+
+impl ArcDelegatingTool {
+    fn boxed(inner: Arc<dyn Tool>) -> Box<dyn Tool> {
+        Box::new(Self { inner })
+    }
+}
+
+impl ::kinetic_api::attribution::Attributable for ArcDelegatingTool {
+    fn role(&self) -> ::kinetic_api::attribution::Role {
+        self.inner.role()
+    }
+    fn alias(&self) -> &str {
+        self.inner.alias()
+    }
+    fn tool_provenance(&self) -> ::kinetic_api::attribution::ToolProvenance {
+        self.inner.tool_provenance()
+    }
+}
+
+#[async_trait]
+impl Tool for ArcDelegatingTool {
+    fn requires_unrestricted_principal(&self) -> bool {
+        self.inner.requires_unrestricted_principal()
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        self.inner.parameters_schema()
+    }
+
+    fn output_schema(&self) -> Option<serde_json::Value> {
+        self.inner.output_schema()
+    }
+
+    fn param_domains(&self) -> Vec<(&'static str, ::kinetic_api::tool::OptionDomain)> {
+        self.inner.param_domains()
+    }
+
+    // Forward `spec()` so inner overrides keep their `Arc`-shared parameter
+    // schemas; the trait default would rebuild the spec from
+    // `parameters_schema()`, deep-cloning MCP schemas every loop iteration.
+    fn spec(&self) -> kinetic_api::tool::ToolSpec {
+        self.inner.spec()
+    }
+
+    fn invocation_triggers(&self) -> Vec<String> {
+        self.inner.invocation_triggers()
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        self.inner.execute(args).await
+    }
+}
+
+fn boxed_registry_from_arcs(tools: Vec<Arc<dyn Tool>>) -> Vec<Box<dyn Tool>> {
+    tools.into_iter().map(ArcDelegatingTool::boxed).collect()
+}
+
+/// Create the default tool registry
+pub fn default_tools(security: Arc<SecurityPolicy>) -> Vec<Box<dyn Tool>> {
+    default_tools_with_runtime(security, Arc::new(NativeRuntime::new()))
+}
+
+/// Create the default tool registry with explicit runtime adapter.
+pub fn default_tools_with_runtime(
+    security: Arc<SecurityPolicy>,
+    runtime: Arc<dyn RuntimeAdapter>,
+) -> Vec<Box<dyn Tool>> {
+    let persistent_writes = runtime.has_filesystem_access();
+    vec![
+        // The shell tool owns its own dialect-aware command + forbidden-path
+        // validation (see `ShellTool::execute`), so it is not wrapped in the
+        // generic POSIX `PathGuardedTool` — matching `SkillShellTool`. Wrapping it
+        // would run a dialect-less path scan ahead of the tool and wrongly reject
+        // the Windows `\\.\nul` device on a native cmd.exe sink.
+        Box::new(RateLimitedTool::new(
+            ShellTool::new(security.clone(), runtime).with_persistent_writes(persistent_writes),
+            security.clone(),
+        )),
+        Box::new(RateLimitedTool::new(
+            PathGuardedTool::new(
+                FileReadTool::new_with_persistence(security.clone(), persistent_writes),
+                security.clone(),
+            ),
+            security.clone(),
+        )),
+        Box::new(RateLimitedTool::new(
+            PathGuardedTool::new(DeliverFileTool::new(security.clone()), security.clone()),
+            security.clone(),
+        )),
+        Box::new(RateLimitedTool::new(
+            PathGuardedTool::new(
+                FileWriteTool::new_with_persistence(security.clone(), persistent_writes),
+                security.clone(),
+            ),
+            security.clone(),
+        )),
+        Box::new(RateLimitedTool::new(
+            PathGuardedTool::new(
+                FileEditTool::new_with_persistence(security.clone(), persistent_writes),
+                security.clone(),
+            ),
+            security.clone(),
+        )),
+        Box::new(RateLimitedTool::new(
+            PathGuardedTool::new(GlobSearchTool::new(security.clone()), security.clone()),
+            security.clone(),
+        )),
+        Box::new(RateLimitedTool::new(
+            PathGuardedTool::new(ContentSearchTool::new(security.clone()), security.clone()),
+            security,
+        )),
+    ]
+}
+
+#[cfg(test)]
+pub(crate) fn register_skill_tools(
+    tools_registry: &mut Vec<Box<dyn Tool>>,
+    skills: &[crate::skills::Skill],
+    security: Arc<SecurityPolicy>,
+) {
+    register_skill_tools_with_context(tools_registry, skills, security, &[]);
+}
+
+/// Register skill-defined tools with full context for builtin kinds.
+/// `unfiltered_registry` provides the pre-policy tool list for `kind = "builtin"`
+/// delegation.
+#[cfg(test)]
+pub(crate) fn register_skill_tools_with_context(
+    tools_registry: &mut Vec<Box<dyn Tool>>,
+    skills: &[crate::skills::Skill],
+    security: Arc<SecurityPolicy>,
+    unfiltered_registry: &[Arc<dyn Tool>],
+) {
+    register_skill_tools_with_context_and_runtime_optional_nat64(
+        tools_registry,
+        skills,
+        security,
+        unfiltered_registry,
+        Arc::new(NativeRuntime::new()),
+        Some(&[]),
+    );
+}
+
+pub fn register_skill_tools_with_context_and_runtime(
+    tools_registry: &mut Vec<Box<dyn Tool>>,
+    skills: &[crate::skills::Skill],
+    security: Arc<SecurityPolicy>,
+    unfiltered_registry: &[Arc<dyn Tool>],
+    runtime: Arc<dyn RuntimeAdapter>,
+    nat64_prefixes: &[kinetic_infra::net_guard::Nat64Prefix],
+) {
+    register_skill_tools_with_context_and_runtime_optional_nat64(
+        tools_registry,
+        skills,
+        security,
+        unfiltered_registry,
+        runtime,
+        Some(nat64_prefixes),
+    );
+}
+
+/// Internal scoped assembly seam. `None` omits only HTTP tools after an invalid
+/// NAT64 configuration; other skill kinds continue through their normal path.
+pub(crate) fn register_skill_tools_with_context_and_runtime_optional_nat64(
+    tools_registry: &mut Vec<Box<dyn Tool>>,
+    skills: &[crate::skills::Skill],
+    security: Arc<SecurityPolicy>,
+    unfiltered_registry: &[Arc<dyn Tool>],
+    runtime: Arc<dyn RuntimeAdapter>,
+    nat64_prefixes: Option<&[kinetic_infra::net_guard::Nat64Prefix]>,
+) {
+    if skills.is_empty() {
+        return;
+    }
+
+    let before = tools_registry.len();
+    let policy = Arc::clone(&security);
+    let skill_tools = crate::skills::skills_to_tools_with_context_and_runtime_optional_nat64(
+        skills,
+        security,
+        unfiltered_registry,
+        runtime,
+        nat64_prefixes,
+    );
+    let existing_names: std::collections::HashSet<String> = tools_registry
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect();
+    for tool in skill_tools {
+        if existing_names.contains(tool.name()) {
+            ::kinetic_log::record!(
+                WARN,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                    .with_outcome(::kinetic_log::EventOutcome::Unknown),
+                &format!(
+                    "Skill tool '{}' shadows built-in tool, skipping",
+                    tool.name()
+                )
+            );
+        } else if policy
+            .allowed_tools
+            .as_ref()
+            .is_some_and(|list| list.is_empty())
+        {
+            ::kinetic_log::record!(
+                INFO,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note),
+                &format!(
+                    "Skill tool '{}' denied by empty allowed_tools (deny-all), skipping",
+                    tool.name()
+                )
+            );
+        } else if policy.is_tool_excluded(tool.name()) {
+            ::kinetic_log::record!(
+                INFO,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note),
+                &format!(
+                    "Skill tool '{}' denied by excluded_tools, skipping",
+                    tool.name()
+                )
+            );
+        } else {
+            tools_registry.push(tool);
+        }
+    }
+    let registered = tools_registry.len() - before;
+
+    ::kinetic_log::record!(
+        INFO,
+        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note),
+        &format!(
+            "Registered {} skill tool(s) from {} skill(s): {}",
+            registered,
+            skills.len(),
+            skills
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    );
+}
+
+pub const BUILTIN_TOOL_INTEGRATIONS: &[(&str, &str)] = &[
+    ("Shell", "Terminal command execution"),
+    ("File System", "Read/write files"),
+    ("Weather", "Forecasts & conditions (wttr.in)"),
+    (
+        "Spawn SubAgent",
+        "Spawn an ephemeral SubAgent that inherits this agent's identity",
+    ),
+];
+
+pub use shell_env::ForwardedEnvironment;
+
+/// Bundled return values from tool registry construction.
+/// Named struct to avoid an ever-growing positional tuple that's painful
+/// to destructure across many callers.
+#[allow(clippy::type_complexity)]
+pub struct AllToolsResult {
+    /// The eager registry retained by this factory, before the per-agent
+    /// `allowed_tools`/`excluded_tools` filter.
+    ///
+    /// This is the raw material the gated seam consumes, not an
+    /// already-filtered view: `ScopedToolRegistry::assemble` applies the
+    /// `allowed_tools`/`excluded_tools` policy filter (and MCP scoping) when it
+    /// mints the per-agent tool set. Every production caller routes this field
+    /// straight into `assemble`, so an unfiltered value here is correct and is
+    /// not a policy bypass. Documented explicitly because the neighbouring
+    /// `unfiltered_tool_arcs` name implies by contrast that this field is the
+    /// filtered one, which has already misled readers into believing built-ins
+    /// escaped `allowed_tools`.
+    pub tools: Vec<Box<dyn Tool>>,
+    pub delegate_handle: Option<DelegateParentToolsHandle>,
+    pub ask_user_handle: Option<PerToolChannelHandle>,
+    pub channel_room_handle: Option<PerToolChannelHandle>,
+    pub reaction_handle: PerToolChannelHandle,
+    pub poll_handle: Option<PerToolChannelHandle>,
+    pub escalate_handle: Option<PerToolChannelHandle>,
+    /// Pre-boxed Arcs of every tool (before policy filter). Used by
+    /// skill-scoped builtin elevation to resolve targets at registration.
+    pub unfiltered_tool_arcs: Vec<Arc<dyn Tool>>,
+    /// The exact `DelegateTool` this factory registered, in its concrete type.
+    ///
+    /// Test-only. `tools`/`unfiltered_tool_arcs` erase the type behind
+    /// `dyn Tool`, so a regression cannot otherwise drive the *production*
+    /// delegate instance's nested-registry construction - it can only
+    /// re-derive the wiring by hand, which is exactly the thing that must not
+    /// be trusted. `None` when no agents are configured.
+    #[cfg(test)]
+    pub(crate) delegate_tool: Option<Arc<DelegateTool>>,
+}
+
+impl AllToolsResult {
+    /// Wrap an already-built tool vector as `assemble` INPUT, with every
+    /// side-channel handle empty. This mints an `AllToolsResult` (the input to
+    /// [`crate::tools::scoped::ScopedToolRegistry::assemble`]), NOT a
+    /// `ScopedToolRegistry` - it does not touch the seal. (`AllToolsResult`'s
+    /// fields are all `pub`, so a caller could already hand-roll this literal;
+    /// the helper just centralizes the "all handles empty" shape.) Used by the
+    /// paths that already own a fixed / pre-filtered tool set (the skill-review
+    /// harness, bounded delegation, and the `kinetic-eval` replay harness) and
+    /// route it through `assemble` only to seal it: they pass `skills: &[]`,
+    /// `connect_mcp: false`, `connect_peripherals: false`, so the empty handles
+    /// here are never read by the assembly. `pub` (not `pub(crate)`) so the
+    /// out-of-crate `kinetic-eval` harness can reach it.
+    pub fn from_prebuilt_tools(tools: Vec<Box<dyn Tool>>) -> Self {
+        Self {
+            tools,
+            delegate_handle: None,
+            ask_user_handle: None,
+            channel_room_handle: None,
+            reaction_handle: Arc::new(RwLock::new(HashMap::new())),
+            poll_handle: None,
+            escalate_handle: None,
+            unfiltered_tool_arcs: Vec::new(),
+            #[cfg(test)]
+            delegate_tool: None,
+        }
+    }
+}
+
+fn runtime_for_all_tools(
+    root_config: &kinetic_config::schema::Config,
+    tui_env: Option<&HashMap<String, String>>,
+) -> anyhow::Result<Arc<dyn RuntimeAdapter>> {
+    let tui_path = tui_env.and_then(|env| env.get("PATH")).map(OsStr::new);
+    Ok(Arc::from(
+        kinetic_config::platform::create_runtime_with_path(&root_config.runtime, tui_path)?,
+    ))
+}
+
+/// Create full tool registry including memory tools and optional Composio
+#[allow(
+    clippy::implicit_hasher,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
+pub fn all_tools(
+    config: Arc<Config>,
+    security: &Arc<SecurityPolicy>,
+    risk_profile: &kinetic_config::schema::RiskProfileConfig,
+    agent_alias: &str,
+    memory: Arc<dyn Memory>,
+    http_config: &kinetic_config::schema::HttpRequestConfig,
+    web_fetch_config: &kinetic_config::schema::WebFetchConfig,
+    workspace_dir: &std::path::Path,
+    agents: &HashMap<String, AliasedAgentConfig>,
+    fallback_api_key: Option<&str>,
+    root_config: &kinetic_config::schema::Config,
+    is_subagent_caller: bool,
+    tui_env: Option<HashMap<String, String>>,
+) -> anyhow::Result<AllToolsResult> {
+    let runtime = runtime_for_all_tools(root_config, tui_env.as_ref())?;
+    all_tools_with_runtime(
+        config,
+        security,
+        risk_profile,
+        agent_alias,
+        runtime,
+        memory,
+        http_config,
+        web_fetch_config,
+        workspace_dir,
+        agents,
+        fallback_api_key,
+        root_config,
+        is_subagent_caller,
+        tui_env,
+        None,
+        None,
+        None,
+    )
+}
+
+/// Peer groups that include `agent_alias`, cloned from `config`. Used as the
+/// live resolver body for `send_via` authority (and the snapshot fallback).
+fn filter_agent_peer_groups(
+    config: &Config,
+    agent_alias: &str,
+) -> HashMap<String, kinetic_config::multi_agent::PeerGroupConfig> {
+    config
+        .peer_groups
+        .iter()
+        .filter(|(_, pg)| pg.agents.iter().any(|a| a.as_str() == agent_alias))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+struct RuntimeShellAssembly {
+    shell_tool: ShellTool,
+}
+
+/// Pair the canonical runtime kind with one shared sandbox instance for every
+/// runtime-backed executor assembled by the production tool registry.
+fn runtime_shell_assembly(
+    security: Arc<SecurityPolicy>,
+    runtime: Arc<dyn RuntimeAdapter>,
+    risk_profile: &kinetic_config::schema::RiskProfileConfig,
+    root_config: &Config,
+) -> RuntimeShellAssembly {
+    let sandbox_cfg = risk_profile.sandbox_config();
+    let sandbox_extra_roots = crate::security::SandboxExtraRoots {
+        read_write: security.allowed_roots.clone(),
+        read_only: security.allowed_roots_read_only.clone(),
+        write_only: security.allowed_roots_write_only.clone(),
+    };
+    let sandbox = create_sandbox(
+        &sandbox_cfg,
+        root_config.runtime.kind,
+        Some(&security.workspace_dir),
+        &sandbox_extra_roots,
+    );
+    let shell_tool = ShellTool::new_with_sandbox(security, runtime, sandbox);
+    RuntimeShellAssembly { shell_tool }
+}
+
+/// Assemble a shell tool through the same runtime/sandbox ownership seam used
+/// by the production registry.
+#[must_use]
+pub fn shell_tool_for_runtime(
+    security: Arc<SecurityPolicy>,
+    runtime: Arc<dyn RuntimeAdapter>,
+    risk_profile: &kinetic_config::schema::RiskProfileConfig,
+    root_config: &Config,
+) -> ShellTool {
+    runtime_shell_assembly(security, runtime, risk_profile, root_config).shell_tool
+}
+
+/// One plugin instance's egress policy, read from canonical config at use time.
+///
+/// `instance_key` is the instance's
+/// [`PluginInstanceScope::config_entry_key`][key] — the very same
+/// `plugins.entries[].name` that [`plugin_config_values`] resolves against, so
+/// a single row carries both an instance's config and its granted reach.
+///
+/// The operator's `plugins.entries[].egress_hosts` is the only source of reach.
+/// The deployment's NAT64 prefixes and connection ceiling are read from the same
+/// config so a plugin and a built-in tool cannot classify one answer set
+/// differently.
+///
+/// [key]: kinetic_plugins::instance::PluginInstanceScope::config_entry_key
+#[cfg(feature = "plugins-wasm")]
+fn plugin_egress_policy(
+    config: &Config,
+    instance_key: &str,
+) -> Result<kinetic_plugins::egress::EgressPolicy, kinetic_plugins::egress::EgressError> {
+    use kinetic_plugins::egress::{
+        EgressError, EgressPolicy, TlsClientIdentity, TlsProfile, TlsProfileName,
+    };
+    let (hosts, allow_private) = config.plugins.entry_egress(instance_key);
+    let profiles = config
+        .plugins
+        .entry_tls_profiles(instance_key)
+        .into_iter()
+        .map(|profile| {
+            let secret = |field: &str, name: Option<String>| {
+                name.map(|name| {
+                    kinetic_api::plugin_key::SecretPropertyRef::parse(name).map_err(|_| {
+                        EgressError::InvalidTlsProfile {
+                            profile: profile.name.clone(),
+                            reason: format!("{field} is not a portable secret property"),
+                        }
+                    })
+                })
+                .transpose()
+            };
+            let custom_ca = secret("custom_ca_secret", profile.custom_ca_secret.clone())?;
+            let certificate = secret(
+                "client_certificate_secret",
+                profile.client_certificate_secret.clone(),
+            )?;
+            let private_key = secret(
+                "client_private_key_secret",
+                profile.client_private_key_secret.clone(),
+            )?;
+            let identity = match (certificate, private_key) {
+                (Some(certificate), Some(private_key)) => {
+                    Some(TlsClientIdentity::new(certificate, private_key))
+                }
+                (None, None) => None,
+                _ => {
+                    return Err(EgressError::InvalidTlsProfile {
+                        profile: profile.name.clone(),
+                        reason: "client certificate and private key must be set together"
+                            .to_string(),
+                    });
+                }
+            };
+            TlsProfile::new(
+                TlsProfileName::new(profile.name.clone())?,
+                &profile.hosts,
+                profile.system_roots,
+                custom_ca,
+                identity,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    EgressPolicy::new(
+        &hosts,
+        &allow_private,
+        &config.security.nat64_prefixes,
+        config.plugins.limits.max_connections_per_instance,
+    )?
+    .with_tls_profiles(profiles)
+}
+
+/// The one host-owned egress authority shared by every plugin instance in a
+/// registry.
+///
+/// It resolves a *view* of canonical config at the moment each request is made
+/// rather than snapshotting one here, so an operator edit takes effect without
+/// re-instantiating the guest. The live handle is preferred; one-shot callers
+/// that have none fall back to the documented `root_config` snapshot.
+///
+/// A fresh service is built per registry, and that is deliberately fine: the
+/// per-instance connection budget does *not* live in the service. It lives in
+/// `kinetic_plugins::egress`'s process-wide registry, keyed by canonical
+/// instance identity, so the agent loop, the gateway, the channels
+/// orchestrator, and the delegate tool spend one ceiling between them rather
+/// than one each.
+///
+/// Egress and config resolve the **same** `[[plugins.entries]]` row: both key on
+/// the instance's `config_entry_key()` (the opaque `zpi1_` instance key), never
+/// on the package name or the raw binding. Keying egress by the binding would
+/// miss the row `kinetic plugin install` seeds and deny every destination the
+/// operator granted.
+#[cfg(feature = "plugins-wasm")]
+pub(crate) fn plugin_egress_service(
+    config: Arc<Config>,
+    live_config: Option<Arc<parking_lot::RwLock<Config>>>,
+) -> kinetic_plugins::egress::EgressHostService {
+    kinetic_plugins::egress::EgressHostService::new(
+        kinetic_plugins::egress::EgressPolicyResolver::new(move |scope| {
+            let instance_key = scope.id().config_entry_key().map_err(|error| {
+                kinetic_plugins::egress::EgressError::PolicyUnavailable(error.to_string())
+            })?;
+            match live_config.as_ref() {
+                Some(handle) => plugin_egress_policy(&handle.read(), &instance_key),
+                None => plugin_egress_policy(&config, &instance_key),
+            }
+        }),
+    )
+}
+
+/// The secret properties an instance's TLS profiles reference.
+///
+/// That material (a CA bundle, a client certificate and its private key) is
+/// read by the host when it builds a TLS connection. Resolved config marks it
+/// host-only so the guest's `secrets` import cannot return it. A reference that
+/// is not a portable property name is skipped here: the egress policy rejects
+/// the profile, and no secret by that name can be resolved.
+#[cfg(feature = "plugins-wasm")]
+fn plugin_tls_secret_properties(
+    config: &Config,
+    instance_key: &str,
+) -> Vec<kinetic_api::plugin_key::SecretPropertyRef> {
+    config
+        .plugins
+        .entry_tls_profiles(instance_key)
+        .into_iter()
+        .flat_map(|profile| {
+            [
+                profile.custom_ca_secret,
+                profile.client_certificate_secret,
+                profile.client_private_key_secret,
+            ]
+        })
+        .flatten()
+        .filter_map(|name| kinetic_api::plugin_key::SecretPropertyRef::parse(name).ok())
+        .collect()
+}
+
+#[cfg(feature = "plugins-wasm")]
+fn plugin_config_values(
+    config: &Config,
+    instance_key: &str,
+    package: &str,
+) -> Result<Option<HashMap<String, String>>, kinetic_plugins::error::PluginError> {
+    config
+        .plugins
+        .entry_config(instance_key)
+        .map(|configured| configured.cloned())
+        .map_err(|_| {
+            kinetic_plugins::error::PluginError::InvalidConfig(format!(
+                "plugin '{package}' has duplicate config entries for its instance key"
+            ))
+        })
+}
+
+#[cfg(feature = "plugins-wasm")]
+pub(crate) fn plugin_host_services(
+    host: Arc<kinetic_plugins::host::PluginHost>,
+    config: Arc<Config>,
+    live_config: Option<Arc<parking_lot::RwLock<Config>>>,
+) -> kinetic_plugins::services::PluginHostServices {
+    let data_dir = config.data_dir.clone();
+    let config_dir = config
+        .config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf();
+    // A live daemon handle and a fallback snapshot are mutually exclusive in
+    // the long-lived service, so the resolver never retains two config sources.
+    let fallback_config = live_config.is_none().then_some(config);
+    let config = kinetic_plugins::config::PluginConfigResolver::new(move |scope| {
+        let package = scope.id().package();
+        let config_entry_key = scope.id().config_entry_key()?;
+        let manifest = host
+            .manifest(package)
+            .ok_or_else(|| kinetic_plugins::error::PluginError::NotFound(package.to_string()))?;
+        // Filled from the same config view the values come from, so the
+        // reserved set and the secrets it withholds share one revision.
+        let mut host_only = Vec::new();
+        let resolved = if let Some(live_config) = &live_config {
+            kinetic_plugins::config::resolve_plugin_config_from(manifest, scope, || {
+                // Transient per-call view: schema/grant checks happen before
+                // this access, and the global lock is released before guest
+                // setup.
+                let config = live_config.read();
+                host_only = plugin_tls_secret_properties(&config, &config_entry_key);
+                plugin_config_values(&config, &config_entry_key, package)
+            })
+        } else {
+            let config = fallback_config.as_ref().ok_or_else(|| {
+                kinetic_plugins::error::PluginError::InvalidConfig(
+                    "plugin config source is unavailable".to_string(),
+                )
+            })?;
+            kinetic_plugins::config::resolve_plugin_config_from(manifest, scope, || {
+                host_only = plugin_tls_secret_properties(config, &config_entry_key);
+                plugin_config_values(config, &config_entry_key, package)
+            })
+        };
+        resolved.map(|resolved| resolved.reserve_for_host(host_only))
+    });
+    let state = kinetic_plugins::services::PluginStateService::new(
+        crate::plugin_state::PluginStateStore::new(&data_dir, &config_dir),
+    );
+    kinetic_plugins::services::PluginHostServices::new(config, state)
+}
+
+/// Stack reserved for the dedicated registry-builder thread. The registry
+/// build is a deep synchronous subtree — ~100 tool constructors plus 18
+/// full-`Config` clones — measured at ~1.5–1.7 MiB of stack on x86_64 Linux
+/// debug builds, with Windows frames some 10–25% larger. Reserving roughly
+/// twice the measured worst case keeps the builder off every caller's stack
+/// budget without itself becoming a new cliff.
+const TOOL_REGISTRY_BUILD_STACK_BYTES: usize = 4 * 1024 * 1024;
+
+/// Force-compile the process-global lazy regexes used on the turn path.
+///
+/// A cold `regex` compile descends through ~40 `regex_automata` NFA compiler
+/// frames. `scrub_credentials` reaches `SENSITIVE_KV_REGEX` from deep inside
+/// the turn loop (`make_query_summary` → memory rendering), so a first-turn
+/// compile lands that recursion on the turn's stack. Every turn path builds
+/// a tool registry first, so warming them here — on the registry-builder
+/// thread, before any turn stack exists — keeps the recursion off every
+/// caller. Runs at most once per process.
+fn warm_lazy_regexes() {
+    std::sync::LazyLock::force(&crate::agent::turn::redact::SENSITIVE_KV_REGEX);
+    std::sync::LazyLock::force(&crate::agent::turn::redact::SENSITIVE_KEY_REGEX);
+    std::sync::LazyLock::force(&crate::agent::loop_::IMAGE_DATA_URI_REGEX);
+    std::sync::LazyLock::force(&crate::agent::history::LOCAL_IMAGE_PATH_RE);
+    kinetic_providers::multimodal::warm_lazy_regexes();
+}
+
+/// Create the full tool registry on a dedicated builder thread.
+///
+/// The registry build is the deepest synchronous subtree reachable from
+/// `session/new` and from every turn path. Built inline it consumed the RPC
+/// caller's stack down to a few KiB of the 2 MiB `session/new` regression
+/// budget, so any change deepening it overflowed Windows debug builds. The
+/// build now runs on a thread with its own explicit stack; the caller's
+/// stack pays only the cheap per-call prep below.
+///
+/// Ordering and panic semantics are unchanged: the caller blocks until the
+/// registry is built (as the inline build did), and a builder panic is
+/// resumed on the caller's thread. A scoped thread keeps the borrowed
+/// parameters (`http_config`/`web_fetch_config`/`agents`/
+/// `root_config`) semantically independent at the API boundary while avoiding
+/// deep clones on the caller's limited stack.
+#[allow(
+    clippy::implicit_hasher,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
+pub fn all_tools_with_runtime(
+    config: Arc<Config>,
+    security: &Arc<SecurityPolicy>,
+    risk_profile: &kinetic_config::schema::RiskProfileConfig,
+    agent_alias: &str,
+    runtime: Arc<dyn RuntimeAdapter>,
+    memory: Arc<dyn Memory>,
+    http_config: &kinetic_config::schema::HttpRequestConfig,
+    web_fetch_config: &kinetic_config::schema::WebFetchConfig,
+    workspace_dir: &std::path::Path,
+    agents: &HashMap<String, AliasedAgentConfig>,
+    fallback_api_key: Option<&str>,
+    root_config: &kinetic_config::schema::Config,
+    is_subagent_caller: bool,
+    tui_env: Option<HashMap<String, String>>,
+    sop_engine: Option<Arc<Mutex<SopEngine>>>,
+    sop_audit: Option<Arc<SopAuditLogger>>,
+    live_config: Option<Arc<parking_lot::RwLock<kinetic_config::schema::Config>>>,
+) -> anyhow::Result<AllToolsResult> {
+    all_tools_with_runtime_and_acp_sessions(
+        config,
+        security,
+        risk_profile,
+        agent_alias,
+        runtime,
+        memory,
+        http_config,
+        web_fetch_config,
+        workspace_dir,
+        agents,
+        fallback_api_key,
+        root_config,
+        is_subagent_caller,
+        tui_env.map(Arc::new),
+        sop_engine,
+        sop_audit,
+        live_config,
+        None,
+    )
+}
+
+/// Build the registry on its dedicated stack with lifecycle and ACP context.
+#[allow(
+    clippy::implicit_hasher,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
+pub(crate) fn all_tools_with_runtime_context(
+    config: Arc<Config>,
+    security: &Arc<SecurityPolicy>,
+    risk_profile: &kinetic_config::schema::RiskProfileConfig,
+    agent_alias: &str,
+    runtime: Arc<dyn RuntimeAdapter>,
+    memory: Arc<dyn Memory>,
+    http_config: &kinetic_config::schema::HttpRequestConfig,
+    web_fetch_config: &kinetic_config::schema::WebFetchConfig,
+    workspace_dir: &std::path::Path,
+    agents: &HashMap<String, AliasedAgentConfig>,
+    fallback_api_key: Option<&str>,
+    root_config: &kinetic_config::schema::Config,
+    is_subagent_caller: bool,
+    tui_env: Option<ForwardedEnvironment>,
+    sop_engine: Option<Arc<Mutex<SopEngine>>>,
+    sop_audit: Option<Arc<SopAuditLogger>>,
+    // Live config handle for `send_via` peer-group authority. `Some` from the
+    // channel daemon (so reloads take effect); `None` for one-shot / non-channel
+    // callers, which fall back to a snapshot of `root_config`.
+    live_config: Option<Arc<parking_lot::RwLock<kinetic_config::schema::Config>>>,
+    execution_capability: Option<AgentExecutionCapability>,
+    acp_sessions: Option<AcpSessionReadView>,
+) -> anyhow::Result<AllToolsResult> {
+    let builder = move || {
+        // Warm the lazy regexes BEFORE the registry build and BEFORE any
+        // turn can start: LazyLock runs the initializer on whichever thread
+        // reaches it first, so a turn racing an un-joined warmup would
+        // compile the regex (a ~40-frame regex_automata recursion) on the
+        // turn's own stack. Doing this first on the builder thread also
+        // means the compile never lands on a turn stack; it costs one
+        // cold-process delay of a few hundred milliseconds, once.
+        warm_lazy_regexes();
+        all_tools_with_runtime_on_thread(
+            config,
+            security,
+            risk_profile,
+            agent_alias,
+            runtime,
+            memory,
+            http_config,
+            web_fetch_config,
+            workspace_dir,
+            agents,
+            fallback_api_key,
+            root_config,
+            is_subagent_caller,
+            tui_env,
+            sop_engine,
+            sop_audit,
+            live_config,
+            execution_capability,
+            acp_sessions,
+        )
+    };
+    std::thread::scope(|scope| -> anyhow::Result<AllToolsResult> {
+        let handle = std::thread::Builder::new()
+            .name("kinetic-tool-registry".into())
+            .stack_size(TOOL_REGISTRY_BUILD_STACK_BYTES)
+            .spawn_scoped(scope, builder)
+            .map_err(|error| {
+                anyhow::Error::msg(format!(
+                    "failed to spawn tool-registry builder thread: {error}"
+                ))
+            })?;
+        Ok(match handle.join() {
+            Ok(result) => result,
+            // Preserve the inline build's panic semantics: a builder panic is
+            // resumed on the caller's thread exactly as if it had unwound
+            // through the caller's frames.
+            Err(panic) => std::panic::resume_unwind(panic),
+        })
+    })
+}
+
+/// Create the full tool registry with an optional ACP session read view.
+#[allow(
+    clippy::implicit_hasher,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
+pub fn all_tools_with_runtime_and_acp_sessions(
+    config: Arc<Config>,
+    security: &Arc<SecurityPolicy>,
+    risk_profile: &kinetic_config::schema::RiskProfileConfig,
+    agent_alias: &str,
+    runtime: Arc<dyn RuntimeAdapter>,
+    memory: Arc<dyn Memory>,
+    http_config: &kinetic_config::schema::HttpRequestConfig,
+    web_fetch_config: &kinetic_config::schema::WebFetchConfig,
+    workspace_dir: &std::path::Path,
+    agents: &HashMap<String, AliasedAgentConfig>,
+    fallback_api_key: Option<&str>,
+    root_config: &kinetic_config::schema::Config,
+    is_subagent_caller: bool,
+    tui_env: Option<ForwardedEnvironment>,
+    sop_engine: Option<Arc<Mutex<SopEngine>>>,
+    sop_audit: Option<Arc<SopAuditLogger>>,
+    // Live config handle for `send_via` peer-group authority. `Some` from the
+    // channel daemon (so reloads take effect); `None` for one-shot / non-channel
+    // callers, which fall back to a snapshot of `root_config`.
+    live_config: Option<Arc<parking_lot::RwLock<kinetic_config::schema::Config>>>,
+    acp_sessions: Option<AcpSessionReadView>,
+) -> anyhow::Result<AllToolsResult> {
+    all_tools_with_runtime_context(
+        config,
+        security,
+        risk_profile,
+        agent_alias,
+        runtime,
+        memory,
+        http_config,
+        web_fetch_config,
+        workspace_dir,
+        agents,
+        fallback_api_key,
+        root_config,
+        is_subagent_caller,
+        tui_env,
+        sop_engine,
+        sop_audit,
+        live_config,
+        None,
+        acp_sessions,
+    )
+}
+
+/// Create the managed registry while carrying the authority-backed execution
+/// capability into tools that can start work for another target alias.
+#[allow(
+    clippy::implicit_hasher,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
+pub fn all_tools_with_runtime_and_execution_capability(
+    config: Arc<Config>,
+    security: &Arc<SecurityPolicy>,
+    risk_profile: &kinetic_config::schema::RiskProfileConfig,
+    agent_alias: &str,
+    runtime: Arc<dyn RuntimeAdapter>,
+    memory: Arc<dyn Memory>,
+    http_config: &kinetic_config::schema::HttpRequestConfig,
+    web_fetch_config: &kinetic_config::schema::WebFetchConfig,
+    workspace_dir: &std::path::Path,
+    agents: &HashMap<String, AliasedAgentConfig>,
+    fallback_api_key: Option<&str>,
+    root_config: &kinetic_config::schema::Config,
+    is_subagent_caller: bool,
+    tui_env: Option<HashMap<String, String>>,
+    sop_engine: Option<Arc<Mutex<SopEngine>>>,
+    sop_audit: Option<Arc<SopAuditLogger>>,
+    live_config: Option<Arc<parking_lot::RwLock<kinetic_config::schema::Config>>>,
+    execution_capability: Option<AgentExecutionCapability>,
+) -> anyhow::Result<AllToolsResult> {
+    all_tools_with_runtime_context(
+        config,
+        security,
+        risk_profile,
+        agent_alias,
+        runtime,
+        memory,
+        http_config,
+        web_fetch_config,
+        workspace_dir,
+        agents,
+        fallback_api_key,
+        root_config,
+        is_subagent_caller,
+        tui_env.map(Arc::new),
+        sop_engine,
+        sop_audit,
+        live_config,
+        execution_capability,
+        None,
+    )
+}
+
+/// Registry build body; runs on the dedicated builder thread.
+#[allow(
+    clippy::implicit_hasher,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
+fn all_tools_with_runtime_on_thread(
+    config: Arc<Config>,
+    security: &Arc<SecurityPolicy>,
+    risk_profile: &kinetic_config::schema::RiskProfileConfig,
+    agent_alias: &str,
+    runtime: Arc<dyn RuntimeAdapter>,
+    memory: Arc<dyn Memory>,
+    http_config: &kinetic_config::schema::HttpRequestConfig,
+    web_fetch_config: &kinetic_config::schema::WebFetchConfig,
+    workspace_dir: &std::path::Path,
+    agents: &HashMap<String, AliasedAgentConfig>,
+    fallback_api_key: Option<&str>,
+    root_config: &kinetic_config::schema::Config,
+    is_subagent_caller: bool,
+    tui_env: Option<ForwardedEnvironment>,
+    sop_engine: Option<Arc<Mutex<SopEngine>>>,
+    sop_audit: Option<Arc<SopAuditLogger>>,
+    live_config: Option<Arc<parking_lot::RwLock<kinetic_config::schema::Config>>>,
+    execution_capability: Option<AgentExecutionCapability>,
+    acp_sessions: Option<AcpSessionReadView>,
+) -> AllToolsResult {
+    let persistent_writes = runtime.has_filesystem_access();
+    let RuntimeShellAssembly { shell_tool } =
+        runtime_shell_assembly(security.clone(), runtime.clone(), risk_profile, root_config);
+    // Keep a shared runtime adapter available after constructing ShellTool.
+    // Independent agentic delegates use it later to build the target-owned tool
+    // registry; bounded delegates continue to use the parent `tool_arcs`
+    // snapshot below.
+    // The `root_config`-derived tools below share ONE snapshot `Arc` instead
+    // of each taking a full `Config` clone: registry construction (per agent
+    // build and per channel-message turn) previously paid three deep copies.
+    let root_config_shared = Arc::new(root_config.clone());
+    let mut tool_arcs: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(RateLimitedTool::new(
+            shell_tool
+                .with_timeout_secs(if security.shell_timeout_secs > 0 {
+                    security.shell_timeout_secs
+                } else {
+                    root_config.shell_tool.timeout_secs
+                })
+                .with_shared_tui_env(tui_env)
+                .with_persistent_writes(persistent_writes),
+            security.clone(),
+        )),
+        Arc::new(RateLimitedTool::new(
+            PathGuardedTool::new(
+                FileReadTool::new_with_persistence(security.clone(), persistent_writes),
+                security.clone(),
+            ),
+            security.clone(),
+        )),
+        Arc::new(RateLimitedTool::new(
+            PathGuardedTool::new(DeliverFileTool::new(security.clone()), security.clone()),
+            security.clone(),
+        )),
+        Arc::new(RateLimitedTool::new(
+            PathGuardedTool::new(
+                FileWriteTool::new_with_persistence(security.clone(), persistent_writes),
+                security.clone(),
+            ),
+            security.clone(),
+        )),
+        Arc::new(RateLimitedTool::new(
+            PathGuardedTool::new(
+                FileEditTool::new_with_persistence(security.clone(), persistent_writes),
+                security.clone(),
+            ),
+            security.clone(),
+        )),
+        Arc::new(RateLimitedTool::new(
+            PathGuardedTool::new(GlobSearchTool::new(security.clone()), security.clone()),
+            security.clone(),
+        )),
+        Arc::new(RateLimitedTool::new(
+            PathGuardedTool::new(ContentSearchTool::new(security.clone()), security.clone()),
+            security.clone(),
+        )),
+        Arc::new(CronAddTool::new_with_runtime(
+            config.clone(),
+            security.clone(),
+            agent_alias,
+            runtime.clone(),
+        )),
+        Arc::new(CronListTool::new(config.clone(), agent_alias)),
+        Arc::new(CronRemoveTool::new(
+            config.clone(),
+            security.clone(),
+            agent_alias,
+        )),
+        Arc::new(CronUpdateTool::new_with_runtime(
+            config.clone(),
+            security.clone(),
+            agent_alias,
+            runtime.clone(),
+        )),
+        Arc::new(CronRunTool::new_with_runtime_and_capability(
+            config.clone(),
+            security.clone(),
+            agent_alias,
+            runtime.clone(),
+            execution_capability.clone(),
+        )),
+        Arc::new(CronRunsTool::new(config.clone(), agent_alias)),
+        Arc::new(MemoryStoreTool::new(memory.clone(), security.clone())),
+        Arc::new(MemoryRecallTool::new(memory.clone())),
+        Arc::new(MemoryForgetTool::new(memory.clone(), security.clone())),
+        Arc::new(MemoryExportTool::new(memory.clone())),
+        Arc::new(MemoryPurgeTool::new(memory.clone(), security.clone())),
+        Arc::new(ScheduleTool::new_with_runtime(
+            security.clone(),
+            Arc::clone(&root_config_shared),
+            agent_alias,
+            runtime.clone(),
+        )),
+        Arc::new(
+            SpawnSubagentTool::new(
+                Arc::clone(&root_config_shared),
+                agent_alias,
+                security.clone(),
+            )
+            .with_subagent_caller(is_subagent_caller)
+            .with_execution_capability(execution_capability.clone()),
+        ),
+        Arc::new(SendMessageToPeerTool::new_with_live_config_and_capability(
+            Arc::clone(&root_config_shared),
+            agent_alias,
+            live_config.clone(),
+            execution_capability.clone(),
+        )),
+        Arc::new(ModelRoutingConfigTool::new(
+            config.clone(),
+            security.clone(),
+        )),
+        Arc::new(ModelSwitchTool::new(security.clone(), config.clone())),
+        Arc::new(ProxyConfigTool::new(config.clone(), security.clone())),
+        Arc::new(CalculatorTool::new()),
+        Arc::new(TodoWriteTool::new()),
+    ];
+
+    // A SubAgent runs as an ephemeral clone of its parent and inherits the
+    // parent's model verbatim; it must not be able to switch the active
+    // model out from under the parent (the switch signal is process-wide).
+    if is_subagent_caller {
+        tool_arcs.retain(|tool| tool.name() != ModelSwitchTool::NAME);
+    }
+
+    // LLM task tool — registered using the calling agent's provider.
+    // Preserves family + alias identity so alias-specific typed config
+    // (e.g. requires_openai_auth) survives into llm_task execution.
+    if let Some((family, alias, entry)) = root_config.resolved_model_provider_for_agent(agent_alias)
+    {
+        let llm_task_model = entry
+            .model
+            .clone()
+            .unwrap_or_else(|| "openai/gpt-4o-mini".to_string());
+        let llm_task_runtime_options =
+            kinetic_providers::provider_runtime_options_for_alias(root_config, family, alias);
+        tool_arcs.push(Arc::new(LlmTaskTool::new(
+            security.clone(),
+            config.clone(),
+            family.to_string(),
+            alias.to_string(),
+            llm_task_model,
+            entry.temperature,
+            entry.api_key.clone(),
+            llm_task_runtime_options,
+        )));
+    }
+
+    if matches!(
+        root_config.effective_skills_prompt_mode(agent_alias),
+        kinetic_config::schema::SkillsPromptInjectionMode::Compact
+    ) {
+        // ReadSkillTool holds full config to support workspace skills,
+        // open-skills, agent-bound bundles, and plugin skills.
+        tool_arcs.push(Arc::new(ReadSkillTool::new(
+            config.clone(),
+            agent_alias.to_string(),
+        )));
+    }
+
+    if http_config.enabled {
+        match HttpRequestTool::new_with_config(
+            security.clone(),
+            http_config.allowed_domains.clone(),
+            http_config.max_response_size,
+            http_config.timeout_secs,
+            http_config.allow_private_hosts,
+            http_config.allowed_private_hosts.clone(),
+            root_config.security.nat64_prefixes.clone(),
+            root_config.config_path.clone(),
+            root_config.secrets.encrypt,
+        ) {
+            Ok(tool) => {
+                tool_arcs.push(Arc::new(RateLimitedTool::new(tool, security.clone())));
+            }
+            Err(e) => {
+                ::kinetic_log::record!(
+                    WARN,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                        .with_outcome(::kinetic_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                    "http_request: failed to construct tool, skipping registration"
+                );
+            }
+        }
+    }
+
+    // A2A outbound client (conditionally registered; opt-in via [a2a.client] enabled).
+    // The four a2a_* tools share one client holding the live config handle, so
+    // peer/credential/security resolution happens at call time (no stored peer Vec).
+    if root_config.a2a.client.enabled {
+        let live = live_config
+            .clone()
+            .unwrap_or_else(|| Arc::new(parking_lot::RwLock::new(root_config.clone())));
+        // The kinetic dir (config file parent) + secrets.encrypt enable
+        // decrypting encrypted peer tokens via the canonical SecretStore,
+        // the same path http_request uses for its auth_secret values.
+        let a2a_kinetic_dir = root_config
+            .config_path
+            .parent()
+            .map(std::path::PathBuf::from);
+        // Route cache shared across all a2a_* tools and across tool-set
+        // reassembly: every `process_message` turn and `agent::run` invocation
+        // constructs a fresh A2aHttpClient, but the process-wide shared route
+        // cache survives so a send→poll/cancel lifecycle stays on the endpoint
+        // that created the task. Daemon restart (process exit) naturally
+        // clears it (orphaned routes are stale after a restart).
+        let a2a_route_cache = kinetic_tools::a2a_client::shared_a2a_route_cache();
+        match A2aHttpClient::new(
+            live,
+            root_config.a2a.client.request_timeout_secs,
+            a2a_kinetic_dir,
+            root_config.secrets.encrypt,
+            a2a_route_cache,
+        ) {
+            Ok(client) => {
+                let client = Arc::new(client);
+                // Read tools (discover/get_task) are NOT wrapped in
+                // RateLimitedTool: ToolOperation::Read is free by policy —
+                // enforce_tool_operation(Read) is a no-op that never records
+                // an action. Wrapping them would charge the Act budget on
+                // every successful network call (RateLimitedTool.record_action
+                // after success), and a post-I/O rate-limit failure could hide
+                // a successful remote result from the agent.
+                tool_arcs.push(Arc::new(A2aDiscoverTool::new(
+                    Arc::clone(&client),
+                    security.clone(),
+                )));
+                // Act tools (send/cancel) are NOT wrapped in RateLimitedTool:
+                // they pre-charge the action budget via enforce_tool_operation(Act)
+                // before network I/O. RateLimitedTool would post-charge again,
+                // double-counting — and worse, a budget-exhausted post-charge
+                // returns failure after the remote mutation already succeeded,
+                // which can cause the agent to retry an already-created/canceled
+                // task. The pre-charge in execute() covers both autonomy gating
+                // and rate limiting (record_action fails on budget exhaustion).
+                tool_arcs.push(Arc::new(A2aSendTool::new(
+                    Arc::clone(&client),
+                    security.clone(),
+                )));
+                tool_arcs.push(Arc::new(A2aGetTaskTool::new(
+                    Arc::clone(&client),
+                    security.clone(),
+                )));
+                tool_arcs.push(Arc::new(A2aCancelTool::new(
+                    Arc::clone(&client),
+                    security.clone(),
+                )));
+            }
+            Err(e) => {
+                ::kinetic_log::record!(
+                    WARN,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                        .with_outcome(::kinetic_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                    "a2a_client: failed to construct client, skipping registration of a2a_* tools"
+                );
+            }
+        }
+    }
+
+    if web_fetch_config.enabled {
+        match WebFetchTool::new(
+            security.clone(),
+            web_fetch_config.allowed_domains.clone(),
+            web_fetch_config.blocked_domains.clone(),
+            web_fetch_config.max_response_size,
+            web_fetch_config.timeout_secs,
+            web_fetch_config.firecrawl.clone(),
+            web_fetch_config.allowed_private_hosts.clone(),
+            root_config.security.nat64_prefixes.clone(),
+        ) {
+            Ok(tool) => {
+                tool_arcs.push(Arc::new(RateLimitedTool::new(tool, security.clone())));
+            }
+            Err(e) => {
+                ::kinetic_log::record!(
+                    WARN,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                        .with_outcome(::kinetic_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                    "web_fetch: failed to construct tool, skipping registration"
+                );
+            }
+        }
+    }
+
+    // Web search tool (enabled by default for GLM and other models)
+    if root_config.web_search.enabled {
+        // Rate-limited like every other outbound-network tool (see web_fetch
+        // and http_request above): without the wrapper an agent loop could
+        // issue unbounded searches against the configured provider — and
+        // against the default DuckDuckGo scrape path, which gets the machine
+        // blocked.
+        tool_arcs.push(Arc::new(RateLimitedTool::new(
+            WebSearchTool::new_with_config_and_anysearch_override(
+                root_config.web_search.search_provider.clone(),
+                root_config.web_search.brave_api_key.clone(),
+                root_config.web_search.tavily_api_key.clone(),
+                root_config.web_search.jina_api_key.clone(),
+                root_config
+                    .pre_override_snapshots
+                    .contains_key("web_search.anysearch_api_key")
+                    .then(|| root_config.web_search.anysearch_api_key.clone()),
+                root_config.web_search.searxng_instance_url.clone(),
+                root_config.web_search.max_results,
+                root_config.web_search.timeout_secs,
+                root_config.config_path.clone(),
+                root_config.secrets.encrypt,
+            )
+            .with_serply_api_key_override(serply_api_key_override(root_config))
+            // The loader applies `KINETIC_web_search__keenable_api_key` in
+            // memory only. Without handing it over, the tool would reread
+            // `config.toml` and miss an env-only key, or send a stored key
+            // that a blank override was meant to suppress.
+            .with_keenable_api_key_override(WebSearchTool::keenable_api_key_override(
+                root_config,
+            )),
+            security.clone(),
+        )));
+    }
+
+    // Backup tool (enabled by default)
+    if root_config.backup.enabled {
+        tool_arcs.push(Arc::new(BackupTool::new_with_data_root_and_security(
+            config.data_dir.clone(),
+            root_config.backup.include_dirs.clone(),
+            root_config.backup.max_keep,
+            security.clone(),
+        )));
+    }
+
+    // Data management tool (disabled by default)
+    if root_config.data_retention.enabled {
+        tool_arcs.push(Arc::new(
+            DataManagementTool::new_with_data_root_and_security(
+                config.data_dir.clone(),
+                root_config.data_retention.retention_days,
+                security.clone(),
+            ),
+        ));
+    }
+
+    // Vision tools are always available
+    tool_arcs.push(Arc::new(RateLimitedTool::new(
+        PathGuardedTool::new(ImageInfoTool::new(security.clone()), security.clone()),
+        security.clone(),
+    )));
+
+    if let Ok(backend) =
+        kinetic_infra::make_session_backend(&config.data_dir, &config.channels.session_backend)
+    {
+        if let Some(acp_sessions) = acp_sessions {
+            tool_arcs.push(Arc::new(SessionsCurrentTool::with_acp_sessions(
+                backend.clone(),
+                acp_sessions.clone(),
+            )));
+            tool_arcs.push(Arc::new(SessionsListTool::with_acp_sessions(
+                backend.clone(),
+                acp_sessions.clone(),
+            )));
+            tool_arcs.push(Arc::new(SessionsHistoryTool::with_acp_sessions(
+                backend.clone(),
+                security.clone(),
+                acp_sessions.clone(),
+            )));
+            tool_arcs.push(Arc::new(SessionsSendTool::with_acp_sessions(
+                backend,
+                security.clone(),
+                acp_sessions,
+            )));
+        } else {
+            tool_arcs.push(Arc::new(SessionsCurrentTool::new(backend.clone())));
+            tool_arcs.push(Arc::new(SessionsListTool::new(backend.clone())));
+            tool_arcs.push(Arc::new(SessionsHistoryTool::new(
+                backend.clone(),
+                security.clone(),
+            )));
+            tool_arcs.push(Arc::new(SessionsSendTool::new(backend, security.clone())));
+        }
+    }
+
+    // File upload tool — enabled iff [file_upload].url is set
+    if root_config
+        .file_upload
+        .url
+        .as_deref()
+        .is_some_and(|u| !u.trim().is_empty())
+    {
+        tool_arcs.push(Arc::new(FileUploadTool::new(
+            security.clone(),
+            root_config.file_upload.clone(),
+        )));
+    }
+
+    // File upload bundle tool — enabled iff [file_upload_bundle].url is set
+    if root_config
+        .file_upload_bundle
+        .url
+        .as_deref()
+        .is_some_and(|u| !u.trim().is_empty())
+    {
+        tool_arcs.push(Arc::new(FileUploadBundleTool::new(
+            security.clone(),
+            root_config.file_upload_bundle.clone(),
+        )));
+    }
+
+    // File download tool — enabled iff [file_download].url is set
+    if root_config
+        .file_download
+        .url
+        .as_deref()
+        .is_some_and(|u| !u.trim().is_empty())
+    {
+        let policy_resolver: Arc<dyn Fn() -> FileDownloadSsrfPolicy + Send + Sync> =
+            if let Some(live) = live_config.clone() {
+                Arc::new(move || {
+                    let config = live.read();
+                    FileDownloadSsrfPolicy {
+                        allowed_private_hosts: config.file_download.allowed_private_hosts.clone(),
+                        nat64_prefixes: config.security.nat64_prefixes.clone(),
+                    }
+                })
+            } else {
+                let snapshot = FileDownloadSsrfPolicy {
+                    allowed_private_hosts: root_config.file_download.allowed_private_hosts.clone(),
+                    nat64_prefixes: root_config.security.nat64_prefixes.clone(),
+                };
+                Arc::new(move || snapshot.clone())
+            };
+        tool_arcs.push(Arc::new(
+            FileDownloadTool::new_with_persistence_and_resolver(
+                security.clone(),
+                root_config.file_download.clone(),
+                persistent_writes,
+                move || policy_resolver(),
+            ),
+        ));
+    }
+
+    // Poll tool — always registered; owns its own late-bound channel map.
+    let poll_handle: PerToolChannelHandle = Arc::new(RwLock::new(HashMap::new()));
+    tool_arcs.push(Arc::new(PollTool::new(
+        security.clone(),
+        Arc::clone(&poll_handle),
+    )));
+
+    // SOP tools (registered when engine handle is provided)
+    if let Some(ref sop_engine) = sop_engine {
+        tool_arcs.push(Arc::new(SopListTool::new(Arc::clone(sop_engine))));
+        if let Some(ref sop_audit) = sop_audit {
+            tool_arcs.push(Arc::new(
+                SopExecuteTool::new(Arc::clone(sop_engine))
+                    .with_audit(Arc::clone(sop_audit))
+                    .with_initiator(agent_alias),
+            ));
+            tool_arcs.push(Arc::new(
+                SopAdvanceTool::new(Arc::clone(sop_engine)).with_audit(Arc::clone(sop_audit)),
+            ));
+            tool_arcs.push(Arc::new(
+                SopApproveTool::new(Arc::clone(sop_engine))
+                    .with_agent_alias(agent_alias)
+                    .with_audit(Arc::clone(sop_audit)),
+            ));
+        } else {
+            tool_arcs.push(Arc::new(
+                SopExecuteTool::new(Arc::clone(sop_engine)).with_initiator(agent_alias),
+            ));
+            tool_arcs.push(Arc::new(SopAdvanceTool::new(Arc::clone(sop_engine))));
+            tool_arcs.push(Arc::new(
+                SopApproveTool::new(Arc::clone(sop_engine)).with_agent_alias(agent_alias),
+            ));
+        }
+        tool_arcs.push(Arc::new(
+            SopStatusTool::new(Arc::clone(sop_engine))
+                .with_collector(crate::sop::SopMetricsCollector::shared()),
+        ));
+        if root_config.sop.procedural_memory_enabled {
+            tool_arcs.push(Arc::new(SopWorkshopTool::new(
+                Arc::clone(sop_engine),
+                root_config.install_root_dir(),
+            )));
+        }
+    }
+
+    // Emoji reaction tool — always registered; owns its own late-bound channel map.
+    let reaction_handle: PerToolChannelHandle = Arc::new(RwLock::new(HashMap::new()));
+    let reaction_tool = ReactionTool::new(security.clone(), Arc::clone(&reaction_handle));
+    tool_arcs.push(Arc::new(reaction_tool));
+
+    // Channel room-management tool — always registered; owns its own late-bound channel map.
+    let channel_room_tool_handle: PerToolChannelHandle = Arc::new(RwLock::new(HashMap::new()));
+    let channel_room_handle = Some(Arc::clone(&channel_room_tool_handle));
+    let channel_room_tool = ChannelRoomTool::new(security.clone(), channel_room_tool_handle);
+    tool_arcs.push(Arc::new(channel_room_tool));
+
+    // Interactive ask_user tool — always registered; owns its own late-bound channel map.
+    let ask_user_tool_handle: PerToolChannelHandle = Arc::new(RwLock::new(HashMap::new()));
+    let ask_user_handle = Some(Arc::clone(&ask_user_tool_handle));
+    let ask_user_tool = AskUserTool::new(security.clone(), Arc::clone(&ask_user_tool_handle));
+    tool_arcs.push(Arc::new(ask_user_tool));
+
+    {
+        let agent_peer_groups: AgentPeerGroupResolver = if let Some(live) = live_config.clone() {
+            let alias = agent_alias.to_string();
+            Arc::new(move || filter_agent_peer_groups(&live.read(), &alias))
+        } else {
+            let snapshot = filter_agent_peer_groups(root_config, agent_alias);
+            Arc::new(move || snapshot.clone())
+        };
+        tool_arcs.push(Arc::new(SendViaTool::new(
+            security.clone(),
+            ask_user_tool_handle,
+            agent_peer_groups,
+        )));
+    }
+
+    // Human escalation tool — always registered; owns its own late-bound channel map.
+    let escalate_tool_handle: PerToolChannelHandle = Arc::new(RwLock::new(HashMap::new()));
+    let escalate_handle = Some(Arc::clone(&escalate_tool_handle));
+    let escalate_tool = EscalateToHumanTool::new(
+        security.clone(),
+        root_config.escalation.alert_channels.clone(),
+        escalate_tool_handle,
+    );
+    tool_arcs.push(Arc::new(escalate_tool));
+
+    // Knowledge graph tool
+    if root_config.knowledge.enabled {
+        let db_path = root_config.knowledge.resolved_db_path();
+        match kinetic_memory::knowledge_graph::KnowledgeGraph::new(
+            &db_path,
+            root_config.knowledge.max_nodes,
+        ) {
+            Ok(graph) => {
+                tool_arcs.push(Arc::new(KnowledgeTool::new(Arc::new(graph))));
+            }
+            Err(e) => {
+                ::kinetic_log::record!(
+                    ERROR,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "error": format!("{}", e),
+                            "db_path": db_path.display().to_string(),
+                        })),
+                    "knowledge: failed to initialize tool"
+                );
+            }
+        }
+    }
+
+    // Add delegation tool when agents are configured
+    let delegate_global_credential = fallback_api_key.and_then(|value| {
+        let trimmed_value = value.trim();
+        (!trimmed_value.is_empty()).then(|| trimmed_value.to_owned())
+    });
+    let provider_runtime_options =
+        kinetic_providers::provider_runtime_options_for_agent(root_config, agent_alias);
+
+    #[cfg(test)]
+    let mut built_delegate_tool: Option<Arc<DelegateTool>> = None;
+    let delegate_handle: Option<DelegateParentToolsHandle> = if agents.is_empty() {
+        None
+    } else {
+        let delegate_agents: HashMap<String, AliasedAgentConfig> = agents
+            .iter()
+            .map(|(name, cfg)| (name.clone(), cfg.clone()))
+            .collect();
+        let parent_tools = Arc::new(RwLock::new(tool_arcs.clone()));
+        let delegate_tool = DelegateTool::new_with_options(
+            delegate_agents,
+            delegate_global_credential.clone(),
+            security.clone(),
+            provider_runtime_options.clone(),
+        )
+        .with_parent_tools(Arc::clone(&parent_tools))
+        .with_runtime(runtime.clone())
+        .with_multimodal_config(root_config.multimodal.clone())
+        .with_delegate_config(root_config.delegate.clone())
+        .with_workspace_dir(workspace_dir.to_path_buf())
+        .with_memory(memory.clone())
+        .with_providers_models({
+            let mut m: std::collections::HashMap<
+                String,
+                std::collections::HashMap<String, kinetic_config::schema::ModelProviderConfig>,
+            > = std::collections::HashMap::new();
+            for (t, a, base) in root_config.providers.models.iter_entries() {
+                m.entry(t.to_string())
+                    .or_default()
+                    .insert(a.to_string(), base.clone());
+            }
+            m
+        })
+        .with_risk_profiles(root_config.risk_profiles.clone())
+        .with_runtime_profiles(root_config.runtime_profiles.clone())
+        .with_skill_bundles(root_config.skill_bundles.clone())
+        .with_root_config(config.clone())
+        // `with_root_config` above is only a snapshot. Delegated targets get
+        // their own nested registry, whose plugin tools and `send_via`
+        // authority resolve per execution; without the shared handle they would
+        // resolve against that snapshot forever. Same contract as the
+        // `live_config` argument this function received.
+        .with_live_config(live_config.clone())
+        .with_execution_capability(execution_capability.clone())
+        .with_caller_alias(agent_alias);
+        let delegate_tool = Arc::new(delegate_tool);
+        #[cfg(test)]
+        {
+            built_delegate_tool = Some(Arc::clone(&delegate_tool));
+        }
+        tool_arcs.push(delegate_tool as Arc<dyn Tool>);
+        Some(parent_tools)
+    };
+
+    // ── WASM plugin tools (requires plugins-wasm feature) ──
+    #[cfg(feature = "plugins-wasm")]
+    {
+        let plugin_path = config.plugins.resolved_plugins_dir();
+
+        if plugin_path.exists() && config.plugins.enabled {
+            let signature_mode = kinetic_plugins::host::PluginHost::resolve_signature_mode(
+                &config.plugins.security.signature_mode,
+            );
+            let trusted_publisher_keys = config.plugins.security.trusted_publisher_keys.clone();
+            match kinetic_plugins::host::PluginHost::from_plugins_dir_with_security(
+                &plugin_path,
+                signature_mode,
+                trusted_publisher_keys,
+            ) {
+                Ok(host) => {
+                    let host = Arc::new(host);
+                    let host_services = plugin_host_services(
+                        Arc::clone(&host),
+                        Arc::clone(&config),
+                        live_config.clone(),
+                    );
+                    let mut registered_names: std::collections::HashSet<String> = tool_arcs
+                        .iter()
+                        .map(|tool| tool.name().to_string())
+                        .collect();
+                    if root_config.pipeline.enabled {
+                        registered_names.insert(PipelineTool::NAME.to_string());
+                    }
+                    let plugin_limits = crate::plugin_runtime::plugin_limits(&config);
+                    let egress_service =
+                        plugin_egress_service(Arc::clone(&config), live_config.clone());
+                    register_plugin_tools(
+                        &config,
+                        &host,
+                        &host_services,
+                        plugin_limits,
+                        Some(egress_service),
+                        &mut registered_names,
+                        &mut tool_arcs,
+                    );
+                }
+                Err(e) => {
+                    ::kinetic_log::record!(
+                        WARN,
+                        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                            .with_outcome(::kinetic_log::EventOutcome::Unknown)
+                            .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                        "Failed to load WASM plugins"
+                    );
+                }
+            }
+        }
+
+        // Surface plugins stranded in a legacy install dir so they aren't
+        // silently ignored — the user can relocate them with `plugin migrate`.
+        if config.plugins.enabled {
+            for legacy in kinetic_config::schema::legacy_plugin_dirs_with_entries(&config) {
+                ::kinetic_log::record!(
+                    WARN,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                        .with_outcome(::kinetic_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({
+                            "legacy_dir": legacy.display().to_string()
+                        })),
+                    "Plugins in a legacy directory are not loaded; run `kinetic plugin migrate`"
+                );
+            }
+        }
+    }
+
+    // Pipeline construction waits for ScopedToolRegistry::assemble(), where the
+    // effective per-agent policy and optional caller allowlist are both known.
+
+    AllToolsResult {
+        unfiltered_tool_arcs: tool_arcs.clone(),
+        tools: boxed_registry_from_arcs(tool_arcs),
+        delegate_handle,
+        ask_user_handle,
+        channel_room_handle,
+        reaction_handle,
+        poll_handle: Some(poll_handle),
+        escalate_handle,
+        #[cfg(test)]
+        delegate_tool: built_delegate_tool,
+    }
+}
+
+#[cfg(feature = "plugins-wasm")]
+fn claim_plugin_tool_name(
+    registered_names: &mut std::collections::HashSet<String>,
+    plugin_name: &str,
+) -> bool {
+    registered_names.insert(plugin_name.to_string())
+}
+
+/// Construct and register every tool-plugin instance the activation plan
+/// admitted.
+///
+/// The shared `plugins.max_active_instances` ceiling spans channels, tools,
+/// and skills, so this loader may not walk `tool_plugin_details()` directly:
+/// it consults [`PluginActivationPlan`] and constructs only the tool scopes
+/// that plan admitted, in the plan's enumeration order. The plan is a pure
+/// function of the current config and host snapshot and holds no counter, so
+/// rebuilding this registry (per agent, per CLI run, per delegate, per SOP
+/// execution) re-derives the same admitted set rather than spending the same
+/// logical slot again.
+///
+/// Admission composes ahead of, and does not weaken, the collision pre-gate.
+/// For each admitted candidate the order still matters: the signed manifest
+/// name is the only identifier the host knows before the guest runs, so it is
+/// checked against the registered tool names *first*, and a package that could
+/// never be registered is refused without resolving its scoped config,
+/// instantiating its component, or calling its metadata export. The
+/// guest-declared callable name is claimed afterwards, because nothing can
+/// know it earlier.
+#[cfg(feature = "plugins-wasm")]
+fn register_plugin_tools(
+    config: &Config,
+    host: &kinetic_plugins::host::PluginHost,
+    services: &kinetic_plugins::services::PluginHostServices,
+    plugin_limits: kinetic_plugins::component::PluginLimits,
+    egress: Option<kinetic_plugins::egress::EgressHostService>,
+    registered_names: &mut std::collections::HashSet<String>,
+    tool_arcs: &mut Vec<Arc<dyn Tool>>,
+) {
+    let plan = match crate::plugin_runtime::PluginActivationPlan::build(config, host) {
+        Ok(plan) => plan,
+        Err(error) => {
+            ::kinetic_log::record!(
+                WARN,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Load)
+                    .with_outcome(::kinetic_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"error": format!("{error}")})),
+                "Failed to admit logical plugin tool instances"
+            );
+            return;
+        }
+    };
+    let details = host.tool_plugin_details();
+    let discovered_count = details.len();
+    let admitted: Vec<_> = plan
+        .scopes(kinetic_plugins::PluginCapability::Tool)
+        .collect();
+    let admitted_count = admitted.len();
+    let mut registered_count = 0_usize;
+
+    for scope in admitted {
+        let package = scope.id().package().to_string();
+        let Some((manifest, component)) = details
+            .iter()
+            .find(|(manifest, _)| manifest.name == package)
+            .map(|(manifest, component)| (*manifest, *component))
+        else {
+            continue;
+        };
+        // Phase one: guest-free refusal. Deliberately a check and not a claim —
+        // the reservation set holds callable tool names, and a package name is
+        // not one until its guest declares it.
+        if registered_names.contains(&manifest.name) {
+            ::kinetic_log::record!(
+                WARN,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Load)
+                    .with_outcome(::kinetic_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({
+                        "plugin": manifest.name,
+                        "error_key": "plugin_package_name_conflict",
+                    })),
+                "Plugin package name conflicts with an already registered tool; \
+                 refused before loading its component"
+            );
+            continue;
+        }
+
+        let tool = kinetic_plugins::wasm_tool::WasmTool::from_wasm(
+            component.clone(),
+            scope,
+            services.clone(),
+            plugin_limits,
+            egress.clone(),
+        );
+        match tool {
+            Ok(tool) => {
+                if !claim_plugin_tool_name(registered_names, tool.name()) {
+                    ::kinetic_log::record!(
+                        WARN,
+                        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Load)
+                            .with_outcome(::kinetic_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({
+                                "plugin": manifest.name,
+                                "tool": tool.name(),
+                                "error_key": "plugin_tool_name_conflict",
+                            })),
+                        "Plugin tool conflicts with an already registered tool"
+                    );
+                    continue;
+                }
+                tool_arcs.push(Arc::new(tool));
+                registered_count += 1;
+            }
+            Err(e) => {
+                ::kinetic_log::record!(
+                    WARN,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Load)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "plugin": manifest.name,
+                            "error": format!("{e:#}"),
+                        })),
+                    "Failed to register WASM plugin tool"
+                );
+            }
+        }
+    }
+
+    ::kinetic_log::record!(
+        INFO,
+        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note).with_attrs(
+            ::serde_json::json!({
+                "discovered": discovered_count,
+                "admitted": admitted_count,
+                "registered": registered_count,
+            })
+        ),
+        "Registered WASM plugin tools"
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kinetic_config::schema::{
+        ApprovalGroupConfig, ApprovalPolicyConfig, Config, FileDownloadConfig, MemoryConfig,
+        SopApprovalConfig,
+    };
+    use tempfile::TempDir;
+
+    /// The Serply resolver only honours `KINETIC_web_search__serply_api_key`
+    /// if the runtime hands it the loader's override state. Pin the mapping for
+    /// the three states the loader can produce (no override, non-empty
+    /// override, blank override) using the same `set_prop` path the loader
+    /// uses, so a schema-mirror value wins for the process while on-disk
+    /// rotation stays in force when no override is active.
+    #[test]
+    fn serply_api_key_override_mirrors_env_override_state() {
+        let mut cfg = Config::default();
+
+        // No override: the tool keeps resolving the key from config.toml.
+        cfg.web_search.serply_api_key = Some("stored-key".to_string());
+        assert_eq!(serply_api_key_override(&cfg), None);
+
+        // `KINETIC_web_search__serply_api_key=env-key` applied by the loader.
+        cfg.set_prop("web_search.serply_api_key", "env-key")
+            .unwrap();
+        cfg.env_overridden_paths
+            .insert("web_search.serply_api_key".to_string());
+        assert_eq!(
+            serply_api_key_override(&cfg),
+            Some(Some("env-key".to_string()))
+        );
+
+        // A blank override clears the in-memory value but stays overridden, so
+        // the tool must report "not configured" rather than read the disk key.
+        cfg.set_prop("web_search.serply_api_key", "").unwrap();
+        assert_eq!(serply_api_key_override(&cfg), Some(None));
+    }
+
+    fn test_config(tmp: &TempDir) -> Config {
+        Config {
+            data_dir: tmp.path().join("data"),
+            config_path: tmp.path().join("config.toml"),
+            ..Config::default()
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn all_tools_runtime_uses_canonical_configured_shell_from_tui_path() {
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let shell = tmp.path().join("all-tools-configured-shell");
+        std::fs::write(&shell, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut root_config = Config::default();
+        root_config.runtime.shell = Some("all-tools-configured-shell".to_string());
+        let path = std::env::join_paths([
+            OsString::new(),
+            OsString::from("relative-decoy"),
+            shell.parent().unwrap().as_os_str().to_os_string(),
+        ])
+        .unwrap();
+        let tui_env = HashMap::from([("PATH".to_string(), path.to_string_lossy().into_owned())]);
+
+        let runtime = runtime_for_all_tools(&root_config, Some(&tui_env)).unwrap();
+        let command = runtime
+            .build_shell_command("echo all-tools", tmp.path())
+            .unwrap();
+
+        assert_eq!(
+            command.as_std().get_program(),
+            shell.canonicalize().unwrap().as_os_str()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn all_tools_runtime_rejects_empty_or_relative_only_tui_path() {
+        use std::ffi::OsString;
+
+        for path in [OsString::new(), OsString::from("relative-only")] {
+            let mut root_config = Config::default();
+            root_config.runtime.shell = Some("all-tools-missing-shell".to_string());
+            let tui_env =
+                HashMap::from([("PATH".to_string(), path.to_string_lossy().into_owned())]);
+
+            assert!(runtime_for_all_tools(&root_config, Some(&tui_env)).is_err());
+        }
+    }
+
+    #[cfg(feature = "plugins-wasm")]
+    #[test]
+    fn plugin_host_services_isolate_live_instance_keys() {
+        let plugins_dir = TempDir::new().unwrap();
+        let plugin_dir = plugins_dir.path().join("fixture-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("plugin.wasm"), b"\0asm").unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.toml"),
+            r#"name = "fixture-plugin"
+version = "0.1.0"
+wasm_path = "plugin.wasm"
+capabilities = ["tool"]
+permissions = ["config_read"]
+
+[config_schema]
+type = "object"
+required = ["enabled"]
+additionalProperties = false
+
+[config_schema.properties.enabled]
+type = "boolean"
+const = true
+"#,
+        )
+        .unwrap();
+        let host = Arc::new(
+            kinetic_plugins::host::PluginHost::from_plugins_dir(plugins_dir.path()).unwrap(),
+        );
+        let manifest = host.manifest("fixture-plugin").unwrap();
+        let scope = kinetic_plugins::instance::PluginInstanceScope::from_manifest(
+            manifest,
+            kinetic_plugins::PluginCapability::Tool,
+            "work",
+            [kinetic_plugins::PluginPermission::ConfigRead],
+        )
+        .unwrap();
+        let backup_scope = kinetic_plugins::instance::PluginInstanceScope::from_manifest(
+            manifest,
+            kinetic_plugins::PluginCapability::Tool,
+            "backup",
+            [kinetic_plugins::PluginPermission::ConfigRead],
+        )
+        .unwrap();
+        let instance_key = scope.id().config_entry_key().unwrap();
+        let backup_instance_key = backup_scope.id().config_entry_key().unwrap();
+        let entry = |name: &str, enabled: &str| kinetic_config::schema::PluginEntryConfig {
+            name: name.to_string(),
+            config: HashMap::from([("enabled".to_string(), enabled.to_string())]),
+            egress_hosts: Vec::new(),
+            egress_allow_private: Vec::new(),
+            tls_profiles: Vec::new(),
+        };
+        let mut snapshot = Config::default();
+        snapshot.plugins.entries = vec![
+            entry(&instance_key, "false"),
+            entry(&backup_instance_key, "false"),
+        ];
+        let mut current = Config::default();
+        current.plugins.entries = vec![
+            entry("fixture-plugin", "true"),
+            entry("work", "true"),
+            entry("backup", "true"),
+            entry(&instance_key, "true"),
+            entry(&backup_instance_key, "false"),
+        ];
+        let live = Arc::new(parking_lot::RwLock::new(current));
+        let services = plugin_host_services(
+            Arc::clone(&host),
+            Arc::new(snapshot),
+            Some(Arc::clone(&live)),
+        );
+
+        assert!(services.resolve_config(&scope).is_ok());
+        assert!(
+            services.resolve_config(&backup_scope).is_err(),
+            "backup must use its invalid canonical entry, not a valid raw-name decoy"
+        );
+        for (key, enabled) in [(&instance_key, "false"), (&backup_instance_key, "true")] {
+            live.write()
+                .plugins
+                .entries
+                .iter_mut()
+                .find(|entry| entry.name == key.as_str())
+                .unwrap()
+                .config
+                .insert("enabled".to_string(), enabled.to_string());
+        }
+        assert!(
+            services.resolve_config(&scope).is_err(),
+            "work must observe its own canonical key's live update"
+        );
+        assert!(
+            services.resolve_config(&backup_scope).is_ok(),
+            "backup must resolve independently through the shared service"
+        );
+    }
+
+    /// End-to-end over the resolver the registry actually installs: an operator
+    /// grant authored on the instance-key row that `kinetic plugin install`
+    /// seeds must reach the policy, and nothing else may stand in for it.
+    ///
+    /// The existing egress tests build an `EgressPolicy` directly, so they
+    /// cannot see which `[[plugins.entries]]` row the runtime reads. This one
+    /// starts from canonical config and goes through `plugin_egress_service`.
+    #[cfg(feature = "plugins-wasm")]
+    #[test]
+    fn plugin_egress_resolves_the_instance_key_row_config_resolves() {
+        let plugins_dir = TempDir::new().unwrap();
+        let plugin_dir = plugins_dir.path().join("egress-plugin");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("plugin.wasm"), b"\0asm").unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.toml"),
+            r#"name = "egress-plugin"
+version = "0.1.0"
+wasm_path = "plugin.wasm"
+capabilities = ["tool"]
+permissions = ["http_client"]
+"#,
+        )
+        .unwrap();
+        let host = kinetic_plugins::host::PluginHost::from_plugins_dir(plugins_dir.path()).unwrap();
+        let manifest = host.manifest("egress-plugin").unwrap();
+        // The production tool path: binding == package name, which is exactly
+        // what used to be handed to `entry_egress`.
+        let scope = kinetic_plugins::instance::PluginInstanceScope::for_package_binding(
+            manifest,
+            kinetic_plugins::PluginCapability::Tool,
+            manifest.permissions.iter().copied(),
+        )
+        .unwrap();
+        let instance_key = scope.id().config_entry_key().unwrap();
+        assert_ne!(
+            instance_key,
+            scope.id().binding(),
+            "the canonical entry key must not coincide with the binding, or this test proves nothing"
+        );
+
+        let entry = |name: &str| kinetic_config::schema::PluginEntryConfig {
+            name: name.to_string(),
+            config: HashMap::new(),
+            egress_hosts: vec!["api.example.com".to_string()],
+            egress_allow_private: Vec::new(),
+            tls_profiles: Vec::new(),
+        };
+        let request = || {
+            kinetic_plugins::egress::EgressRequest::new(
+                scope.clone(),
+                kinetic_plugins::egress::EgressTransport::Http { encrypted: true },
+                "api.example.com",
+                443,
+            )
+            .unwrap()
+        };
+        let addresses = ["1.1.1.1:443".parse::<std::net::SocketAddr>().unwrap()];
+
+        // Granted on the instance-key row: the operator's grant reaches policy.
+        let mut granted = Config::default();
+        granted.plugins.entries = vec![entry(&instance_key)];
+        let service = plugin_egress_service(Arc::new(granted), None);
+        service
+            .authorize_addresses(request(), addresses)
+            .expect("a grant on the instance-key row must reach the resolved policy");
+
+        // No row at all: deny.
+        let service = plugin_egress_service(Arc::new(Config::default()), None);
+        assert!(
+            matches!(
+                service.authorize_addresses(request(), addresses),
+                Err(kinetic_plugins::egress::EgressError::DestinationNotGranted { .. })
+            ),
+            "an unconfigured instance must have no reach"
+        );
+
+        // A legacy package/binding-named row must not stand in for the
+        // canonical key, or egress and config would read two different rows.
+        let mut legacy = Config::default();
+        legacy.plugins.entries = vec![entry(scope.id().binding())];
+        let service = plugin_egress_service(Arc::new(legacy), None);
+        assert!(
+            matches!(
+                service.authorize_addresses(request(), addresses),
+                Err(kinetic_plugins::egress::EgressError::DestinationNotGranted { .. })
+            ),
+            "a raw package or binding entry must not bypass the canonical key"
+        );
+
+        // The same row carries the instance's TLS profiles into policy, read at
+        // use time like the grant itself.
+        let profile = |hosts: &[&str]| kinetic_config::schema::PluginTlsProfileConfig {
+            name: "corp".to_string(),
+            hosts: hosts.iter().map(|h| (*h).to_string()).collect(),
+            system_roots: true,
+            custom_ca_secret: Some("corp_ca".to_string()),
+            client_certificate_secret: None,
+            client_private_key_secret: None,
+        };
+        let mut with_profile = Config::default();
+        let mut row = entry(&instance_key);
+        row.tls_profiles = vec![profile(&["api.example.com"])];
+        with_profile.plugins.entries = vec![row];
+        let authorized = plugin_egress_service(Arc::new(with_profile), None)
+            .authorize_addresses(request().with_tls_profile("corp").unwrap(), addresses)
+            .expect("a configured profile for a granted host must authorize");
+        assert_eq!(
+            authorized
+                .tls_profile()
+                .and_then(|profile| profile.custom_ca())
+                .map(|secret| secret.as_str()),
+            Some("corp_ca")
+        );
+
+        // The same profile's material is reserved for the host, so the guest's
+        // `secrets` import cannot return it.
+        let mut with_identity = Config::default();
+        let mut row = entry(&instance_key);
+        row.tls_profiles = vec![kinetic_config::schema::PluginTlsProfileConfig {
+            client_certificate_secret: Some("client_cert".to_string()),
+            client_private_key_secret: Some("client_key".to_string()),
+            ..profile(&["api.example.com"])
+        }];
+        with_identity.plugins.entries = vec![row];
+        let reserved = plugin_tls_secret_properties(&with_identity, &instance_key);
+        assert_eq!(
+            reserved.iter().map(|r| r.as_str()).collect::<Vec<_>>(),
+            ["corp_ca", "client_cert", "client_key"]
+        );
+        assert!(plugin_tls_secret_properties(&Config::default(), &instance_key).is_empty());
+
+        // A profile that names an ungranted host fails the whole policy
+        // closed, even if it slipped past load-time validation.
+        let mut widened = Config::default();
+        let mut row = entry(&instance_key);
+        row.tls_profiles = vec![profile(&["other.example.com"])];
+        widened.plugins.entries = vec![row];
+        assert!(matches!(
+            plugin_egress_service(Arc::new(widened), None)
+                .authorize_addresses(request(), addresses),
+            Err(kinetic_plugins::egress::EgressError::TlsProfileHostNotGranted { .. })
+        ));
+    }
+
+    #[test]
+    fn default_tools_has_expected_count() {
+        let security = Arc::new(SecurityPolicy::default());
+        let tools = default_tools(security);
+        assert_eq!(tools.len(), 7);
+    }
+
+    #[cfg(feature = "plugins-wasm")]
+    #[test]
+    fn plugin_tool_names_cannot_shadow_native_reserved_or_prior_plugin_tools() {
+        let mut registered_names =
+            std::collections::HashSet::from(["shell".to_string(), PipelineTool::NAME.to_string()]);
+        let accepted = ["shell", PipelineTool::NAME, "novel-tool", "novel-tool"]
+            .into_iter()
+            .filter(|name| claim_plugin_tool_name(&mut registered_names, name))
+            .collect::<Vec<_>>();
+
+        assert_eq!(accepted, vec!["novel-tool"]);
+        assert_eq!(
+            registered_names,
+            std::collections::HashSet::from([
+                "shell".to_string(),
+                PipelineTool::NAME.to_string(),
+                "novel-tool".to_string(),
+            ])
+        );
+    }
+
+    /// Write a discoverable package whose component bytes are deliberately
+    /// invalid. Package admission never compiles the component, so reaching the
+    /// guest is the only thing this payload would fail at — which makes the
+    /// config-resolution probe below an exact witness for "construction was
+    /// attempted".
+    #[cfg(feature = "plugins-wasm")]
+    fn write_plugin_package(root: &std::path::Path, name: &str, capabilities: &[&str]) {
+        let package_dir = root.join(name);
+        std::fs::create_dir_all(&package_dir).unwrap();
+        let capabilities = capabilities
+            .iter()
+            .map(|capability| format!("\"{capability}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        std::fs::write(
+            package_dir.join("manifest.toml"),
+            format!(
+                "name = \"{name}\"\nversion = \"0.1.0\"\nwasm_path = \"plugin.wasm\"\ncapabilities = [{capabilities}]\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(package_dir.join("plugin.wasm"), b"not a component").unwrap();
+    }
+
+    #[cfg(feature = "plugins-wasm")]
+    fn write_tool_package(root: &std::path::Path, name: &str) {
+        write_plugin_package(root, name, &["tool"]);
+    }
+
+    /// A skill package ships a directory, not a component, so the skill loader
+    /// below returns real `Skill` values rather than a construction witness.
+    #[cfg(feature = "plugins-wasm")]
+    fn write_skill_package(root: &std::path::Path, name: &str) {
+        let skill_dir = root.join(name).join("skills").join("sample");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            root.join(name).join("manifest.toml"),
+            format!("name = \"{name}\"\nversion = \"0.1.0\"\ncapabilities = [\"skill\"]\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: sample\ndescription: sample skill\n---\n# Sample\n",
+        )
+        .unwrap();
+    }
+
+    #[cfg(feature = "plugins-wasm")]
+    fn test_plugin_limits() -> kinetic_plugins::component::PluginLimits {
+        kinetic_plugins::component::PluginLimits {
+            call_fuel: 1_000_000,
+            max_memory_bytes: 16 * 1024 * 1024,
+            max_table_elements: 10_000,
+            max_instances: 8,
+            call_timeout: std::time::Duration::from_secs(30),
+        }
+    }
+
+    /// A resolver that records the package of every scope it is asked about.
+    ///
+    /// `WasmTool::from_wasm` resolves the instance's scoped config as its very
+    /// first act, before instantiating the component, so an entry here is an
+    /// exact witness that the loader entered construction for that package —
+    /// detectable even when the component itself is unloadable.
+    #[cfg(feature = "plugins-wasm")]
+    fn recording_resolver(
+        host: &Arc<kinetic_plugins::host::PluginHost>,
+    ) -> (
+        kinetic_plugins::config::PluginConfigResolver,
+        Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let probed: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let resolver = {
+            let host = Arc::clone(host);
+            let probed = Arc::clone(&probed);
+            kinetic_plugins::config::PluginConfigResolver::new(move |scope| {
+                let package = scope.id().package().to_string();
+                probed.lock().unwrap().push(package.clone());
+                let manifest = host.manifest(&package).ok_or_else(|| {
+                    kinetic_plugins::error::PluginError::NotFound(package.clone())
+                })?;
+                kinetic_plugins::config::resolve_plugin_config(manifest, scope, None)
+            })
+        };
+        (resolver, probed)
+    }
+
+    /// Turn the plugin system on for `plugins_dir` with a ceiling high enough
+    /// that admission is decided by capability rather than by the cap.
+    #[cfg(feature = "plugins-wasm")]
+    fn plugin_activation_config(plugins_dir: &std::path::Path) -> Config {
+        let mut config = Config::default();
+        config.plugins.enabled = true;
+        config.plugins.auto_discover = true;
+        config.plugins.max_active_instances = 50;
+        config.plugins.plugins_dir = plugins_dir.display().to_string();
+        config
+    }
+
+    /// Run the production tool loader once and report the packages whose guest
+    /// construction it entered, in sorted order.
+    #[cfg(feature = "plugins-wasm")]
+    fn tool_packages_reaching_construction(
+        config: &Config,
+        host: &Arc<kinetic_plugins::host::PluginHost>,
+        reserved: &[&str],
+    ) -> Vec<String> {
+        let (resolver, probed) = recording_resolver(host);
+        let state_dir = tempfile::tempdir().expect("plugin state dir");
+        let services = kinetic_plugins::services::PluginHostServices::new(
+            resolver,
+            kinetic_plugins::services::PluginStateService::new(
+                crate::plugin_state::PluginStateStore::new(state_dir.path(), state_dir.path()),
+            ),
+        );
+        let mut registered_names: std::collections::HashSet<String> =
+            reserved.iter().map(|name| (*name).to_string()).collect();
+        let mut tool_arcs: Vec<Arc<dyn Tool>> = Vec::new();
+        register_plugin_tools(
+            config,
+            host,
+            &services,
+            test_plugin_limits(),
+            None,
+            &mut registered_names,
+            &mut tool_arcs,
+        );
+        let mut probed = probed.lock().unwrap().clone();
+        probed.sort();
+        probed
+    }
+
+    /// A plugin whose name already belongs to a native, reserved, or
+    /// earlier-plugin tool can never be registered, so it must be refused by
+    /// the host before any of its guest code is constructed.
+    ///
+    /// Ceiling admission composes ahead of this gate and must not weaken it:
+    /// the ceiling here is wide enough to admit both packages, so the only
+    /// thing that can keep `shell` out of the witness is the collision check
+    /// still running before construction.
+    #[cfg(feature = "plugins-wasm")]
+    #[test]
+    fn colliding_plugin_is_refused_before_its_guest_is_constructed() {
+        let plugins = TempDir::new().unwrap();
+        write_tool_package(plugins.path(), "shell");
+        write_tool_package(plugins.path(), "novel-tool");
+
+        let host =
+            Arc::new(kinetic_plugins::host::PluginHost::from_plugins_dir(plugins.path()).unwrap());
+        let config = plugin_activation_config(plugins.path());
+
+        // `shell` is already taken by a native tool; `novel-tool` is free.
+        let probed = tool_packages_reaching_construction(&config, &host, &["shell"]);
+
+        assert!(
+            !probed.iter().any(|package| package == "shell"),
+            "a plugin named `shell` collides with a registered tool and must be \
+             rejected before construction, but its guest setup was entered: {probed:?}"
+        );
+        assert!(
+            probed.iter().any(|package| package == "novel-tool"),
+            "a non-colliding plugin must still be constructed: {probed:?}"
+        );
+    }
+
+    /// The pre-construction gate must not swallow the packages it is meant to
+    /// let through: with nothing registered, both packages are constructed.
+    #[cfg(feature = "plugins-wasm")]
+    #[test]
+    fn non_colliding_plugins_all_reach_construction() {
+        let plugins = TempDir::new().unwrap();
+        write_tool_package(plugins.path(), "alpha");
+        write_tool_package(plugins.path(), "beta");
+
+        let host =
+            Arc::new(kinetic_plugins::host::PluginHost::from_plugins_dir(plugins.path()).unwrap());
+        let config = plugin_activation_config(plugins.path());
+
+        let probed = tool_packages_reaching_construction(&config, &host, &[]);
+
+        assert_eq!(probed, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    /// A mixed channel/tool/skill candidate set that exceeds the shared
+    /// `plugins.max_active_instances` ceiling, exercised through the two
+    /// production loaders rather than the plan vector.
+    ///
+    /// Candidate order is explicit channels first, then auto-discovered
+    /// package bindings by package name: `alpha` channel `ops`, `alpha` tool,
+    /// `beta` skill, `zeta` tool. A ceiling of two therefore admits the channel
+    /// and the `alpha` tool, and the `beta` skill and `zeta` tool must not
+    /// load — proving one package with a channel and a tool really does spend
+    /// two slots.
+    #[cfg(feature = "plugins-wasm")]
+    fn mixed_capability_fixture(plugins: &TempDir) -> Config {
+        write_plugin_package(plugins.path(), "alpha", &["channel", "tool"]);
+        write_skill_package(plugins.path(), "beta");
+        write_tool_package(plugins.path(), "zeta");
+
+        let mut config = plugin_activation_config(plugins.path());
+        config.channels.plugin = HashMap::from([(
+            "ops".to_string(),
+            kinetic_config::schema::PluginChannelConfig {
+                package: "alpha".to_string(),
+                enabled: true,
+            },
+        )]);
+        config.agents = HashMap::from([(
+            "operator".to_string(),
+            AliasedAgentConfig {
+                channels: vec![kinetic_config::providers::ChannelRef::new("plugin.ops")],
+                ..AliasedAgentConfig::default()
+            },
+        )]);
+        config
+    }
+
+    #[cfg(feature = "plugins-wasm")]
+    fn plugin_skill_names(config: &Config) -> Vec<String> {
+        let (skills, _) = crate::skills::load_plugin_skills_from_config(config);
+        let mut names: Vec<String> = skills.into_iter().map(|skill| skill.name).collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(feature = "plugins-wasm")]
+    #[test]
+    fn shared_ceiling_keeps_an_unadmitted_tool_and_skill_out_of_the_real_loaders() {
+        let plugins = TempDir::new().unwrap();
+        let mut config = mixed_capability_fixture(&plugins);
+        let host =
+            Arc::new(kinetic_plugins::host::PluginHost::from_plugins_dir(plugins.path()).unwrap());
+
+        // Control: a ceiling wide enough for every candidate loads all of them,
+        // so the assertions below cannot pass for want of a working fixture.
+        config.plugins.max_active_instances = 4;
+        assert_eq!(
+            tool_packages_reaching_construction(&config, &host, &[]),
+            vec!["alpha".to_string(), "zeta".to_string()],
+        );
+        assert_eq!(
+            plugin_skill_names(&config),
+            vec!["plugin:beta/sample".to_string()],
+        );
+
+        config.plugins.max_active_instances = 2;
+
+        assert_eq!(
+            tool_packages_reaching_construction(&config, &host, &[]),
+            vec!["alpha".to_string()],
+            "the channel and the `alpha` tool spend both slots, so the `zeta` \
+             tool must not reach the tool loader's construction at all"
+        );
+        assert!(
+            plugin_skill_names(&config).is_empty(),
+            "the `beta` skill is over the shared ceiling and must not load"
+        );
+    }
+
+    /// Tool registries are rebuilt per agent, per CLI run, per delegate, and
+    /// per SOP execution. Admission is a pure function of the config and host
+    /// snapshot, so every rebuild must re-derive the same admitted set instead
+    /// of spending the ceiling cumulatively.
+    #[cfg(feature = "plugins-wasm")]
+    #[test]
+    fn repeated_loader_construction_admits_the_same_set() {
+        let plugins = TempDir::new().unwrap();
+        let mut config = mixed_capability_fixture(&plugins);
+        config.plugins.max_active_instances = 2;
+        let host =
+            Arc::new(kinetic_plugins::host::PluginHost::from_plugins_dir(plugins.path()).unwrap());
+
+        let first_tools = tool_packages_reaching_construction(&config, &host, &[]);
+        let second_tools = tool_packages_reaching_construction(&config, &host, &[]);
+        let third_tools = tool_packages_reaching_construction(&config, &host, &[]);
+
+        assert_eq!(first_tools, vec!["alpha".to_string()]);
+        assert_eq!(
+            first_tools, second_tools,
+            "a second registry build must admit the same tools, not fewer"
+        );
+        assert_eq!(
+            second_tools, third_tools,
+            "a third registry build must admit the same tools, not fewer"
+        );
+
+        config.plugins.max_active_instances = 4;
+        let first_skills = plugin_skill_names(&config);
+        let second_skills = plugin_skill_names(&config);
+
+        assert_eq!(first_skills, vec!["plugin:beta/sample".to_string()]);
+        assert_eq!(
+            first_skills, second_skills,
+            "a second skill load must admit the same skills, not fewer"
+        );
+    }
+
+    /// The documented default-`false` setup: `plugins.enabled = true` with
+    /// `plugins.auto_discover` left at its schema default of `false`, an
+    /// installed tool plugin and an installed skill plugin present, and a
+    /// ceiling wide enough that admission is never the reason anything is held
+    /// back. Auto-discovered tool and skill instances are gated on
+    /// `auto_discover`, so both production loaders must load *nothing*. Flipping
+    /// only `auto_discover` on the identical host and config then loads both,
+    /// which proves the emptiness is the discovery gate rather than a broken
+    /// fixture. The assertions read the real loader output (the construction
+    /// witness and the skill list), not the activation plan vector.
+    #[cfg(feature = "plugins-wasm")]
+    #[test]
+    fn auto_discover_default_false_admits_no_tools_or_skills() {
+        let plugins = TempDir::new().unwrap();
+        write_tool_package(plugins.path(), "zeta");
+        write_skill_package(plugins.path(), "beta");
+
+        let host =
+            Arc::new(kinetic_plugins::host::PluginHost::from_plugins_dir(plugins.path()).unwrap());
+
+        let mut config = Config::default();
+        config.plugins.enabled = true;
+        config.plugins.plugins_dir = plugins.path().display().to_string();
+        config.plugins.max_active_instances = 50;
+        // Left at the schema default; this is exactly the documented setup an
+        // operator reaches with `plugins.enabled = true` and nothing else.
+        assert!(
+            !config.plugins.auto_discover,
+            "the schema default must be false for this regression to exercise the \
+             documented default-false path"
+        );
+
+        assert!(
+            tool_packages_reaching_construction(&config, &host, &[]).is_empty(),
+            "with auto_discover=false the tool loader must not enter construction \
+             for any installed tool package"
+        );
+        assert!(
+            plugin_skill_names(&config).is_empty(),
+            "with auto_discover=false the skill loader must load no plugin skills"
+        );
+
+        // Flip only the discovery gate on the identical host and config.
+        config.plugins.auto_discover = true;
+        assert_eq!(
+            tool_packages_reaching_construction(&config, &host, &[]),
+            vec!["zeta".to_string()],
+            "with auto_discover=true the installed tool package must load, proving \
+             the emptiness above is the discovery gate and not a broken fixture"
+        );
+        assert_eq!(
+            plugin_skill_names(&config),
+            vec!["plugin:beta/sample".to_string()],
+            "with auto_discover=true the installed skill package must load"
+        );
+    }
+
+    #[cfg(feature = "plugins-wasm")]
+    #[test]
+    fn component_with_failed_metadata_probe_is_not_registered() {
+        let tmp = TempDir::new().unwrap();
+        let package_dir = tmp.path().join("plugins").join("metadata-probe");
+        std::fs::create_dir_all(&package_dir).unwrap();
+        std::fs::write(
+            package_dir.join("manifest.toml"),
+            "name = \"metadata-probe\"\nversion = \"0.1.0\"\nwasm_path = \"plugin.wasm\"\ncapabilities = [\"tool\"]\n",
+        )
+        .unwrap();
+        std::fs::write(package_dir.join("plugin.wasm"), b"not a component").unwrap();
+
+        let mut config = test_config(&tmp);
+        config.plugins.enabled = true;
+        config.plugins.plugins_dir = tmp.path().join("plugins").display().to_string();
+        let security = Arc::new(SecurityPolicy::default());
+        let memory: Arc<dyn Memory> = Arc::from(
+            kinetic_memory::create_memory(
+                &MemoryConfig {
+                    backend: "markdown".into(),
+                    ..MemoryConfig::default()
+                },
+                tmp.path(),
+                None,
+            )
+            .unwrap(),
+        );
+
+        let tools = all_tools(
+            Arc::new(config.clone()),
+            &security,
+            &kinetic_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            memory,
+            None,
+            None,
+            &kinetic_config::schema::HttpRequestConfig::default(),
+            &kinetic_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &config,
+            None,
+            false,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools;
+
+        assert!(
+            tools.iter().all(|tool| tool.name() != "metadata-probe"),
+            "a component whose required metadata probe fails must not receive manifest fallback metadata"
+        );
+    }
+
+    /// `web_search_tool` must be registered behind `RateLimitedTool` like
+    /// every other outbound-network tool. It was the lone exception, which let
+    /// an agent loop issue unbounded searches — and unbounded scrapes against
+    /// the default DuckDuckGo path.
+    ///
+    /// The probe uses an exhausted action budget plus the SearXNG provider
+    /// with no instance URL configured, so the two outcomes are distinguishable
+    /// without any network call:
+    ///   * wrapped   → `Ok(success: false)` carrying the rate-limit error,
+    ///                 because the wrapper short-circuits before the inner tool
+    ///   * unwrapped → `Err("SearXNG instance URL not configured…")` from the
+    ///                 inner tool's own config resolution
+    #[tokio::test]
+    async fn web_search_tool_is_registered_behind_the_rate_limiter() {
+        let tmp = TempDir::new().unwrap();
+
+        // A zero-action budget is rate-limited from the very first call.
+        let security = Arc::new(SecurityPolicy {
+            max_actions_per_hour: 0,
+            ..SecurityPolicy::default()
+        });
+
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let http = kinetic_config::schema::HttpRequestConfig::default();
+
+        let mut cfg = test_config(&tmp);
+        cfg.web_search.enabled = true;
+        // Resolves locally and fails without touching the network.
+        cfg.web_search.search_provider = "searxng".to_string();
+        cfg.web_search.searxng_instance_url = None;
+        std::fs::write(&cfg.config_path, "[web_search]\n").unwrap();
+
+        let tools = all_tools(
+            Arc::new(Config::default()),
+            &security,
+            &kinetic_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            mem,
+            &http,
+            &kinetic_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            false,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools;
+
+        let web_search = tools
+            .iter()
+            .find(|t| t.name() == "web_search_tool")
+            .expect("web_search_tool must be registered when enabled");
+
+        let result = web_search
+            .execute(serde_json::json!({"query": "test"}))
+            .await
+            .expect("the rate limiter returns Ok(success: false), not Err");
+
+        assert!(
+            !result.success,
+            "a rate-limited call must not report success"
+        );
+        let error = result.error.unwrap_or_default();
+        assert!(
+            error.contains("Rate limit exceeded"),
+            "web_search_tool is not wrapped in RateLimitedTool; got: {error}"
+        );
+    }
+
+    /// Regression: SOP tools must NOT appear in the tool registry when the
+    /// engine handle is not provided (i.e. no `sops_dir` configured).
+    /// Proves the production gating path at `all_tools_with_runtime`.
+    #[test]
+    fn sop_tools_absent_when_engine_not_provided() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let http = kinetic_config::schema::HttpRequestConfig::default();
+        let cfg = test_config(&tmp);
+
+        let tools = all_tools(
+            Arc::new(Config::default()),
+            &security,
+            &kinetic_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            mem,
+            &http,
+            &kinetic_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            false,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+
+        let sop_tool_names = [
+            "sop_list",
+            "sop_execute",
+            "sop_advance",
+            "sop_approve",
+            "sop_status",
+        ];
+        for name in &sop_tool_names {
+            assert!(
+                !names.contains(name),
+                "SOP tool '{name}' must not be registered when engine is absent"
+            );
+        }
+    }
+
+    #[test]
+    fn send_via_triggers_survive_production_registry_boxing() {
+        // Regression: every arc in the registry is re-boxed as an
+        // `ArcDelegatingTool`, which must forward `invocation_triggers()` —
+        // otherwise the trait default erases send_via's vocabulary and the
+        // pre-turn prefilter can never match it. Build the real registry and
+        // assert the boxed send_via still carries its live triggers.
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+        let http = kinetic_config::schema::HttpRequestConfig::default();
+        let cfg = test_config(&tmp);
+
+        let tools = all_tools_with_runtime(
+            Arc::new(Config::default()),
+            &security,
+            &kinetic_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            Arc::new(NativeRuntime::new()),
+            mem,
+            &http,
+            &kinetic_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools;
+
+        let send_via = tools
+            .iter()
+            .find(|t| t.name() == "send_via")
+            .expect("send_via is always registered");
+        let triggers = send_via.invocation_triggers();
+        assert!(
+            triggers.iter().any(|t| t == "send this to"),
+            "boxed send_via must keep its static triggers; got {triggers:?}"
+        );
+    }
+
+    #[test]
+    fn sop_tools_present_when_engine_provided() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let http = kinetic_config::schema::HttpRequestConfig::default();
+        let cfg = test_config(&tmp);
+
+        // Build a minimal SOP engine — no sops_dir needed for this test.
+        let engine = Arc::new(Mutex::new(SopEngine::new(
+            kinetic_config::schema::SopConfig::default(),
+        )));
+
+        let tools = all_tools_with_runtime(
+            Arc::new(Config::default()),
+            &security,
+            &kinetic_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            Arc::new(NativeRuntime::new()),
+            mem,
+            &http,
+            &kinetic_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            false,
+            None,
+            Some(engine),
+            None,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+
+        let sop_tool_names = [
+            "sop_list",
+            "sop_execute",
+            "sop_advance",
+            "sop_approve",
+            "sop_status",
+        ];
+        for name in &sop_tool_names {
+            assert!(
+                names.contains(name),
+                "SOP tool '{name}' must be registered when engine is provided"
+            );
+        }
+        assert!(
+            !names.contains(&"sop_workshop"),
+            "sop_workshop must stay opt-in while procedural memory is disabled"
+        );
+    }
+
+    #[test]
+    fn sop_workshop_registered_only_when_procedural_memory_enabled() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let http = kinetic_config::schema::HttpRequestConfig::default();
+        let mut cfg = test_config(&tmp);
+        cfg.sop.procedural_memory_enabled = true;
+
+        let engine = Arc::new(Mutex::new(SopEngine::new(
+            kinetic_config::schema::SopConfig::default(),
+        )));
+
+        let tools = all_tools_with_runtime(
+            Arc::new(Config::default()),
+            &security,
+            &kinetic_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            Arc::new(NativeRuntime::new()),
+            mem,
+            &http,
+            &kinetic_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            false,
+            None,
+            Some(engine),
+            None,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+
+        assert!(
+            names.contains(&"sop_workshop"),
+            "sop_workshop must be registered when procedural memory is enabled"
+        );
+    }
+
+    #[test]
+    fn shared_sop_engine_arc_is_observed_by_multiple_registrations() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let cfg = test_config(&tmp);
+        let http = kinetic_config::schema::HttpRequestConfig::default();
+        let web = kinetic_config::schema::WebFetchConfig::default();
+        let risk = kinetic_config::schema::RiskProfileConfig::default();
+
+        let shared_engine = Arc::new(Mutex::new(SopEngine::new(
+            kinetic_config::schema::SopConfig::default(),
+        )));
+        let shared_audit = Arc::new(crate::sop::SopAuditLogger::new(mem.clone()));
+
+        // Two independent registrations using clones of the same Arc — the
+        // pattern the daemon uses when wiring gateway, channels, MQTT, and
+        // RPC sessions from one engine pair.
+        let session_a = all_tools_with_runtime(
+            Arc::new(Config::default()),
+            &security,
+            &risk,
+            "session-a",
+            Arc::new(NativeRuntime::new()),
+            mem.clone(),
+            &http,
+            &web,
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            false,
+            None,
+            Some(shared_engine.clone()),
+            Some(shared_audit.clone()),
+            None,
+        )
+        .expect("first tool registry builds");
+        let session_b = all_tools_with_runtime(
+            Arc::new(Config::default()),
+            &security,
+            &risk,
+            "session-b",
+            Arc::new(NativeRuntime::new()),
+            mem.clone(),
+            &http,
+            &web,
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            false,
+            None,
+            Some(shared_engine.clone()),
+            Some(shared_audit.clone()),
+            None,
+        )
+        .expect("second tool registry builds");
+
+        for tools in [&session_a.tools, &session_b.tools] {
+            assert!(tools.iter().any(|t| t.name() == "sop_status"));
+        }
+
+        // Outer Arc + both registrations = 3+ strong refs. Confirms the
+        // registries kept references to the same instance instead of
+        // copying state.
+        assert!(Arc::strong_count(&shared_engine) >= 3);
+        assert!(Arc::strong_count(&shared_audit) >= 3);
+    }
+
+    #[tokio::test]
+    async fn sop_approve_registry_binds_the_calling_agent_alias() {
+        use crate::sop::types::{
+            Sop, SopAdmissionPolicy, SopEvent, SopExecutionMode, SopPriority, SopRunAction,
+            SopRunStatus, SopStep, SopStepKind, SopTrigger, SopTriggerSource,
+        };
+
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+        let mut groups = HashMap::new();
+        groups.insert(
+            "release".to_string(),
+            ApprovalGroupConfig {
+                members: vec!["agent:KineticVMOperator".to_string()],
+            },
+        );
+        let mut policies = HashMap::new();
+        policies.insert(
+            "prod".to_string(),
+            ApprovalPolicyConfig {
+                required_group: Some("release".to_string()),
+                quorum: 1,
+                request_route: None,
+                escalation_route: None,
+            },
+        );
+        let mut engine = SopEngine::new(kinetic_config::schema::SopConfig {
+            approval: SopApprovalConfig { groups, policies },
+            ..Default::default()
+        })
+        .with_approval_broker(Arc::new(crate::sop::approval::ApprovalBroker::disabled()));
+        engine.set_sops_for_test(vec![Sop {
+            name: "deploy".into(),
+            description: "test".into(),
+            version: "1.0.0".into(),
+            priority: SopPriority::Normal,
+            execution_mode: SopExecutionMode::Supervised,
+            triggers: vec![SopTrigger::Manual],
+            steps: vec![
+                SopStep {
+                    number: 1,
+                    title: "gate".into(),
+                    kind: SopStepKind::Execute,
+                    requires_confirmation: true,
+                    policy: Some("prod".into()),
+                    ..SopStep::default()
+                },
+                SopStep {
+                    number: 2,
+                    title: "execute".into(),
+                    kind: SopStepKind::Execute,
+                    ..SopStep::default()
+                },
+            ],
+            cooldown_secs: 0,
+            max_concurrent: 1,
+            location: None,
+            deterministic: false,
+            admission_policy: SopAdmissionPolicy::Parallel,
+            max_pending_approvals: 0,
+            agent: None,
+            decision: None,
+        }]);
+        let action = engine
+            .start_run(
+                "deploy",
+                SopEvent {
+                    source: SopTriggerSource::Manual,
+                    topic: None,
+                    payload: None,
+                    timestamp: crate::sop::engine::now_iso8601(),
+                },
+            )
+            .unwrap();
+        let run_id = match action {
+            SopRunAction::WaitApproval { run_id, .. } => run_id,
+            other => panic!("expected WaitApproval, got {other:?}"),
+        };
+        let shared_engine = Arc::new(Mutex::new(engine));
+        let cfg = test_config(&tmp);
+        let http = kinetic_config::schema::HttpRequestConfig::default();
+        let web = kinetic_config::schema::WebFetchConfig::default();
+        let risk = kinetic_config::schema::RiskProfileConfig::default();
+
+        let build = |agent_alias: &str, memory: Arc<dyn Memory>| {
+            all_tools_with_runtime(
+                Arc::new(Config::default()),
+                &security,
+                &risk,
+                agent_alias,
+                Arc::new(NativeRuntime::new()),
+                memory,
+                &http,
+                &web,
+                tmp.path(),
+                &HashMap::new(),
+                None,
+                &cfg,
+                false,
+                None,
+                Some(shared_engine.clone()),
+                None,
+                None,
+            )
+            .expect("tool registry builds")
+            .tools
+        };
+        let unauthorized_tools = build("KineticVMAgent", mem.clone());
+        let authorized_tools = build("KineticVMOperator", mem);
+
+        let unauthorized = unauthorized_tools
+            .iter()
+            .find(|tool| tool.name() == "sop_approve")
+            .expect("unauthorized registry has sop_approve");
+        let result = unauthorized
+            .execute(serde_json::json!({ "run_id": run_id.clone() }))
+            .await
+            .unwrap();
+        assert!(!result.success);
+        assert_eq!(
+            shared_engine
+                .lock()
+                .unwrap()
+                .get_run(&run_id)
+                .map(|run| run.status),
+            Some(SopRunStatus::WaitingApproval)
+        );
+
+        let authorized = authorized_tools
+            .iter()
+            .find(|tool| tool.name() == "sop_approve")
+            .expect("authorized registry has sop_approve");
+        let result = authorized
+            .execute(serde_json::json!({ "run_id": run_id }))
+            .await
+            .unwrap();
+        assert!(result.success, "authorized alias must resolve: {result:?}");
+    }
+
+    #[test]
+    fn shared_store_tools_open_data_dir_not_per_agent_workspace() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().join("data"); // shared store (writers' dir)
+        let workspace_dir = tmp.path().join("agent-ws"); // per-agent, intentionally distinct
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::create_dir_all(&workspace_dir).unwrap();
+
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+        let http = kinetic_config::schema::HttpRequestConfig::default();
+        let web = kinetic_config::schema::WebFetchConfig::default();
+        let risk = kinetic_config::schema::RiskProfileConfig::default();
+
+        let mut root_config = test_config(&tmp);
+        root_config.data_dir = data_dir.clone();
+
+        // `config` (arg 1) carries the canonical shared data_dir — exactly how
+        // the production callers pass it (a clone of the runtime config).
+        let config = Config {
+            data_dir: data_dir.clone(),
+            ..Config::default()
+        };
+
+        let tools = all_tools_with_runtime(
+            Arc::new(config),
+            &security,
+            &risk,
+            "test-agent",
+            Arc::new(NativeRuntime::new()),
+            mem,
+            &http,
+            &web,
+            workspace_dir.as_path(), // DIFFERENT from data_dir
+            &HashMap::new(),
+            None,
+            &root_config,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools;
+
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(
+            names.iter().any(|n| n.starts_with("sessions")),
+            "session tools must register"
+        );
+
+        // The session store opens under the shared data_dir, never the
+        // per-agent workspace.
+        assert!(
+            !workspace_dir.join("sessions").exists(),
+            "session tools must not open/create a store under the per-agent workspace_dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_and_data_management_use_shared_data_dir_not_agent_workspace() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().join("shared-data");
+        let workspace_dir = tmp.path().join("agent-workspace");
+        std::fs::create_dir_all(data_dir.join("config")).unwrap();
+        std::fs::create_dir_all(workspace_dir.join("config")).unwrap();
+        std::fs::write(data_dir.join("config/shared.txt"), "shared").unwrap();
+        std::fs::write(workspace_dir.join("config/agent.txt"), "agent").unwrap();
+        let shared_old = data_dir.join("shared-old.txt");
+        let agent_old = workspace_dir.join("agent-old.txt");
+        std::fs::write(&shared_old, "old").unwrap();
+        std::fs::write(&agent_old, "old-agent").unwrap();
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&shared_old)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&agent_old)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+
+        let security = Arc::new(SecurityPolicy {
+            workspace_dir: workspace_dir.clone(),
+            ..SecurityPolicy::default()
+        });
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+        let http = kinetic_config::schema::HttpRequestConfig::default();
+        let web = kinetic_config::schema::WebFetchConfig::default();
+        let risk = kinetic_config::schema::RiskProfileConfig::default();
+        let mut root_config = test_config(&tmp);
+        root_config.data_dir = data_dir.clone();
+        root_config.backup.enabled = true;
+        root_config.backup.include_dirs = vec!["config".into()];
+        root_config.data_retention.enabled = true;
+        root_config.data_retention.retention_days = 1;
+        let config = Config {
+            data_dir: data_dir.clone(),
+            ..Config::default()
+        };
+
+        let tools = all_tools_with_runtime(
+            Arc::new(config),
+            &security,
+            &risk,
+            "test-agent",
+            Arc::new(NativeRuntime::new()),
+            mem,
+            &http,
+            &web,
+            workspace_dir.as_path(),
+            &HashMap::new(),
+            None,
+            &root_config,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools;
+        assert!(!security.allowed_roots.contains(&data_dir));
+
+        let backup = tools
+            .iter()
+            .find(|tool| tool.name() == "backup")
+            .expect("enabled backup tool must register");
+        let created = backup
+            .execute(serde_json::json!({"command": "create"}))
+            .await
+            .unwrap();
+        assert!(created.success, "backup failed: {:?}", created.error);
+        let created: serde_json::Value = serde_json::from_str(&created.output).unwrap();
+        let backup_name = created["backup"].as_str().unwrap();
+        assert!(
+            data_dir
+                .join("backups")
+                .join(backup_name)
+                .join("manifest.json")
+                .exists()
+        );
+        assert!(
+            data_dir
+                .join("backups")
+                .join(backup_name)
+                .join("config/shared.txt")
+                .exists()
+        );
+        assert!(
+            !data_dir
+                .join("backups")
+                .join(backup_name)
+                .join("config/agent.txt")
+                .exists()
+        );
+        assert!(!workspace_dir.join("backups").exists());
+
+        let listed = backup
+            .execute(serde_json::json!({"command": "list"}))
+            .await
+            .unwrap();
+        assert!(listed.success, "list failed: {:?}", listed.error);
+        let listed: serde_json::Value = serde_json::from_str(&listed.output).unwrap();
+        assert!(
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["name"] == backup_name)
+        );
+
+        let verified = backup
+            .execute(serde_json::json!({
+                "command": "verify",
+                "backup_name": backup_name
+            }))
+            .await
+            .unwrap();
+        assert!(verified.success, "verify failed: {:?}", verified.error);
+
+        std::fs::write(data_dir.join("config/shared.txt"), "changed").unwrap();
+        let restored = backup
+            .execute(serde_json::json!({
+                "command": "restore",
+                "backup_name": backup_name,
+                "confirm": true
+            }))
+            .await
+            .unwrap();
+        assert!(restored.success, "restore failed: {:?}", restored.error);
+        assert_eq!(
+            std::fs::read_to_string(data_dir.join("config/shared.txt")).unwrap(),
+            "shared"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace_dir.join("config/agent.txt")).unwrap(),
+            "agent"
+        );
+
+        let data_management = tools
+            .iter()
+            .find(|tool| tool.name() == "data_management")
+            .expect("enabled data-management tool must register");
+        let status = data_management
+            .execute(serde_json::json!({"command": "retention_status"}))
+            .await
+            .unwrap();
+        assert!(status.success, "status failed: {:?}", status.error);
+        let status: serde_json::Value = serde_json::from_str(&status.output).unwrap();
+        assert_eq!(status["affected_files"], 1);
+
+        let preview = data_management
+            .execute(serde_json::json!({"command": "purge", "dry_run": true}))
+            .await
+            .unwrap();
+        assert!(preview.success, "preview failed: {:?}", preview.error);
+        let preview: serde_json::Value = serde_json::from_str(&preview.output).unwrap();
+        assert_eq!(preview["files"], 1);
+        assert_eq!(preview["bytes_freed"], 3);
+
+        let stats = data_management
+            .execute(serde_json::json!({"command": "stats"}))
+            .await
+            .unwrap();
+        assert!(stats.success, "stats failed: {:?}", stats.error);
+        let stats: serde_json::Value = serde_json::from_str(&stats.output).unwrap();
+        assert!(stats["subdirectories"].get("backups").is_some());
+        assert!(!workspace_dir.join("backups").exists());
+    }
+
+    #[tokio::test]
+    async fn sop_audit_memory_uses_agent_alias_not_default() {
+        let tmp = TempDir::new().unwrap();
+        let sops_dir = tmp.path().join("sops");
+        std::fs::create_dir_all(&sops_dir).unwrap();
+
+        let mut agents = HashMap::new();
+        agents.insert(
+            "ops".to_string(),
+            AliasedAgentConfig {
+                ..Default::default()
+            },
+        );
+
+        let config = Config {
+            data_dir: tmp.path().join("data"),
+            config_path: tmp.path().join("config.toml"),
+            sop: kinetic_config::schema::SopConfig {
+                sops_dir: Some(sops_dir.to_string_lossy().into_owned()),
+                ..kinetic_config::schema::SopConfig::default()
+            },
+            agents: agents.clone(),
+            ..Config::default()
+        };
+
+        // Using the session alias ("ops") must succeed even with no "default" agent.
+        let mem = kinetic_memory::create_memory_for_agent(&config, "ops", None).await;
+        assert!(
+            mem.is_ok(),
+            "create_memory_for_agent with session alias should succeed"
+        );
+
+        // The old hardcoded "default" must fail — proving the fix is load-bearing.
+        let mem_default = kinetic_memory::create_memory_for_agent(&config, "default", None).await;
+        assert!(
+            mem_default.is_err(),
+            "create_memory_for_agent(\"default\") must fail when agents.default is absent"
+        );
+    }
+
+    /// A runtime that reports an ephemeral workspace (no host persistence) while
+    /// delegating real shell execution to `NativeRuntime`. Used to exercise the
+    /// registration wiring of `has_filesystem_access()` -> `persistent_writes`.
+    struct EphemeralRuntime(NativeRuntime);
+
+    impl RuntimeAdapter for EphemeralRuntime {
+        fn name(&self) -> &str {
+            "ephemeral-test"
+        }
+        fn has_filesystem_access(&self) -> bool {
+            false
+        }
+        fn storage_path(&self) -> std::path::PathBuf {
+            std::env::temp_dir()
+        }
+        fn supports_long_running(&self) -> bool {
+            false
+        }
+        fn shell_dialect(&self) -> crate::platform::ShellDialect {
+            self.0.shell_dialect()
+        }
+        fn build_shell_command(
+            &self,
+            command: &str,
+            workspace_dir: &std::path::Path,
+        ) -> anyhow::Result<tokio::process::Command> {
+            self.0.build_shell_command(command, workspace_dir)
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_tools_warn_or_block_on_ephemeral_runtime() {
+        let tmp = TempDir::new().unwrap();
+        tokio::fs::write(tmp.path().join("notes.txt"), "data")
+            .await
+            .unwrap();
+        let security = Arc::new(SecurityPolicy {
+            autonomy: crate::security::AutonomyLevel::Supervised,
+            max_actions_per_hour: 100,
+            workspace_dir: tmp.path().to_path_buf(),
+            ..SecurityPolicy::default()
+        });
+        let runtime: Arc<dyn RuntimeAdapter> = Arc::new(EphemeralRuntime(NativeRuntime::new()));
+        let tools = default_tools_with_runtime(security, runtime);
+        let by_name = |n: &str| tools.iter().find(|t| t.name() == n).unwrap();
+
+        // shell: warns on the executed command.
+        let r = by_name("shell")
+            .execute(serde_json::json!({"command": "echo hi"}))
+            .await
+            .unwrap();
+        assert!(
+            r.output.contains("EPHEMERAL WORKSPACE"),
+            "shell must warn, got: {}",
+            r.output
+        );
+
+        // file_read: warns on a successful text read.
+        let r = by_name("file_read")
+            .execute(serde_json::json!({"path": "notes.txt"}))
+            .await
+            .unwrap();
+        assert!(
+            r.success && r.output.contains("EPHEMERAL WORKSPACE"),
+            "file_read must warn, got: {r:?}"
+        );
+
+        // file_edit: warns on a successful edit.
+        let r = by_name("file_edit")
+            .execute(
+                serde_json::json!({"path": "notes.txt", "old_string": "data", "new_string": "x"}),
+            )
+            .await
+            .unwrap();
+        assert!(
+            r.success && r.output.contains("EPHEMERAL WORKSPACE"),
+            "file_edit must warn, got: {r:?}"
+        );
+
+        // file_write: refuses outright (does not warn-and-write).
+        let r = by_name("file_write")
+            .execute(serde_json::json!({"path": "new.txt", "content": "x"}))
+            .await
+            .unwrap();
+        assert!(
+            !r.success,
+            "file_write must refuse on ephemeral, got: {r:?}"
+        );
+        assert!(
+            r.error
+                .as_deref()
+                .unwrap_or("")
+                .contains("ephemeral workspace"),
+            "file_write error must name the cause, got: {:?}",
+            r.error
+        );
+        assert!(
+            !tmp.path().join("new.txt").exists(),
+            "file_write must not write anything on ephemeral"
+        );
+    }
+
+    #[test]
+    fn all_tools_registers_knowledge_when_db_path_contains_non_prefix_tilde() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+        let http = kinetic_config::schema::HttpRequestConfig::default();
+
+        // A `~` that is not a home shortcut, as in a Windows 8.3 short name.
+        let mut cfg = test_config(&tmp);
+        cfg.knowledge.enabled = true;
+        cfg.knowledge.db_path = tmp
+            .path()
+            .join("zc~1probe")
+            .join("knowledge.db")
+            .to_string_lossy()
+            .to_string();
+
+        let tools = all_tools(
+            Arc::new(Config::default()),
+            &security,
+            &kinetic_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            mem,
+            &http,
+            &kinetic_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            false,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"knowledge"));
+        // `KnowledgeGraph::new` runs `create_dir_all` on the parent of the path it
+        // was handed, so this directory exists only if the `~` survived resolution.
+        assert!(tmp.path().join("zc~1probe").is_dir());
+    }
+
+    #[tokio::test]
+    async fn registered_sop_tools_persist_audit_trail() {
+        let tmp = TempDir::new().unwrap();
+        let sops_dir = tmp.path().join("sops");
+        let sop_subdir = sops_dir.join("canary");
+        std::fs::create_dir_all(&sop_subdir).unwrap();
+        std::fs::write(
+            sop_subdir.join("SOP.toml"),
+            "[sop]\nname = \"canary\"\ndescription = \"audit wiring guard\"\nversion = \"1.0.0\"\n\n[[triggers]]\ntype = \"manual\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sop_subdir.join("SOP.md"),
+            "## Steps\n\n1. **Resolve** Do the first step\n   - tools: shell\n",
+        )
+        .unwrap();
+
+        let mem_cfg = MemoryConfig {
+            backend: "sqlite".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let security = Arc::new(SecurityPolicy::default());
+        let mut cfg = test_config(&tmp);
+        cfg.sop.sops_dir = Some(sops_dir.to_string_lossy().into_owned());
+
+        let tools = {
+            let mut engine = crate::sop::SopEngine::new(cfg.sop.clone());
+            engine.reload(tmp.path());
+            let sop_engine = Arc::new(std::sync::Mutex::new(engine));
+            let sop_audit = Arc::new(crate::sop::SopAuditLogger::new(mem.clone()));
+            all_tools_with_runtime(
+                Arc::new(Config::default()),
+                &security,
+                &kinetic_config::schema::RiskProfileConfig::default(),
+                "test-agent",
+                Arc::new(NativeRuntime::new()),
+                mem.clone(),
+                &kinetic_config::schema::HttpRequestConfig::default(),
+                &kinetic_config::schema::WebFetchConfig::default(),
+                tmp.path(),
+                &HashMap::new(),
+                None,
+                &cfg,
+                false,
+                None,
+                Some(sop_engine),
+                Some(sop_audit),
+                None,
+            )
+            .expect("tool registry builds")
+            .tools
+        };
+
+        let execute = tools
+            .iter()
+            .find(|t| t.name() == "sop_execute")
+            .expect("sop_execute must be registered when sops_dir is set");
+        let result = execute
+            .execute(serde_json::json!({"name": "canary"}))
+            .await
+            .unwrap();
+        assert!(result.success, "sop_execute failed: {result:?}");
+
+        let audit = crate::sop::SopAuditLogger::new(mem.clone());
+        let run_keys = audit.list_runs().await.unwrap();
+        assert!(
+            !run_keys.is_empty(),
+            "registered sop_execute must persist a sop_run_* audit entry; got none (audit not wired)"
+        );
+    }
+
+    #[test]
+    fn default_tools_names() {
+        let security = Arc::new(SecurityPolicy::default());
+        let tools = default_tools(security);
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"shell"));
+        assert!(names.contains(&"file_read"));
+        assert!(names.contains(&"deliver_file"));
+        assert!(names.contains(&"file_write"));
+        assert!(names.contains(&"file_edit"));
+        assert!(names.contains(&"glob_search"));
+        assert!(names.contains(&"content_search"));
+    }
+
+    #[test]
+    fn default_tools_all_have_descriptions() {
+        let security = Arc::new(SecurityPolicy::default());
+        let tools = default_tools(security);
+        for tool in &tools {
+            assert!(
+                !tool.description().is_empty(),
+                "Tool {} has empty description",
+                tool.name()
+            );
+        }
+    }
+
+    #[test]
+    fn default_tools_all_have_schemas() {
+        let security = Arc::new(SecurityPolicy::default());
+        let tools = default_tools(security);
+        for tool in &tools {
+            let schema = tool.parameters_schema();
+            assert!(
+                schema.is_object(),
+                "Tool {} schema is not an object",
+                tool.name()
+            );
+            assert!(
+                schema["properties"].is_object(),
+                "Tool {} schema has no properties",
+                tool.name()
+            );
+        }
+    }
+
+    #[test]
+    fn tool_spec_generation() {
+        let security = Arc::new(SecurityPolicy::default());
+        let tools = default_tools(security);
+        for tool in &tools {
+            let spec = tool.spec();
+            assert_eq!(spec.name, tool.name());
+            assert_eq!(spec.description, tool.description());
+            assert!(spec.parameters.is_object());
+        }
+    }
+
+    #[test]
+    fn tool_result_serde() {
+        let result = ToolResult {
+            success: true,
+            output: "hello".into(),
+            error: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: ToolResult = serde_json::from_str(&json).unwrap();
+        assert!(parsed.success);
+        assert_eq!(parsed.output, "hello");
+        assert!(parsed.error.is_none());
+    }
+
+    #[test]
+    fn tool_result_with_error_serde() {
+        let result = ToolResult {
+            success: false,
+            output: ToolOutput::default(),
+            error: Some("boom".into()),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: ToolResult = serde_json::from_str(&json).unwrap();
+        assert!(!parsed.success);
+        assert_eq!(parsed.error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn tool_spec_serde() {
+        let spec = ToolSpec::new("test", "A test tool", serde_json::json!({"type": "object"}));
+        let json = serde_json::to_string(&spec).unwrap();
+        let parsed: ToolSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "test");
+        assert_eq!(parsed.description, "A test tool");
+    }
+
+    #[test]
+    fn all_tools_includes_delegate_when_agents_configured() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let http = kinetic_config::schema::HttpRequestConfig::default();
+        let cfg = test_config(&tmp);
+
+        let mut agents = HashMap::new();
+        agents.insert(
+            "researcher".to_string(),
+            AliasedAgentConfig {
+                model_provider: "ollama.researcher".into(),
+                ..Default::default()
+            },
+        );
+
+        let tools = all_tools(
+            Arc::new(Config::default()),
+            &security,
+            &kinetic_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            mem,
+            &http,
+            &kinetic_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &agents,
+            Some("delegate-test-credential"),
+            &cfg,
+            false,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"delegate"));
+    }
+
+    #[test]
+    fn all_tools_excludes_delegate_when_no_agents() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let http = kinetic_config::schema::HttpRequestConfig::default();
+        let cfg = test_config(&tmp);
+
+        let tools = all_tools(
+            Arc::new(Config::default()),
+            &security,
+            &kinetic_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            mem,
+            &http,
+            &kinetic_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            false,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(!names.contains(&"delegate"));
+    }
+
+    #[test]
+    fn all_tools_includes_read_skill_in_compact_mode() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let http = kinetic_config::schema::HttpRequestConfig::default();
+        let mut cfg = test_config(&tmp);
+        cfg.skills.prompt_injection_mode =
+            kinetic_config::schema::SkillsPromptInjectionMode::Compact;
+
+        let tools = all_tools(
+            Arc::new(cfg.clone()),
+            &security,
+            &kinetic_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            mem,
+            &http,
+            &kinetic_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            false,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"read_skill"));
+    }
+
+    #[test]
+    fn all_tools_excludes_read_skill_for_explicit_global_full() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let http = kinetic_config::schema::HttpRequestConfig::default();
+        let mut cfg = test_config(&tmp);
+        cfg.skills.prompt_injection_mode = kinetic_config::schema::SkillsPromptInjectionMode::Full;
+
+        let tools = all_tools(
+            Arc::new(cfg.clone()),
+            &security,
+            &kinetic_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            mem,
+            &http,
+            &kinetic_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            false,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(!names.contains(&"read_skill"));
+    }
+
+    fn registry_names(tmp: &TempDir, is_subagent_caller: bool) -> Vec<String> {
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+        let cfg = test_config(tmp);
+
+        all_tools(
+            Arc::new(cfg.clone()),
+            &security,
+            &kinetic_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            mem,
+            &kinetic_config::schema::HttpRequestConfig::default(),
+            &kinetic_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            is_subagent_caller,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect()
+    }
+
+    #[test]
+    fn model_switch_present_for_top_level_absent_for_subagent() {
+        let tmp = TempDir::new().unwrap();
+        let top = registry_names(&tmp, false);
+        assert!(
+            top.iter().any(|n| n == ModelSwitchTool::NAME),
+            "top-level agent must keep model_switch"
+        );
+        let subagent = registry_names(&tmp, true);
+        assert!(
+            !subagent.iter().any(|n| n == ModelSwitchTool::NAME),
+            "subagent must not be able to switch the inherited model"
+        );
+    }
+
+    #[test]
+    fn a2a_tools_registered_only_when_client_enabled() {
+        // The four a2a_* tools must register ONLY when `[a2a.client] enabled`
+        // is true (default-closed), and be absent otherwise.
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let build = |enabled: bool| {
+            let mut cfg = test_config(&tmp);
+            cfg.a2a.client.enabled = enabled;
+            all_tools(
+                Arc::new(cfg.clone()),
+                &security,
+                &kinetic_config::schema::RiskProfileConfig::default(),
+                "test-agent",
+                Arc::clone(&mem),
+                &kinetic_config::schema::HttpRequestConfig::default(),
+                &kinetic_config::schema::WebFetchConfig::default(),
+                tmp.path(),
+                &HashMap::new(),
+                None,
+                &cfg,
+                false,
+                None,
+            )
+            .expect("tool registry builds")
+            .tools
+            .iter()
+            .map(|t| t.name().to_string())
+            .collect::<Vec<_>>()
+        };
+
+        let a2a_names = ["a2a_discover", "a2a_send", "a2a_get_task", "a2a_cancel"];
+        let on = build(true);
+        for n in a2a_names {
+            assert!(
+                on.iter().any(|x| x == n),
+                "a2a tool {n} must register when enabled"
+            );
+        }
+        let off = build(false);
+        for n in a2a_names {
+            assert!(
+                !off.iter().any(|x| x == n),
+                "a2a tool {n} must NOT register when [a2a.client] disabled"
+            );
+        }
+    }
+
+    #[test]
+    fn all_tools_registers_read_skill_for_compact_agent_override_over_global_full() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let http = kinetic_config::schema::HttpRequestConfig::default();
+        let mut cfg = test_config(&tmp);
+        // Global stays Full; a runtime profile flips this agent to Compact and
+        // the agent selects it via `runtime_profile`.
+        cfg.skills.prompt_injection_mode = kinetic_config::schema::SkillsPromptInjectionMode::Full;
+        cfg.runtime_profiles.insert(
+            "compact_profile".to_string(),
+            kinetic_config::schema::RuntimeProfileConfig {
+                prompt_injection_mode: Some(
+                    kinetic_config::schema::SkillsPromptInjectionMode::Compact,
+                ),
+                ..Default::default()
+            },
+        );
+        cfg.agents.insert(
+            "test-agent".to_string(),
+            kinetic_config::schema::AliasedAgentConfig {
+                runtime_profile: "compact_profile".into(),
+                ..Default::default()
+            },
+        );
+
+        let tools = all_tools(
+            Arc::new(cfg.clone()),
+            &security,
+            &kinetic_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            mem,
+            &http,
+            &kinetic_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            false,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(
+            names.contains(&"read_skill"),
+            "compact runtime-profile override should register read_skill even when global is full"
+        );
+    }
+
+    #[test]
+    fn all_tools_omits_read_skill_for_full_agent_override_over_global_compact() {
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let http = kinetic_config::schema::HttpRequestConfig::default();
+        let mut cfg = test_config(&tmp);
+        // Global is Compact; a runtime profile pins this agent to Full and the
+        // agent selects it via `runtime_profile`. The Full pin inlines skills
+        // eagerly, so read_skill must be omitted.
+        cfg.skills.prompt_injection_mode =
+            kinetic_config::schema::SkillsPromptInjectionMode::Compact;
+        cfg.runtime_profiles.insert(
+            "full_profile".to_string(),
+            kinetic_config::schema::RuntimeProfileConfig {
+                prompt_injection_mode: Some(
+                    kinetic_config::schema::SkillsPromptInjectionMode::Full,
+                ),
+                ..Default::default()
+            },
+        );
+        cfg.agents.insert(
+            "test-agent".to_string(),
+            kinetic_config::schema::AliasedAgentConfig {
+                runtime_profile: "full_profile".into(),
+                ..Default::default()
+            },
+        );
+
+        let tools = all_tools(
+            Arc::new(cfg.clone()),
+            &security,
+            &kinetic_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            mem,
+            &http,
+            &kinetic_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &cfg,
+            false,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools;
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(
+            !names.contains(&"read_skill"),
+            "full runtime-profile override should omit read_skill even when global is compact"
+        );
+    }
+
+    // ── Regression: alias-specific provider config ───────────────────
+
+    /// Regression test: llm_task must preserve alias-specific
+    /// provider configuration so that families with typed alias fields
+    /// (e.g. OpenAI with `requires_openai_auth`) are constructed via the
+    /// alias-aware factory, not the legacy name-only factory.
+    ///
+    /// This test goes through the real `all_tools_with_runtime` registration
+    /// path — the same code that runs in production — then calls `execute()`
+    /// on the resulting `llm_task` tool and checks the error message.
+    ///
+    /// - On old master: `LlmTaskTool` stores only the family name ("openai"),
+    ///   `execute()` uses `create_model_provider_with_options("openai", …)`
+    ///   which passes `config=None, alias="default"` → falls back to
+    ///   `openai_missing_entry_fallback_config()` (requires_openai_auth=false)
+    ///   → creates standard `OpenAiModelProvider` → fails with a generic
+    ///   HTTP/auth error that does NOT mention "openai-codex".
+    ///
+    /// - On fixed branch: `LlmTaskTool` stores config + family + alias,
+    ///   `execute()` uses `create_model_provider_for_alias(&config, "openai",
+    ///   "codex", …)` → finds the typed alias with requires_openai_auth=true
+    ///   → creates `OpenAiCodexModelProvider` → fails at OAuth credential
+    ///   resolution with an error mentioning "openai-codex".
+    #[tokio::test]
+    async fn llm_task_uses_alias_aware_provider_for_alias_config() {
+        use kinetic_config::schema::{
+            AliasedAgentConfig, Config, HttpRequestConfig, MemoryConfig, ModelProviderConfig,
+            OpenAIModelProviderConfig, RiskProfileConfig, WebFetchConfig,
+        };
+
+        let tmp = TempDir::new().unwrap();
+
+        // Config: agent "test-agent" with model_provider = "openai.codex",
+        // where codex has requires_openai_auth = true.
+        let mut config = Config {
+            data_dir: tmp.path().join("data"),
+            config_path: tmp.path().join("config.toml"),
+            ..Config::default()
+        };
+        config.agents.insert(
+            "test-agent".to_string(),
+            AliasedAgentConfig {
+                model_provider: "openai.codex".into(),
+                ..AliasedAgentConfig::default()
+            },
+        );
+        config.providers.models.openai.insert(
+            "codex".to_string(),
+            OpenAIModelProviderConfig {
+                base: ModelProviderConfig {
+                    requires_openai_auth: true,
+                    ..ModelProviderConfig::default()
+                },
+            },
+        );
+
+        let security = Arc::new(SecurityPolicy::default());
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let tools = all_tools_with_runtime(
+            Arc::new(config.clone()),
+            &security,
+            &RiskProfileConfig::default(),
+            "test-agent",
+            Arc::new(NativeRuntime::new()),
+            mem,
+            &HttpRequestConfig::default(),
+            &WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &config,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("tool registry builds")
+        .tools;
+
+        let llm_task = tools
+            .iter()
+            .find(|t| t.name() == "llm_task")
+            .expect("llm_task must be registered for agent with model_provider");
+
+        let result = llm_task
+            .execute(serde_json::json!({"prompt": "test"}))
+            .await
+            .unwrap();
+        assert!(!result.success, "execute must fail without credentials");
+        let error = result.error.expect("error must be present");
+
+        // The alias-aware factory routes openai.codex (requires_openai_auth=true)
+        // to OpenAiCodexModelProvider, whose credential resolution fails with
+        // an error mentioning "openai-codex".  The legacy factory would create
+        // a standard OpenAI provider whose error does NOT mention "openai-codex".
+        assert!(
+            error.contains("openai-codex"),
+            "llm_task should construct the Codex provider for \
+             openai.codex (requires_openai_auth=true), producing an \
+             openai-codex credential error; got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_download_factory_seam_reflects_live_config_revocation() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method, matchers::path};
+
+        let tmp = TempDir::new().unwrap();
+        let security = Arc::new(SecurityPolicy {
+            workspace_dir: tmp.path().to_path_buf(),
+            max_actions_per_hour: 100,
+            ..SecurityPolicy::default()
+        });
+        let mem_cfg = MemoryConfig {
+            backend: "markdown".into(),
+            ..MemoryConfig::default()
+        };
+        let mem: Arc<dyn Memory> =
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/download"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok".to_vec()))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut root_config = test_config(&tmp);
+        root_config.file_download = FileDownloadConfig {
+            url: Some(format!("{}/download", server.uri())),
+            allowed_private_hosts: vec!["127.0.0.1".into()],
+            ..FileDownloadConfig::default()
+        };
+        let live_config = Arc::new(parking_lot::RwLock::new(root_config.clone()));
+
+        let tools = all_tools_with_runtime(
+            Arc::new(root_config.clone()),
+            &security,
+            &kinetic_config::schema::RiskProfileConfig::default(),
+            "test-agent",
+            Arc::new(NativeRuntime::new()),
+            mem,
+            &kinetic_config::schema::HttpRequestConfig::default(),
+            &kinetic_config::schema::WebFetchConfig::default(),
+            tmp.path(),
+            &HashMap::new(),
+            None,
+            &root_config,
+            false,
+            None,
+            None,
+            None,
+            Some(live_config.clone()),
+        )
+        .expect("tool registry should build")
+        .tools;
+        let file_download = tools
+            .iter()
+            .find(|tool| tool.name() == "file_download")
+            .expect("file_download must be registered when file_download.url is set");
+        let args = serde_json::json!({ "document_id": "doc-1", "dest_path": "out.bin" });
+
+        let first = file_download.execute(args.clone()).await.unwrap();
+        assert!(first.success, "allowlisted local endpoint should pass");
+
+        live_config
+            .write()
+            .file_download
+            .allowed_private_hosts
+            .clear();
+
+        let second = file_download.execute(args).await.unwrap();
+        assert!(
+            !second.success,
+            "same tool instance must observe live allowlist revocation"
+        );
+        assert!(
+            second
+                .error
+                .unwrap_or_default()
+                .contains("file_download.allowed_private_hosts")
+        );
+    }
+}
+
+#[cfg(test)]
+mod todo_registration_tests {
+    #[test]
+    fn todo_write_tool_name_is_stable() {
+        use kinetic_api::tool::Tool;
+        assert_eq!(super::todo_write::TodoWriteTool::new().name(), "TodoWrite");
+    }
+}
+
+#[cfg(test)]
+mod wrapper_spec_forwarding_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use kinetic_api::tool::ToolSpec;
+
+    /// Stand-in for `McpToolWrapper`: stores its schema once and overrides
+    /// `spec()` to hand out `Arc::clone`, so tests can assert wrappers
+    /// preserve `Arc` identity instead of falling back to the trait
+    /// default (which would deep-clone via `parameters_schema()`).
+    struct ArcSchemaTool {
+        schema: Arc<serde_json::Value>,
+    }
+
+    impl ArcSchemaTool {
+        fn new() -> Self {
+            Self {
+                schema: Arc::new(serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } }
+                })),
+            }
+        }
+    }
+
+    impl ::kinetic_api::attribution::Attributable for ArcSchemaTool {
+        fn role(&self) -> ::kinetic_api::attribution::Role {
+            ::kinetic_api::attribution::Role::Tool(::kinetic_api::attribution::ToolKind::Plugin)
+        }
+        fn alias(&self) -> &str {
+            "arc-schema-tool"
+        }
+    }
+
+    #[async_trait]
+    impl Tool for ArcSchemaTool {
+        fn name(&self) -> &str {
+            "arc_schema_tool"
+        }
+
+        fn description(&self) -> &str {
+            "test tool with Arc-shared schema"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            (*self.schema).clone()
+        }
+
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.name().to_string(),
+                description: self.description().to_string(),
+                parameters: Arc::clone(&self.schema),
+                output: None,
+                param_domains: std::collections::BTreeMap::new(),
+            }
+        }
+
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
+            Ok(ToolResult {
+                success: true,
+                output: "ok".into(),
+                error: None,
+            })
+        }
+    }
+
+    #[test]
+    fn arc_tool_ref_forwards_spec_arc_identity() {
+        let inner: Arc<dyn Tool> = Arc::new(ArcSchemaTool::new());
+        let inner_params = inner.spec().parameters;
+        let wrapped = ArcToolRef(Arc::clone(&inner));
+
+        assert!(
+            Arc::ptr_eq(&wrapped.spec().parameters, &inner_params),
+            "ArcToolRef must forward spec() so the inner Arc-shared schema \
+             survives; the trait default deep-clones it every call"
+        );
+        assert!(
+            Arc::ptr_eq(&wrapped.spec().parameters, &wrapped.spec().parameters),
+            "repeated spec() calls must hand out the same allocation"
+        );
+    }
+
+    #[test]
+    fn arc_delegating_tool_forwards_spec_arc_identity() {
+        let inner: Arc<dyn Tool> = Arc::new(ArcSchemaTool::new());
+        let inner_params = inner.spec().parameters;
+        let boxed = ArcDelegatingTool::boxed(inner);
+
+        assert!(
+            Arc::ptr_eq(&boxed.spec().parameters, &inner_params),
+            "ArcDelegatingTool must forward spec() so the inner Arc-shared \
+             schema survives; the trait default deep-clones it every call"
+        );
+    }
+}

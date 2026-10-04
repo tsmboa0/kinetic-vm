@@ -1,5 +1,5 @@
 //! Architecture gate: tests that persist `Config` must isolate the target
-//! path. `Config::default()` targets the real ~/.zeroclaw, so an
+//! path. `Config::default()` targets the real ~/.kinetic, so an
 //! unisolated save clobbers the developer's live config.
 
 use std::fs;
@@ -17,7 +17,7 @@ const PERSIST_CALLS: &[&str] = &[
 ];
 
 /// Evidence that a file isolates its config writes.
-const ISOLATION_MARKERS: &[&str] = &["config_path", "ZEROCLAW_CONFIG_DIR", "set_var(\"HOME\""];
+const ISOLATION_MARKERS: &[&str] = &["config_path", "KINETIC_CONFIG_DIR", "set_var(\"HOME\""];
 
 /// True if `path` sits under a `tests` directory component of this crate
 /// (e.g. `tests/foo.rs`, `crates/x/tests/y.rs`). Classification is done by
@@ -43,9 +43,9 @@ fn tests_that_persist_config_isolate_the_path() {
     assert!(
         violations.is_empty(),
         "Config-persisting test code without path isolation detected. \
-         `Config::default()` targets the real ~/.zeroclaw; a test that \
+         `Config::default()` targets the real ~/.kinetic; a test that \
          saves it clobbers the developer's live config. Set `config_path` \
-         to a TempDir (or override HOME / ZEROCLAW_CONFIG_DIR to a tempdir) \
+         to a TempDir (or override HOME / KINETIC_CONFIG_DIR to a tempdir) \
          before persisting. To override, add `// SOT: <reason>` on the line.\n\n\
          Violations:\n{}",
         violations.join("\n")
@@ -121,14 +121,14 @@ fn is_integration_test_matches_tests_component_regardless_of_separator() {
 
     let crate_tests = manifest_dir
         .join("crates")
-        .join("zeroclaw-config")
+        .join("kinetic-config")
         .join("tests")
         .join("x.rs");
     assert!(is_integration_test(&crate_tests));
 
     let crate_src = manifest_dir
         .join("crates")
-        .join("zeroclaw-config")
+        .join("kinetic-config")
         .join("src")
         .join("schema.rs");
     assert!(!is_integration_test(&crate_src));

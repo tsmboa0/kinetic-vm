@@ -1,5 +1,5 @@
 //! Regression: `--config-dir` must drive CLI locale detection, not only the
-//! `ZEROCLAW_CONFIG_DIR` env var.
+//! `KINETIC_CONFIG_DIR` env var.
 //!
 //! Before the fix, locale was detected (and the clap help tree translated)
 //! *before* the parsed `--config-dir` flag was applied to the environment, so
@@ -12,8 +12,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::Command;
 
-const JA_CLI_FTL: &str = include_str!("../../crates/zeroclaw-runtime/locales/ja/cli.ftl");
-const ES_CLI_FTL: &str = include_str!("../../crates/zeroclaw-runtime/locales/es/cli.ftl");
+const JA_CLI_FTL: &str = include_str!("../../crates/kinetic-runtime/locales/ja/cli.ftl");
+const ES_CLI_FTL: &str = include_str!("../../crates/kinetic-runtime/locales/es/cli.ftl");
 
 fn catalog_message<'a>(catalog: &'a str, key: &str) -> &'a str {
     catalog
@@ -34,15 +34,15 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let out = Command::new(env!("CARGO_BIN_EXE_zeroclaw"))
+    let out = Command::new(env!("CARGO_BIN_EXE_kinetic"))
         .args(args)
         .output()
-        .expect("failed to run zeroclaw --help");
+        .expect("failed to run kinetic --help");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
-        "zeroclaw help failed with status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        "kinetic help failed with status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
         out.status.code()
     );
     stdout.into_owned()

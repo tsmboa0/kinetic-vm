@@ -1,11 +1,11 @@
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
-use std::collections::BTreeMap;
-use zeroclaw_config::config::CredentialSurfaceClass;
-use zeroclaw_config::policy::SecurityPolicy;
-use zeroclaw_config::schema::{
+use kinetic_config::config::CredentialSurfaceClass;
+use kinetic_config::policy::SecurityPolicy;
+use kinetic_config::schema::{
     DEFAULT_SANDBOX_IMAGE, RiskProfileConfig, SandboxBackend, SandboxConfig,
 };
+use serde::Serialize;
+use std::collections::BTreeMap;
 
 use crate::config::Config;
 
@@ -74,12 +74,12 @@ pub struct GatewayStatus {
 pub fn build_report(config: &Config, agent_alias: &str) -> Result<SecurityStatusReport> {
     let resolved = resolve_agent_context(config, agent_alias)?;
     let sandbox_config = sandbox_config_from_policy(&resolved.policy);
-    let sandbox_extra_roots = zeroclaw_runtime::security::SandboxExtraRoots {
+    let sandbox_extra_roots = kinetic_runtime::security::SandboxExtraRoots {
         read_write: resolved.policy.allowed_roots.clone(),
         read_only: resolved.policy.allowed_roots_read_only.clone(),
         write_only: resolved.policy.allowed_roots_write_only.clone(),
     };
-    let sandbox = zeroclaw_runtime::security::sandbox_posture(
+    let sandbox = kinetic_runtime::security::sandbox_posture(
         &sandbox_config,
         config.runtime.kind,
         Some(&resolved.policy.workspace_dir),
@@ -222,7 +222,7 @@ pub fn build_report(config: &Config, agent_alias: &str) -> Result<SecurityStatus
 pub fn print_report(report: &SecurityStatusReport) {
     println!(
         "{}",
-        crate::t("cli-security-status-title", "ZeroClaw Security Status")
+        crate::t("cli-security-status-title", "KineticVM Security Status")
     );
     println!(
         "{}",
@@ -430,7 +430,7 @@ fn parse_sandbox_backend(name: &str) -> SandboxBackend {
 }
 
 fn credential_classification_counts(
-    fields: &[zeroclaw_config::config::PropFieldInfo],
+    fields: &[kinetic_config::config::PropFieldInfo],
 ) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     for field in fields {
@@ -467,11 +467,11 @@ fn credential_class_name(class: CredentialSurfaceClass) -> &'static str {
     }
 }
 
-fn autonomy_level_name(level: zeroclaw_config::autonomy::AutonomyLevel) -> &'static str {
+fn autonomy_level_name(level: kinetic_config::autonomy::AutonomyLevel) -> &'static str {
     match level {
-        zeroclaw_config::autonomy::AutonomyLevel::ReadOnly => "read-only",
-        zeroclaw_config::autonomy::AutonomyLevel::Supervised => "supervised",
-        zeroclaw_config::autonomy::AutonomyLevel::Full => "full",
+        kinetic_config::autonomy::AutonomyLevel::ReadOnly => "read-only",
+        kinetic_config::autonomy::AutonomyLevel::Supervised => "supervised",
+        kinetic_config::autonomy::AutonomyLevel::Full => "full",
     }
 }
 
@@ -486,7 +486,7 @@ mod tests {
             .insert(profile_alias.to_string(), profile);
         config.agents.insert(
             agent.to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
+            kinetic_config::schema::AliasedAgentConfig {
                 risk_profile: profile_alias.into(),
                 ..Default::default()
             },
@@ -523,7 +523,7 @@ mod tests {
     #[test]
     fn full_autonomy_reports_effective_workspace_override() {
         let profile = RiskProfileConfig {
-            level: zeroclaw_config::autonomy::AutonomyLevel::Full,
+            level: kinetic_config::autonomy::AutonomyLevel::Full,
             workspace_only: true,
             ..RiskProfileConfig::default()
         };
@@ -543,19 +543,19 @@ mod tests {
 
     #[test]
     fn workspace_access_reports_effective_root_tiers() {
-        use zeroclaw_config::multi_agent::{AccessMode, AgentAlias};
+        use kinetic_config::multi_agent::{AccessMode, AgentAlias};
 
         let mut config = config_with_agent("ops", "ops-risk", RiskProfileConfig::default());
         config.agents.insert(
             "docs".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
+            kinetic_config::schema::AliasedAgentConfig {
                 risk_profile: "ops-risk".into(),
                 ..Default::default()
             },
         );
         config.agents.insert(
             "writer".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig {
+            kinetic_config::schema::AliasedAgentConfig {
                 risk_profile: "ops-risk".into(),
                 ..Default::default()
             },
@@ -640,7 +640,7 @@ mod tests {
             ..RiskProfileConfig::default()
         };
         let mut config = config_with_agent("ops", "ops-risk", profile);
-        config.runtime.kind = zeroclaw_config::schema::RuntimeKind::Docker;
+        config.runtime.kind = kinetic_config::schema::RuntimeKind::Docker;
 
         let report = build_report(&config, "ops").expect("agent report");
 
@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn docker_runtime_with_auto_backend_never_reports_application_layer_only() {
         let mut config = config_with_agent("ops", "ops-risk", RiskProfileConfig::default());
-        config.runtime.kind = zeroclaw_config::schema::RuntimeKind::Docker;
+        config.runtime.kind = kinetic_config::schema::RuntimeKind::Docker;
 
         let report = build_report(&config, "ops").expect("agent report");
 
@@ -698,7 +698,7 @@ mod tests {
             ..RiskProfileConfig::default()
         };
         let mut config = config_with_agent("ops", "ops-risk", profile);
-        config.runtime.kind = zeroclaw_config::schema::RuntimeKind::Docker;
+        config.runtime.kind = kinetic_config::schema::RuntimeKind::Docker;
 
         let report = build_report(&config, "ops").expect("agent report");
 
@@ -730,7 +730,7 @@ mod tests {
             ..RiskProfileConfig::default()
         };
         let mut config = config_with_agent("ops", "ops-risk", profile);
-        config.runtime.kind = zeroclaw_config::schema::RuntimeKind::Docker;
+        config.runtime.kind = kinetic_config::schema::RuntimeKind::Docker;
 
         let report = build_report(&config, "ops").expect("agent report");
 
@@ -767,7 +767,7 @@ mod tests {
             ..RiskProfileConfig::default()
         };
         let mut config = config_with_agent("ops", "ops-risk", profile);
-        config.runtime.kind = zeroclaw_config::schema::RuntimeKind::Docker;
+        config.runtime.kind = kinetic_config::schema::RuntimeKind::Docker;
 
         let report = build_report(&config, "ops").expect("agent report");
 

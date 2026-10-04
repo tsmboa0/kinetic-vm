@@ -1,13 +1,13 @@
 use std::process::{Command, Output};
 
-fn run_zeroclaw(config_dir: &std::path::Path, args: &[&str]) -> Output {
-    let bin = env!("CARGO_BIN_EXE_zeroclaw");
+fn run_kinetic(config_dir: &std::path::Path, args: &[&str]) -> Output {
+    let bin = env!("CARGO_BIN_EXE_kinetic");
     Command::new(bin)
-        .env("ZEROCLAW_CONFIG_DIR", config_dir)
+        .env("KINETIC_CONFIG_DIR", config_dir)
         .env("RUST_LOG", "off")
         .args(args)
         .output()
-        .expect("run zeroclaw")
+        .expect("run kinetic")
 }
 
 #[test]
@@ -46,7 +46,7 @@ Review release readiness before signoff.
     .expect("write skill");
 
     let source_arg = source_skill.to_string_lossy().to_string();
-    let install = run_zeroclaw(
+    let install = run_kinetic(
         config_dir.path(),
         &["skills", "install", &source_arg, "--bundle", "smoke"],
     );
@@ -70,7 +70,7 @@ Review release readiness before signoff.
         installed_skill.display()
     );
 
-    let list = run_zeroclaw(config_dir.path(), &["skills", "list", "--agent", "default"]);
+    let list = run_kinetic(config_dir.path(), &["skills", "list", "--agent", "default"]);
     assert!(
         list.status.success(),
         "list should succeed\nstdout:\n{}\nstderr:\n{}",
@@ -94,7 +94,7 @@ fn well_known_install_requires_a_selected_skill() {
     )
     .expect("write config");
 
-    let output = run_zeroclaw(
+    let output = run_kinetic(
         config_dir.path(),
         &["skills", "install", "https://example.com", "--well-known"],
     );
@@ -120,7 +120,7 @@ fn well_known_install_rejects_non_https_and_private_sources() {
     .expect("write config");
 
     for source in ["http://example.com", "https://127.0.0.1"] {
-        let output = run_zeroclaw(
+        let output = run_kinetic(
             config_dir.path(),
             &[
                 "skills",

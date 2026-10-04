@@ -1,7 +1,7 @@
 {
   "model_name": "regression-missing-tool-argument-continues-loop",
   "turns": [
-    { "user_input": "Echo my greeting for zeroclaw_user.", "steps": [
+    { "user_input": "Echo my greeting for kinetic_user.", "steps": [
       { "response": { "type": "tool_calls", "tool_calls": [{ "id": "call_1", "name": "echo", "arguments": { "wrong_key": "hello" } }], "input_tokens": 30, "output_tokens": 14 } },
       { "response": { "type": "text", "content": "The echo tool received no usable message, so nothing was echoed. Try again with the text to repeat.", "input_tokens": 52, "output_tokens": 22 } }
     ]}

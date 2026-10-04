@@ -1,10 +1,10 @@
 #[allow(unused_imports)]
-pub use zeroclaw_runtime::skills::*;
+pub use kinetic_runtime::skills::*;
 
 use anyhow::{Context, Result};
+use kinetic_runtime::i18n::{get_required_cli_string, get_required_cli_string_with_args};
+use kinetic_runtime::skills::{ScaffoldOptions, SkillFrontmatter, SkillsService};
 use std::path::{Path, PathBuf};
-use zeroclaw_runtime::i18n::{get_required_cli_string, get_required_cli_string_with_args};
-use zeroclaw_runtime::skills::{ScaffoldOptions, SkillFrontmatter, SkillsService};
 
 /// Resolve a `cli-*` Fluent key for skill-bundle CLI output. Under `agent-runtime`
 /// (default + what CI/release build) this routes through Fluent; without it the
@@ -13,7 +13,7 @@ use zeroclaw_runtime::skills::{ScaffoldOptions, SkillFrontmatter, SkillsService}
 fn mt(key: &str, fallback: &str) -> String {
     #[cfg(feature = "agent-runtime")]
     {
-        zeroclaw_runtime::i18n::get_required_cli_string(key)
+        kinetic_runtime::i18n::get_required_cli_string(key)
     }
     #[cfg(not(feature = "agent-runtime"))]
     {
@@ -26,7 +26,7 @@ fn mt(key: &str, fallback: &str) -> String {
 fn mta(key: &str, args: &[(&str, &str)], fallback: &str) -> String {
     #[cfg(feature = "agent-runtime")]
     {
-        zeroclaw_runtime::i18n::get_required_cli_string_with_args(key, args)
+        kinetic_runtime::i18n::get_required_cli_string_with_args(key, args)
     }
     #[cfg(not(feature = "agent-runtime"))]
     {
@@ -36,19 +36,19 @@ fn mta(key: &str, args: &[(&str, &str)], fallback: &str) -> String {
 
 pub mod creator {
     #[allow(unused_imports)]
-    pub use zeroclaw_runtime::skills::creator::*;
+    pub use kinetic_runtime::skills::creator::*;
 }
 pub mod audit {
     #[allow(unused_imports)]
-    pub use zeroclaw_runtime::skills::audit::*;
+    pub use kinetic_runtime::skills::audit::*;
 }
 pub mod skill_tool {
     #[allow(unused_imports)]
-    pub use zeroclaw_runtime::skills::skill_tool::*;
+    pub use kinetic_runtime::skills::skill_tool::*;
 }
 pub mod skill_http {
     #[allow(unused_imports)]
-    pub use zeroclaw_runtime::skills::skill_http::*;
+    pub use kinetic_runtime::skills::skill_http::*;
 }
 mod discovery;
 
@@ -69,7 +69,7 @@ pub async fn handle_command(
             if let Some(ref b) = bundle {
                 // A single bundle's on-disk skills.
                 let dir =
-                    zeroclaw_config::skill_bundles::resolve_directory(config, &install_root, b)
+                    kinetic_config::skill_bundles::resolve_directory(config, &install_root, b)
                         .map_err(anyhow::Error::msg)?;
                 rendered.push((
                     get_required_cli_string_with_args(
@@ -107,7 +107,7 @@ pub async fn handle_command(
                 // is the same loader the old `list` used, so those rows are
                 // preservedreview).
                 for alias in config.skill_bundles.keys() {
-                    if let Ok(dir) = zeroclaw_config::skill_bundles::resolve_directory(
+                    if let Ok(dir) = kinetic_config::skill_bundles::resolve_directory(
                         config,
                         &install_root,
                         alias,
@@ -429,7 +429,7 @@ pub async fn handle_command(
                     .resolve_ref(&name, Some(b))
                     .map_err(anyhow::Error::msg)?;
                 service
-                    .remove_skill(&target, zeroclaw_runtime::skills::RemoveMode::Archive)
+                    .remove_skill(&target, kinetic_runtime::skills::RemoveMode::Archive)
                     .map_err(anyhow::Error::msg)?;
                 println!(
                     "{}",
@@ -452,7 +452,7 @@ pub async fn handle_command(
                             .resolve_ref(&name, Some(alias))
                             .map_err(anyhow::Error::msg)?;
                         service
-                            .remove_skill(&target, zeroclaw_runtime::skills::RemoveMode::Archive)
+                            .remove_skill(&target, kinetic_runtime::skills::RemoveMode::Archive)
                             .map_err(anyhow::Error::msg)?;
                         println!(
                             "{}",
@@ -563,7 +563,7 @@ pub async fn handle_command(
                     .skill_bundles
                     .keys()
                     .filter_map(|a| {
-                        zeroclaw_config::skill_bundles::resolve_directory(config, &install_root, a)
+                        kinetic_config::skill_bundles::resolve_directory(config, &install_root, a)
                             .ok()
                     })
                     .collect();
@@ -624,7 +624,7 @@ fn resolve_install_location(
                 get_required_cli_string_with_args("cli-bundle-not-configured", &[("alias", alias)])
             );
         }
-        let dir = zeroclaw_config::skill_bundles::resolve_directory(config, &install_root, alias)
+        let dir = kinetic_config::skill_bundles::resolve_directory(config, &install_root, alias)
             .map_err(anyhow::Error::msg)?;
         return Ok(SkillLocation::Bundle {
             alias: alias.to_string(),
@@ -645,7 +645,7 @@ fn resolve_install_location(
         match agent_cfg.skill_bundles.as_slice() {
             [one] => {
                 let dir =
-                    zeroclaw_config::skill_bundles::resolve_directory(config, &install_root, one)
+                    kinetic_config::skill_bundles::resolve_directory(config, &install_root, one)
                         .map_err(anyhow::Error::msg)?;
                 return Ok(SkillLocation::Bundle {
                     alias: one.clone(),
@@ -693,7 +693,7 @@ fn collect_skill_locations(
             continue;
         }
         if let Ok(dir) =
-            zeroclaw_config::skill_bundles::resolve_directory(config, &install_root, alias)
+            kinetic_config::skill_bundles::resolve_directory(config, &install_root, alias)
         {
             let candidate = dir.join(name);
             if candidate.is_dir() {
@@ -811,7 +811,7 @@ fn handle_add(
 
     println!(
         "{}",
-        zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+        kinetic_runtime::i18n::get_required_cli_string_with_args(
             "cli-skills-add-scaffolded",
             &[
                 ("target", &target.to_string()),
@@ -822,7 +822,7 @@ fn handle_add(
 
     if edit {
         open_in_editor(
-            &skill_dir.join(zeroclaw_runtime::skills::constants::SKILL_MANIFEST_FILENAME),
+            &skill_dir.join(kinetic_runtime::skills::constants::SKILL_MANIFEST_FILENAME),
         )?;
     }
     Ok(())
@@ -843,10 +843,10 @@ fn handle_edit(
         .into_iter()
         .find(|s| s.r#ref.name() == target.name())
         .ok_or_else(|| {
-            ::zeroclaw_log::record!(
+            ::kinetic_log::record!(
                 WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Reject)
+                    .with_outcome(::kinetic_log::EventOutcome::Failure)
                     .with_attrs(::serde_json::json!({"skill_ref": target.to_string()})),
                 "skill show: target ref not found"
             );
@@ -857,7 +857,7 @@ fn handle_edit(
         Some(rel) => summary.directory.join(rel),
         None => summary
             .directory
-            .join(zeroclaw_runtime::skills::constants::SKILL_MANIFEST_FILENAME),
+            .join(kinetic_runtime::skills::constants::SKILL_MANIFEST_FILENAME),
     };
     if !path.exists() {
         anyhow::bail!("file not found: {}", path.display());
@@ -894,7 +894,7 @@ async fn handle_bundle_add(
     }
     working.mark_dirty(&format!("skill_bundles.{alias}"));
     let install_root = working.install_root_dir();
-    match zeroclaw_config::skill_bundles::resolve_directory(&working, &install_root, &alias) {
+    match kinetic_config::skill_bundles::resolve_directory(&working, &install_root, &alias) {
         Ok(dir) => {
             tokio::fs::create_dir_all(&dir).await.ok();
             let d = dir.display().to_string();
@@ -945,7 +945,7 @@ async fn handle_bundle_remove(
             )
         );
     }
-    let refs = zeroclaw_config::alias_refs::find_bundle_refs(config, &alias);
+    let refs = kinetic_config::alias_refs::find_bundle_refs(config, &alias);
     if !yes {
         let count = refs.len().to_string();
         println!(
@@ -973,13 +973,13 @@ async fn handle_bundle_remove(
     // Resolve the bundle directory while the entry still exists, so it can be
     // archived AFTER the config change is durable.
     let bundle_dir =
-        zeroclaw_config::skill_bundles::resolve_directory(&working, &install_root, &alias)
+        kinetic_config::skill_bundles::resolve_directory(&working, &install_root, &alias)
             .ok()
             .filter(|d| d.exists());
 
     // Mutate + PERSIST the config first, so a later archive failure can't leave
     // the config pointing at a directory already moved to _deleted/.
-    let mut dirty = zeroclaw_config::alias_refs::scrub_bundle_refs(&mut working, &alias);
+    let mut dirty = kinetic_config::alias_refs::scrub_bundle_refs(&mut working, &alias);
     working
         .delete_map_key("skill_bundles", &alias)
         .map_err(anyhow::Error::msg)?;
@@ -1052,7 +1052,7 @@ async fn handle_bundle_rename(
     let install_root = working.install_root_dir();
     // Resolve the OLD directory while the `from` entry still exists.
     let old_dir =
-        zeroclaw_config::skill_bundles::resolve_directory(&working, &install_root, &from).ok();
+        kinetic_config::skill_bundles::resolve_directory(&working, &install_root, &from).ok();
     match working.rename_map_key("skill_bundles", &from, &to) {
         Ok(true) => {}
         Ok(false) => anyhow::bail!(
@@ -1075,12 +1075,12 @@ async fn handle_bundle_rename(
             )
         }
     }
-    let mut dirty = zeroclaw_config::alias_refs::rewrite_bundle_refs(&mut working, &from, &to);
+    let mut dirty = kinetic_config::alias_refs::rewrite_bundle_refs(&mut working, &from, &to);
     dirty.push(format!("skill_bundles.{from}"));
     dirty.push(format!("skill_bundles.{to}"));
     // Resolve the NEW directory (the entry now lives under `to`) for the move.
     let new_dir =
-        zeroclaw_config::skill_bundles::resolve_directory(&working, &install_root, &to).ok();
+        kinetic_config::skill_bundles::resolve_directory(&working, &install_root, &to).ok();
     for p in &dirty {
         working.mark_dirty(p);
     }
@@ -1126,7 +1126,7 @@ fn print_bundle_include_exclude(include: &[String], exclude: &[String]) {
     if !include.is_empty() {
         println!(
             "  {}",
-            zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+            kinetic_runtime::i18n::get_required_cli_string_with_args(
                 "cli-skills-bundle-include",
                 &[("values", &include.join(", "))],
             )
@@ -1135,7 +1135,7 @@ fn print_bundle_include_exclude(include: &[String], exclude: &[String]) {
     if !exclude.is_empty() {
         println!(
             "  {}",
-            zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+            kinetic_runtime::i18n::get_required_cli_string_with_args(
                 "cli-skills-bundle-exclude",
                 &[("values", &exclude.join(", "))],
             )
@@ -1150,13 +1150,13 @@ fn handle_bundle_list(config: &crate::config::Config) -> Result<()> {
     if bundles.is_empty() {
         println!(
             "{}",
-            zeroclaw_runtime::i18n::get_required_cli_string("cli-skills-bundle-list-empty")
+            kinetic_runtime::i18n::get_required_cli_string("cli-skills-bundle-list-empty")
         );
         return Ok(());
     }
     println!(
         "{}",
-        zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+        kinetic_runtime::i18n::get_required_cli_string_with_args(
             "cli-skills-bundle-list-header",
             &[("count", &bundles.len().to_string())],
         )
@@ -1164,7 +1164,7 @@ fn handle_bundle_list(config: &crate::config::Config) -> Result<()> {
     for b in &bundles {
         println!(
             "  {}",
-            zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+            kinetic_runtime::i18n::get_required_cli_string_with_args(
                 "cli-skills-bundle-entry",
                 &[
                     ("alias", &b.alias),
@@ -1185,10 +1185,10 @@ fn handle_bundle_show(config: &crate::config::Config, alias: String) -> Result<(
         .into_iter()
         .find(|b| b.alias == alias)
         .ok_or_else(|| {
-            ::zeroclaw_log::record!(
+            ::kinetic_log::record!(
                 WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Reject)
+                    .with_outcome(::kinetic_log::EventOutcome::Failure)
                     .with_attrs(::serde_json::json!({"skill_bundle": alias})),
                 "skill bundle lookup failed: alias not in config"
             );
@@ -1197,7 +1197,7 @@ fn handle_bundle_show(config: &crate::config::Config, alias: String) -> Result<(
 
     println!(
         "{}",
-        zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+        kinetic_runtime::i18n::get_required_cli_string_with_args(
             "cli-skills-bundle-entry",
             &[
                 ("alias", &bundle.alias),
@@ -1211,12 +1211,12 @@ fn handle_bundle_show(config: &crate::config::Config, alias: String) -> Result<(
     if skills.is_empty() {
         println!(
             "  {}",
-            zeroclaw_runtime::i18n::get_required_cli_string("cli-skills-bundle-show-no-skills")
+            kinetic_runtime::i18n::get_required_cli_string("cli-skills-bundle-show-no-skills")
         );
     } else {
         println!(
             "  {}",
-            zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+            kinetic_runtime::i18n::get_required_cli_string_with_args(
                 "cli-skills-bundle-show-skills-header",
                 &[("count", &skills.len().to_string())],
             )
@@ -1224,7 +1224,7 @@ fn handle_bundle_show(config: &crate::config::Config, alias: String) -> Result<(
         for s in &skills {
             println!(
                 "    {}",
-                zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+                kinetic_runtime::i18n::get_required_cli_string_with_args(
                     "cli-skills-bundle-show-skill",
                     &[
                         ("name", s.r#ref.name()),
@@ -1304,7 +1304,7 @@ fn fallback_editors() -> &'static [&'static str] {
 mod install_location_tests {
     use super::*;
     use crate::config::{AliasedAgentConfig, Config};
-    use zeroclaw_config::schema::SkillBundleConfig;
+    use kinetic_config::schema::SkillBundleConfig;
 
     fn config_with_bundles(aliases: &[&str]) -> Config {
         let mut c = Config::default();
@@ -1329,7 +1329,7 @@ mod install_location_tests {
     /// locale-independent argument value as the resolution signal.
     #[test]
     fn install_error_strings_resolve_through_fluent() {
-        use zeroclaw_runtime::i18n::{get_required_cli_string, get_required_cli_string_with_args};
+        use kinetic_runtime::i18n::{get_required_cli_string, get_required_cli_string_with_args};
         let audit = get_required_cli_string("cli-skills-audit-failed");
         assert!(
             !audit.starts_with('{') && audit.contains("audit"),
@@ -1479,7 +1479,7 @@ mod install_location_tests {
             .insert("default".to_string(), agent_with_bundles(&["official"]));
 
         // Run the actual bin handler — no flags, so it resolves to the default
-        // agent's single assigned bundle, exactly like `zeroclaw skills install`.
+        // agent's single assigned bundle, exactly like `kinetic skills install`.
         handle_command(
             crate::SkillCommands::Install {
                 source: source.to_string_lossy().into_owned(),

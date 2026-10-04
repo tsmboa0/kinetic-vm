@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Exercise zeroclaw quickstart's provider input paths via its non-interactive flags.
+# Exercise kinetic quickstart's provider input paths via its non-interactive flags.
 set -euo pipefail
 
-BIN="${BIN:-./target/debug/zeroclaw}"
+BIN="${BIN:-./target/debug/kinetic}"
 TMPROOT="$(mktemp -d)"
 trap 'rm -rf "$TMPROOT"' EXIT
 
@@ -11,7 +11,7 @@ run_case() {
   local cfgdir="$TMPROOT/$label"
   mkdir -p "$cfgdir"
   echo "─── $label ───"
-  env ZEROCLAW_CONFIG_DIR="$cfgdir" "$BIN" quickstart "$@"
+  env KINETIC_CONFIG_DIR="$cfgdir" "$BIN" quickstart "$@"
   echo
   echo "→ resulting config.toml:"
   cat "$cfgdir/config.toml" 2>/dev/null || echo "(no config written)"

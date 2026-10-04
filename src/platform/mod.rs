@@ -1,1 +1,1 @@
-pub use zeroclaw_runtime::platform::*;
+pub use kinetic_runtime::platform::*;

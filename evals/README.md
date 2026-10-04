@@ -1,8 +1,8 @@
-# ZeroClaw eval suites
+# KineticVM eval suites
 
-Suites of agent evaluation cases for `zeroclaw eval run` (crate: `crates/zeroclaw-eval`).
+Suites of agent evaluation cases for `kinetic eval run` (crate: `crates/kinetic-eval`).
 
-- `regression/` — must stay at 100% pass. Gated in CI (`crates/zeroclaw-eval/tests/regression_suite.rs`). A failure here blocks merge. The corpus is repository-only; the published `zeroclaw-eval` crate archive excludes the gate and does not carry these fixtures.
+- `regression/` — must stay at 100% pass. Gated in CI (`crates/kinetic-eval/tests/regression_suite.rs`). A failure here blocks merge. The corpus is repository-only; the published `kinetic-eval` crate archive excludes the gate and does not carry these fixtures.
 - `capability/` (planned) — hard tasks with a low pass rate; tracked over time, never gated.
 - `live/` (planned) — cases executed against a real provider; cost money, never run in CI by default.
 
@@ -17,6 +17,6 @@ Suites of agent evaluation cases for `zeroclaw eval run` (crate: `crates/zerocla
 - A replay case's scripted steps double as its reference solution: they prove the task is solvable.
 - Every case replays at least one turn and declares at least one assertion with no zero-length value. Fixture loading rejects anything less, so a case that cannot fail never reaches the gate.
 - Every case must fail when the run produces nothing. A lone bound such as `max_tool_calls: 0` survives load but holds over an idle run, so `regression_suite.rs` grades every gated fixture against an empty run and requires a failed check.
-- Privacy: fixtures ship forever. Placeholder identities only (`zeroclaw_user`, `example.com`) per `docs/book/src/contributing/privacy.md`. Never paste real transcripts, names, keys, or hostnames.
+- Privacy: fixtures ship forever. Placeholder identities only (`kinetic_user`, `example.com`) per `docs/book/src/contributing/privacy.md`. Never paste real transcripts, names, keys, or hostnames.
 
-Suite owner: the maintainer group for `crates/zeroclaw-eval` (update when a named owner volunteers).
+Suite owner: the maintainer group for `crates/kinetic-eval` (update when a named owner volunteers).

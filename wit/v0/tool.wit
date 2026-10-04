@@ -1,6 +1,6 @@
-package zeroclaw:plugin@0.1.0;
+package kinetic:plugin@0.1.0;
 
-/// Plugin interface for a single callable tool exposed to the ZeroClaw agent loop.
+/// Plugin interface for a single callable tool exposed to the KineticVM agent loop.
 @unstable(feature = plugins-wit-v0)
 interface tool {
     @unstable(feature = plugins-wit-v0)

@@ -1,4 +1,4 @@
-//! Exit-code contract of `zeroclaw plugin info` and `plugin list --verify`,
+//! Exit-code contract of `kinetic plugin info` and `plugin list --verify`,
 //! through the real binary.
 //!
 //! A script that asks about a plugin must be able to branch on the exit code:
@@ -9,14 +9,14 @@
 
 use std::process::{Command, Output};
 
-fn run_zeroclaw(config_dir: &std::path::Path, args: &[&str]) -> Output {
-    let bin = env!("CARGO_BIN_EXE_zeroclaw");
+fn run_kinetic(config_dir: &std::path::Path, args: &[&str]) -> Output {
+    let bin = env!("CARGO_BIN_EXE_kinetic");
     Command::new(bin)
-        .env("ZEROCLAW_CONFIG_DIR", config_dir)
+        .env("KINETIC_CONFIG_DIR", config_dir)
         .env("RUST_LOG", "off")
         .args(args)
         .output()
-        .expect("run zeroclaw")
+        .expect("run kinetic")
 }
 
 fn throwaway_config_dir() -> tempfile::TempDir {
@@ -32,7 +32,7 @@ fn throwaway_config_dir() -> tempfile::TempDir {
 #[test]
 fn plugin_info_on_an_unknown_name_exits_non_zero_and_names_it() {
     let config_dir = throwaway_config_dir();
-    let out = run_zeroclaw(config_dir.path(), &["plugin", "info", "no-such-plugin"]);
+    let out = run_kinetic(config_dir.path(), &["plugin", "info", "no-such-plugin"]);
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -52,7 +52,7 @@ fn plugin_info_on_an_unknown_name_exits_non_zero_and_names_it() {
 fn plugin_list_with_nothing_installed_still_exits_zero() {
     // The control: listing is a report, not a check, and stays zero.
     let config_dir = throwaway_config_dir();
-    let out = run_zeroclaw(config_dir.path(), &["plugin", "list"]);
+    let out = run_kinetic(config_dir.path(), &["plugin", "list"]);
     assert!(
         out.status.success(),
         "plugin list must exit 0 with nothing installed: {}",
@@ -112,7 +112,7 @@ fn combined(out: &Output) -> String {
 #[test]
 fn plugin_info_on_an_installed_component_that_does_not_load_exits_non_zero_and_says_why() {
     let config_dir = config_dir_with_a_broken_installed_plugin();
-    let out = run_zeroclaw(config_dir.path(), &["plugin", "info", "broken-fixture"]);
+    let out = run_kinetic(config_dir.path(), &["plugin", "info", "broken-fixture"]);
     let text = combined(&out);
     assert!(
         !out.status.success(),
@@ -132,7 +132,7 @@ fn plugin_info_on_an_installed_component_that_does_not_load_exits_non_zero_and_s
 fn plugin_list_verify_names_the_failure_and_exits_zero_while_plain_list_stays_a_catalog() {
     let config_dir = config_dir_with_a_broken_installed_plugin();
 
-    let verified = run_zeroclaw(config_dir.path(), &["plugin", "list", "--verify"]);
+    let verified = run_kinetic(config_dir.path(), &["plugin", "list", "--verify"]);
     let verified_text = combined(&verified);
     assert!(
         verified.status.success(),
@@ -146,7 +146,7 @@ fn plugin_list_verify_names_the_failure_and_exits_zero_while_plain_list_stays_a_
         "the verified row must carry the plugin's name and its load failure: {verified_text}"
     );
 
-    let plain = run_zeroclaw(config_dir.path(), &["plugin", "list"]);
+    let plain = run_kinetic(config_dir.path(), &["plugin", "list"]);
     let plain_text = combined(&plain);
     assert!(
         plain.status.success(),

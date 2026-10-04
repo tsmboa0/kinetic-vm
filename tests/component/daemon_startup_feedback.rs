@@ -38,7 +38,7 @@ fn daemon_fixture() -> (tempfile::TempDir, std::path::PathBuf, u16, String) {
     std::fs::create_dir(&obstruction).unwrap();
     let command = format!(
         "LC_ALL=C TERM=dumb {} --config-dir {} daemon --port {port} --allow-degraded-security",
-        shell_quote(Path::new(env!("CARGO_BIN_EXE_zeroclaw"))),
+        shell_quote(Path::new(env!("CARGO_BIN_EXE_kinetic"))),
         shell_quote(config_dir.path()),
     );
     (config_dir, obstruction, port, command)
@@ -119,7 +119,7 @@ allowed_numbers = ["1234567890"]
             .unwrap()
             .port();
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_zeroclaw"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_kinetic"))
             .arg("--config-dir")
             .arg(config_dir.path())
             .arg("daemon")

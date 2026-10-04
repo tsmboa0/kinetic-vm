@@ -1,8 +1,8 @@
 //! Channel Matrix — comprehensive capability coverage tests.
 
 use async_trait::async_trait;
+use kinetic::channels::{Channel, ChannelMessage, SendMessage};
 use std::sync::{Arc, Mutex};
-use zeroclaw::channels::{Channel, ChannelMessage, SendMessage};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Matrix test channel — records all trait method calls for assertion
@@ -99,11 +99,9 @@ impl MatrixTestChannel {
     }
 }
 
-impl ::zeroclaw_api::attribution::Attributable for MatrixTestChannel {
-    fn role(&self) -> ::zeroclaw_api::attribution::Role {
-        ::zeroclaw_api::attribution::Role::Channel(
-            ::zeroclaw_api::attribution::ChannelKind::Webhook,
-        )
+impl ::kinetic_api::attribution::Attributable for MatrixTestChannel {
+    fn role(&self) -> ::kinetic_api::attribution::Role {
+        ::kinetic_api::attribution::Role::Channel(::kinetic_api::attribution::ChannelKind::Webhook)
     }
     fn alias(&self) -> &str {
         "test"
@@ -755,7 +753,7 @@ fn make_platform_message(platform: &str) -> ChannelMessage {
         "irc" => ChannelMessage {
             id: "irc_1".into(),
             sender: "coolnick".into(),
-            reply_target: "#zeroclaw".into(),
+            reply_target: "#kinetic".into(),
             content: "hi".into(),
             channel: "irc".into(),
             channel_alias: None,
@@ -1066,7 +1064,7 @@ async fn concurrent_sends_all_recorded() {
 
     for i in 0..20 {
         let ch = Arc::clone(&ch);
-        handles.push(zeroclaw_spawn::spawn!(async move {
+        handles.push(kinetic_spawn::spawn!(async move {
             ch.send(&SendMessage::new(format!("msg_{i}"), format!("user_{i}")))
                 .await
                 .unwrap();
@@ -1087,7 +1085,7 @@ async fn concurrent_typing_events_all_recorded() {
 
     for i in 0..10 {
         let ch = Arc::clone(&ch);
-        handles.push(zeroclaw_spawn::spawn!(async move {
+        handles.push(kinetic_spawn::spawn!(async move {
             ch.start_typing(&format!("user_{i}")).await.unwrap();
             ch.stop_typing(&format!("user_{i}")).await.unwrap();
         }));
@@ -1115,7 +1113,7 @@ async fn concurrent_reactions_all_recorded() {
     for (i, emoji) in emojis.iter().enumerate() {
         let ch = Arc::clone(&ch);
         let emoji = emoji.to_string();
-        handles.push(zeroclaw_spawn::spawn!(async move {
+        handles.push(kinetic_spawn::spawn!(async move {
             ch.add_reaction("chan_1", &format!("msg_{i}"), &emoji)
                 .await
                 .unwrap();
@@ -1349,11 +1347,9 @@ async fn capability_matrix_spec() {
 /// Minimal channel with ONLY required methods — validates all defaults work.
 struct MinimalChannel;
 
-impl ::zeroclaw_api::attribution::Attributable for MinimalChannel {
-    fn role(&self) -> ::zeroclaw_api::attribution::Role {
-        ::zeroclaw_api::attribution::Role::Channel(
-            ::zeroclaw_api::attribution::ChannelKind::Webhook,
-        )
+impl ::kinetic_api::attribution::Attributable for MinimalChannel {
+    fn role(&self) -> ::kinetic_api::attribution::Role {
+        ::kinetic_api::attribution::Role::Channel(::kinetic_api::attribution::ChannelKind::Webhook)
     }
     fn alias(&self) -> &str {
         "minimal"

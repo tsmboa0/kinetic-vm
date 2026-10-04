@@ -1,1 +1,1 @@
-pub use zeroclaw_config::traits::*;
+pub use kinetic_config::traits::*;

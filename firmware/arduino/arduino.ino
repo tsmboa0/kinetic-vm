@@ -1,8 +1,8 @@
 /*
- * ZeroClaw Arduino Uno Firmware
+ * KineticVM Arduino Uno Firmware
  *
  * Listens for JSON commands on Serial (115200 baud), executes gpio_read/gpio_write,
- * responds with JSON. Compatible with ZeroClaw SerialPeripheral protocol.
+ * responds with JSON. Compatible with KineticVM SerialPeripheral protocol.
  *
  * Protocol (newline-delimited JSON):
  *   Request:  {"id":"1","cmd":"gpio_write","args":{"pin":13,"value":1}}

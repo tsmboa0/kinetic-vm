@@ -2,7 +2,7 @@
 
 use crate::support::helpers::{build_agent_with_sqlite_memory, text_response, tool_response};
 use crate::support::{CountingTool, EchoTool, MockModelProvider, RecordingTool};
-use zeroclaw::providers::ToolCall;
+use kinetic::providers::ToolCall;
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Full-stack system tests

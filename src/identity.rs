@@ -1,1 +1,1 @@
-pub use zeroclaw_runtime::identity::*;
+pub use kinetic_runtime::identity::*;

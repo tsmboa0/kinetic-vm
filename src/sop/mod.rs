@@ -1,8 +1,8 @@
 #[allow(unused_imports)]
-pub use zeroclaw_runtime::sop::*;
+pub use kinetic_runtime::sop::*;
 
 use anyhow::Result;
-use zeroclaw_runtime::i18n::{get_required_cli_string, get_required_cli_string_with_args};
+use kinetic_runtime::i18n::{get_required_cli_string, get_required_cli_string_with_args};
 
 pub fn handle_command(command: crate::SopCommands, config: &crate::config::Config) -> Result<()> {
     // SOP definitions resolve against the install root, so the documented
@@ -134,10 +134,10 @@ pub fn handle_command(command: crate::SopCommands, config: &crate::config::Confi
         }
         crate::SopCommands::Show { name } => {
             let sop = sops.iter().find(|s| s.name == name).ok_or_else(|| {
-                ::zeroclaw_log::record!(
+                ::kinetic_log::record!(
                     WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Reject)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure)
                         .with_attrs(::serde_json::json!({"sop": name})),
                     "sop show: name not found in loaded SOPs"
                 );
@@ -518,7 +518,7 @@ type = "manual"
             max_concurrent: 1,
             location: None,
             deterministic: false,
-            admission_policy: zeroclaw_runtime::sop::types::SopAdmissionPolicy::Parallel,
+            admission_policy: kinetic_runtime::sop::types::SopAdmissionPolicy::Parallel,
             max_pending_approvals: 0,
             agent: None,
             decision: None,
@@ -554,7 +554,7 @@ type = "manual"
             max_concurrent: 1,
             location: None,
             deterministic: false,
-            admission_policy: zeroclaw_runtime::sop::types::SopAdmissionPolicy::Parallel,
+            admission_policy: kinetic_runtime::sop::types::SopAdmissionPolicy::Parallel,
             max_pending_approvals: 0,
             agent: None,
             decision: None,

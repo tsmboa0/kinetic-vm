@@ -65,7 +65,7 @@ version = "=1.3.2"
 
 # The four entries below arrived with the matrix-sdk 0.19 bump: vodozemac
 # 0.11 pulls the RustCrypto 0.12 generation (aead 0.6, chacha20poly1305
-# 0.11, cipher 0.5, digest 0.11), while zeroclaw-config still encrypts with
+# 0.11, cipher 0.5, digest 0.11), while kinetic-config still encrypts with
 # chacha20poly1305 0.10 on the older generation. Same split as the existing
 # `chacha20 =0.9.1` skip. They go away when this repository's own crypto
 # deps move to the newer generation.

@@ -55,7 +55,7 @@ fn fn_body_span_from(src: &str, signature: &str, search_from: usize) -> (usize, 
 fn config_surface_handlers_are_registered_only_on_the_authenticated_router() {
     const GUARDED_MODULES: &[&str] = &["api_config::", "api_sections::", "api_quickstart::"];
 
-    let src = repo_file("crates/zeroclaw-gateway/src/lib.rs");
+    let src = repo_file("crates/kinetic-gateway/src/lib.rs");
     let (start, end) = fn_body_span_from(&src, "fn config_admin_router", 0);
 
     let mut stray = Vec::new();
@@ -105,7 +105,7 @@ fn session_targeting_rpc_methods_authorize_ownership() {
         "handle_session_new_for_test",
     ];
 
-    let src = repo_file("crates/zeroclaw-runtime/src/rpc/dispatch.rs");
+    let src = repo_file("crates/kinetic-runtime/src/rpc/dispatch.rs");
 
     let mut ungated = Vec::new();
     let mut checked = 0usize;

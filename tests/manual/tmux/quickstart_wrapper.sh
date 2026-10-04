@@ -4,7 +4,7 @@ set -uo pipefail
 config_dir="$1"
 bin_path="$2"
 
-env ZEROCLAW_CONFIG_DIR="$config_dir" "$bin_path" quickstart
+env KINETIC_CONFIG_DIR="$config_dir" "$bin_path" quickstart
 status=$?
 printf '\nEXIT_STATUS=%s\n' "$status"
 sleep 5

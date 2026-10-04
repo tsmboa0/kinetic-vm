@@ -116,10 +116,10 @@ fn discard_until_newline<R: std::io::BufRead>(reader: &mut R) -> std::io::Result
     }
 }
 
+#[cfg(feature = "agent-runtime")]
+use kinetic_config::api_error::{ConfigApiCode, ConfigApiError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(feature = "agent-runtime")]
-use zeroclaw_config::api_error::{ConfigApiCode, ConfigApiError};
 
 /// Resolve a `cli-*` Fluent key for CLI output. Routes through the runtime
 /// i18n catalogue under `agent-runtime` (default + CI/release); without that
@@ -128,7 +128,7 @@ use zeroclaw_config::api_error::{ConfigApiCode, ConfigApiError};
 fn t(key: &str, fallback: &str) -> String {
     #[cfg(feature = "agent-runtime")]
     {
-        zeroclaw_runtime::i18n::get_required_cli_string(key)
+        kinetic_runtime::i18n::get_required_cli_string(key)
     }
     #[cfg(not(feature = "agent-runtime"))]
     {
@@ -141,7 +141,7 @@ fn t(key: &str, fallback: &str) -> String {
 fn ta(key: &str, args: &[(&str, &str)], fallback: impl Into<String>) -> String {
     #[cfg(feature = "agent-runtime")]
     {
-        zeroclaw_runtime::i18n::get_required_cli_string_with_args(key, args)
+        kinetic_runtime::i18n::get_required_cli_string_with_args(key, args)
     }
     #[cfg(not(feature = "agent-runtime"))]
     {
@@ -186,7 +186,7 @@ fn secret_prompt(prompt_text: &str, allow_empty: bool) -> Result<String> {
 
 #[cfg(feature = "agent-runtime")]
 fn qta(key: &str, args: &[(&str, &str)]) -> String {
-    zeroclaw_runtime::i18n::get_required_cli_string_with_args(key, args)
+    kinetic_runtime::i18n::get_required_cli_string_with_args(key, args)
 }
 
 #[cfg(feature = "agent-runtime")]
@@ -705,7 +705,7 @@ fn quickstart_action_for_pick(
 }
 
 #[cfg(feature = "agent-runtime")]
-fn quickstart_step_label(step: zeroclaw_runtime::quickstart::QuickstartStep) -> String {
+fn quickstart_step_label(step: kinetic_runtime::quickstart::QuickstartStep) -> String {
     t(step.label_key(), step.label())
 }
 
@@ -719,7 +719,7 @@ async fn apply_comment_inline(
     path: &str,
     comment: &str,
 ) -> Result<()> {
-    zeroclaw_config::comment_writer::apply_comments(
+    kinetic_config::comment_writer::apply_comments(
         config_path,
         &[(path.to_string(), comment.to_string())],
     )
@@ -745,13 +745,13 @@ fn json_value_to_setprop_string(
     json: bool,
 ) -> Result<String> {
     let kind = config_patch_prop_kind(config, path);
-    match zeroclaw_config::typed_value::coerce_for_set_prop(value, kind) {
+    match kinetic_config::typed_value::coerce_for_set_prop(value, kind) {
         Ok(value_str) => Ok(value_str),
         Err(err) => {
-            ::zeroclaw_log::record!(
+            ::kinetic_log::record!(
                 WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Reject)
+                    .with_outcome(::kinetic_log::EventOutcome::Failure)
                     .with_attrs(::serde_json::json!({"path": path, "error": err.message.clone()})),
                 "config patch coercion rejected JSON value"
             );
@@ -831,7 +831,7 @@ fn print_no_command_help(cmd: clap::Command) -> Result<()> {
             "{}",
             crate::i18n::get_cli_string("cli-try-quickstart")
                 .as_deref()
-                .unwrap_or("Try `zeroclaw quickstart` to create your first agent.")
+                .unwrap_or("Try `kinetic quickstart` to create your first agent.")
         );
     }
     #[cfg(not(feature = "agent-runtime"))]
@@ -841,7 +841,7 @@ fn print_no_command_help(cmd: clap::Command) -> Result<()> {
             "{}",
             t(
                 "cli-try-quickstart",
-                "Try `zeroclaw quickstart` to create your first agent."
+                "Try `kinetic quickstart` to create your first agent."
             )
         );
     }
@@ -862,7 +862,7 @@ fn pause_after_no_command_help() {
     println!();
     print!("{}", t("cli-press-enter", "Press Enter to exit..."));
     let _ = std::io::stdout().flush();
-    // Cap the read so a piped-in flood (e.g. `dir | zeroclaw` with no
+    // Cap the read so a piped-in flood (e.g. `dir | kinetic` with no
     // command) cannot blow up RSS in this trivial one-Enter prompt.
     // See module-level `STDIN_LINE_CAP` for rationale.
     let mut line = String::new();
@@ -893,7 +893,7 @@ mod cli_input;
 mod commands;
 #[cfg(feature = "agent-runtime")]
 mod rag {
-    pub use zeroclaw::rag::*;
+    pub use kinetic::rag::*;
 }
 #[cfg(feature = "agent-runtime")]
 mod browse;
@@ -965,7 +965,7 @@ mod util;
 use config::Config;
 
 // Re-export so binary modules can use crate::<CommandEnum> while keeping a single source of truth.
-pub use zeroclaw::{
+pub use kinetic::{
     AgentsCommands, ChannelCommands, ChannelsCommands, CronCommands, CronDeliveryArgs,
     GatewayCommands, HardwareCommands, IntegrationCommands, MigrateCommands, PeripheralCommands,
     ProvidersCommands, ServiceCommands, ServiceLogStream, SkillBundleCommands, SkillCommands,
@@ -1000,11 +1000,11 @@ enum EstopLevelArg {
 
 /// Package version and `git describe` build id stamped by `build.rs`, so
 /// `--version` and `status` name the commit this binary was built from.
-const VERSION: &str = env!("ZEROCLAW_VERSION");
+const VERSION: &str = env!("KINETIC_VERSION");
 
-/// `ZeroClaw` - Zero overhead. Zero compromise. 100% Rust.
+/// `KineticVM` - Zero overhead. Zero compromise. 100% Rust.
 #[derive(Parser, Debug)]
-#[command(name = "zeroclaw")]
+#[command(name = "kinetic")]
 #[command(author = "theonlyhennygod")]
 #[command(version = VERSION)]
 // i18n-exempt: clap derive help — framework requires a compile-time literal
@@ -1054,7 +1054,7 @@ impl LogLevel {
     }
 }
 
-/// Subcommands for `zeroclaw eval`.
+/// Subcommands for `kinetic eval`.
 #[cfg(feature = "agent-runtime")]
 #[derive(Subcommand, Debug)]
 enum EvalCommands {
@@ -1099,11 +1099,11 @@ enum Commands {
         agent: Option<String>,
     },
 
-    /// Deprecated. Use `zeroclaw quickstart`. Any flags error.
+    /// Deprecated. Use `kinetic quickstart`. Any flags error.
     Onboard {
         /// Configure a specific section only. Omit to run the full flow.
         #[command(subcommand)]
-        section: Option<zeroclaw_config::sections::Section>,
+        section: Option<kinetic_config::sections::Section>,
 
         /// Skip interactive prompts; read from --api-key/--model-provider/--model/--memory.
         #[arg(long, hide = true)]
@@ -1165,10 +1165,10 @@ Launches an interactive chat session with the configured AI model_provider. \
 Use --message for single-shot queries without entering interactive mode.
 
 Examples:
-  zeroclaw agent -a assistant                                          # interactive session
-  zeroclaw agent -a assistant -m \"Summarize today's logs\"              # single message
-  zeroclaw agent -a assistant -p anthropic --model claude-sonnet-4-20250514
-  zeroclaw agent -a assistant --peripheral nucleo-f401re:/dev/ttyACM0")]
+  kinetic agent -a assistant                                          # interactive session
+  kinetic agent -a assistant -m \"Summarize today's logs\"              # single message
+  kinetic agent -a assistant -p anthropic --model claude-sonnet-4-20250514
+  kinetic agent -a assistant --peripheral nucleo-f401re:/dev/ttyACM0")]
     Agent {
         /// Configured agent alias to run as (must match `[agents.<alias>]`).
         /// Required — there is no default agent.
@@ -1209,12 +1209,12 @@ Start, restart, or inspect the HTTP/WebSocket gateway that accepts \
 incoming webhook events and WebSocket connections.
 
 Examples:
-  zeroclaw gateway start              # start gateway
-  zeroclaw gateway restart            # restart gateway
-  zeroclaw gateway get-paircode       # show pairing code")]
+  kinetic gateway start              # start gateway
+  kinetic gateway restart            # restart gateway
+  kinetic gateway get-paircode       # show pairing code")]
     Gateway {
         #[command(subcommand)]
-        gateway_command: Option<zeroclaw::GatewayCommands>,
+        gateway_command: Option<kinetic::GatewayCommands>,
     },
 
     /// Start ACP (Agent Control Protocol) server over stdio
@@ -1229,9 +1229,9 @@ responses as notifications.
 Methods: initialize, session/new, session/prompt, session/stop.
 
 Examples:
-  zeroclaw acp                        # start ACP server
-  zeroclaw acp --agent fable         # default new sessions to agent fable
-  zeroclaw acp --max-sessions 5       # limit concurrent sessions")]
+  kinetic acp                        # start ACP server
+  kinetic acp --agent fable         # default new sessions to agent fable
+  kinetic acp --max-sessions 5       # limit concurrent sessions")]
     Acp {
         /// Process-scoped default agent for alias-less session/new requests
         #[arg(long)]
@@ -1251,18 +1251,18 @@ Examples:
     #[command(long_about = "\
 Start the long-running autonomous daemon.
 
-Launches the full ZeroClaw runtime: gateway server, all configured \
+Launches the full KineticVM runtime: gateway server, all configured \
 channels (Telegram, Discord, Slack, etc.), heartbeat monitor, and \
-the cron scheduler. This is the recommended way to run ZeroClaw in \
+the cron scheduler. This is the recommended way to run KineticVM in \
 production or as an always-on assistant.
 
-Use 'zeroclaw service install' to register the daemon as an OS \
+Use 'kinetic service install' to register the daemon as an OS \
 service (systemd/launchd) for auto-start on boot.
 
 Examples:
-  zeroclaw daemon                   # use config defaults
-  zeroclaw daemon -p 9090           # gateway on port 9090
-  zeroclaw daemon --host 127.0.0.1  # localhost only")]
+  kinetic daemon                   # use config defaults
+  kinetic daemon -p 9090           # gateway on port 9090
+  kinetic daemon --host 127.0.0.1  # localhost only")]
     Daemon {
         /// Port to listen on (use 0 for random available port); defaults to config gateway.port
         #[arg(short, long)]
@@ -1325,7 +1325,7 @@ Examples:
         #[command(subcommand)]
         estop_command: Option<EstopSubcommands>,
 
-        /// Level used when engaging estop from `zeroclaw estop`.
+        /// Level used when engaging estop from `kinetic estop`.
         #[arg(long, value_enum)]
         level: Option<EstopLevelArg>,
 
@@ -1353,15 +1353,15 @@ the runtime local timezone. For user-facing schedules, pass --tz with \
 an explicit IANA timezone.
 
 Examples:
-  zeroclaw cron list
-  zeroclaw cron add '0 9 * * 1-5' 'Good morning' --agent sentinel --prompt --tz America/New_York
-  zeroclaw cron add '*/30 * * * *' 'Check system health' --agent sentinel --prompt
-  zeroclaw cron add '*/5 * * * *' 'echo ok' --agent sentinel
-  zeroclaw cron add-at 2099-01-15T14:00:00Z 'Send reminder' --agent sentinel --prompt
-  zeroclaw cron add-every 60000 'Ping heartbeat' --agent sentinel --prompt
-  zeroclaw cron once 30m 'Run backup in 30 minutes' --agent sentinel --prompt
-  zeroclaw cron pause TASK_ID
-  zeroclaw cron update TASK_ID --expression '0 8 * * *' --tz Europe/London")]
+  kinetic cron list
+  kinetic cron add '0 9 * * 1-5' 'Good morning' --agent sentinel --prompt --tz America/New_York
+  kinetic cron add '*/30 * * * *' 'Check system health' --agent sentinel --prompt
+  kinetic cron add '*/5 * * * *' 'echo ok' --agent sentinel
+  kinetic cron add-at 2099-01-15T14:00:00Z 'Send reminder' --agent sentinel --prompt
+  kinetic cron add-every 60000 'Ping heartbeat' --agent sentinel --prompt
+  kinetic cron once 30m 'Run backup in 30 minutes' --agent sentinel --prompt
+  kinetic cron pause TASK_ID
+  kinetic cron update TASK_ID --expression '0 8 * * *' --tz Europe/London")]
     Cron {
         #[command(subcommand)]
         cron_command: CronCommands,
@@ -1383,17 +1383,17 @@ Examples:
     #[command(long_about = "\
 Manage communication channels.
 
-Add, remove, list, send, and health-check channels that connect ZeroClaw \
+Add, remove, list, send, and health-check channels that connect KineticVM \
 to messaging platforms. Supported channel types: telegram, discord, \
 slack, whatsapp, matrix, imessage, email.
 
 Examples:
-  zeroclaw channel list
-  zeroclaw channel doctor
-  zeroclaw channel add telegram '{\"bot_token\":\"...\",\"name\":\"my-bot\"}'
-  zeroclaw channel remove my-bot
-  zeroclaw channel bind-telegram zeroclaw_user
-  zeroclaw channel send 'Alert!' --channel-id telegram --recipient 123456789")]
+  kinetic channel list
+  kinetic channel doctor
+  kinetic channel add telegram '{\"bot_token\":\"...\",\"name\":\"my-bot\"}'
+  kinetic channel remove my-bot
+  kinetic channel bind-telegram kinetic_user
+  kinetic channel send 'Alert!' --channel-id telegram --recipient 123456789")]
     Channel {
         #[command(subcommand)]
         channel_command: ChannelCommands,
@@ -1433,9 +1433,9 @@ rejected. Used by the dashboard's skill-bundle directory picker and by \
 operators who want to inspect what's installed.
 
 Examples:
-  zeroclaw browse                  # list shared/ root
-  zeroclaw browse skills           # list shared/skills/
-  zeroclaw browse skills/coding    # list shared/skills/coding/")]
+  kinetic browse                  # list shared/ root
+  kinetic browse skills           # list shared/skills/
+  kinetic browse skills/coding    # list shared/skills/coding/")]
     Browse {
         /// Path relative to `<install>/shared/`. Empty = root.
         #[arg(default_value = "")]
@@ -1477,12 +1477,12 @@ Enumerate connected USB devices, identify known development boards \
 probe-rs / ST-Link.
 
 Examples:
-  zeroclaw hardware discover
-  zeroclaw hardware introspect /dev/ttyACM0
-  zeroclaw hardware info --chip STM32F401RETx")]
+  kinetic hardware discover
+  kinetic hardware introspect /dev/ttyACM0
+  kinetic hardware info --chip STM32F401RETx")]
     Hardware {
         #[command(subcommand)]
-        hardware_command: zeroclaw::HardwareCommands,
+        hardware_command: kinetic::HardwareCommands,
     },
 
     /// Manage hardware peripherals (STM32, RPi GPIO, etc.)
@@ -1495,14 +1495,14 @@ to the agent (GPIO, sensors, actuators). Supported boards: \
 nucleo-f401re, rpi-gpio, esp32, arduino-uno.
 
 Examples:
-  zeroclaw peripheral list
-  zeroclaw peripheral add nucleo-f401re /dev/ttyACM0
-  zeroclaw peripheral add rpi-gpio native
-  zeroclaw peripheral flash --port /dev/cu.usbmodem12345
-  zeroclaw peripheral flash-nucleo")]
+  kinetic peripheral list
+  kinetic peripheral add nucleo-f401re /dev/ttyACM0
+  kinetic peripheral add rpi-gpio native
+  kinetic peripheral flash --port /dev/cu.usbmodem12345
+  kinetic peripheral flash-nucleo")]
     Peripheral {
         #[command(subcommand)]
-        peripheral_command: zeroclaw::PeripheralCommands,
+        peripheral_command: kinetic::PeripheralCommands,
     },
 
     /// Manage agent memory (list, get, stats, clear)
@@ -1515,11 +1515,11 @@ Supports filtering by category and session, pagination, and \
 batch clearing with confirmation.
 
 Examples:
-  zeroclaw memory stats
-  zeroclaw memory list
-  zeroclaw memory list --category core --limit 10
-  zeroclaw memory get KEY
-  zeroclaw memory clear --category conversation --yes")]
+  kinetic memory stats
+  kinetic memory list
+  kinetic memory list --category core --limit 10
+  kinetic memory get KEY
+  kinetic memory clear --category conversation --yes")]
     Memory {
         #[command(subcommand)]
         memory_command: MemoryCommands,
@@ -1528,7 +1528,7 @@ Examples:
     /// Manage configuration
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
-Manage ZeroClaw configuration.
+Manage KineticVM configuration.
 
 View, set, or initialize config properties by dotted path. \
 Use 'schema' to dump the full JSON Schema for the config file.
@@ -1538,19 +1538,19 @@ Secret fields (API keys, tokens) automatically use masked input.
 Enum fields offer interactive selection when value is omitted.
 
 Examples:
-  zeroclaw config list                                  # list all properties
-  zeroclaw config list --secrets                        # list only secrets
-  zeroclaw config list --filter channels.matrix         # filter by prefix
-  zeroclaw config get channels.matrix.mention-only      # get a value
-  zeroclaw config set channels.matrix.mention-only true # set a value
-  zeroclaw config set channels.matrix.access-token      # secret: masked input
-  zeroclaw config set channels.matrix.stream-mode       # enum: interactive select
-  zeroclaw config init channels.matrix                  # init section with defaults
-  zeroclaw config init risk_profiles.strict             # create a new dynamic-map alias
-  zeroclaw config schema                                # print JSON Schema to stdout
-  zeroclaw config schema > schema.json
+  kinetic config list                                  # list all properties
+  kinetic config list --secrets                        # list only secrets
+  kinetic config list --filter channels.matrix         # filter by prefix
+  kinetic config get channels.matrix.mention-only      # get a value
+  kinetic config set channels.matrix.mention-only true # set a value
+  kinetic config set channels.matrix.access-token      # secret: masked input
+  kinetic config set channels.matrix.stream-mode       # enum: interactive select
+  kinetic config init channels.matrix                  # init section with defaults
+  kinetic config init risk_profiles.strict             # create a new dynamic-map alias
+  kinetic config schema                                # print JSON Schema to stdout
+  kinetic config schema > schema.json
 
-Property path tab completion is included automatically in `zeroclaw completions <shell>`.")]
+Property path tab completion is included automatically in `kinetic completions <shell>`.")]
     Config {
         #[command(subcommand)]
         config_command: ConfigCommands,
@@ -1559,15 +1559,15 @@ Property path tab completion is included automatically in `zeroclaw completions 
     /// Run diagnostic self-tests
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
-Run diagnostic self-tests to verify the ZeroClaw installation.
+Run diagnostic self-tests to verify the KineticVM installation.
 
 By default, runs the full test suite including network checks \
 (gateway health, memory round-trip). Use --quick to skip network \
 checks for faster offline validation.
 
 Examples:
-  zeroclaw self-test             # full suite
-  zeroclaw self-test --quick     # quick checks only (no network)")]
+  kinetic self-test             # full suite
+  kinetic self-test --quick     # quick checks only (no network)")]
     SelfTest {
         /// Run quick checks only (no network)
         #[arg(long)]
@@ -1586,8 +1586,8 @@ expectations. No network calls, fully deterministic. Exits non-zero if any case 
 so it can gate CI.
 
 Examples:
-  zeroclaw eval run                                  # replay ./evals/regression
-  zeroclaw eval run --suite evals/regression --format json")]
+  kinetic eval run                                  # replay ./evals/regression
+  kinetic eval run --suite evals/regression --format json")]
     Eval {
         #[command(subcommand)]
         eval_command: EvalCommands,
@@ -1596,18 +1596,18 @@ Examples:
     /// Generate shell completion script to stdout
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
-Generate shell completion scripts for `zeroclaw`.
+Generate shell completion scripts for `kinetic`.
 
 The script is printed to stdout so it can be sourced directly:
 
 Examples (Unix shells):
-  source <(zeroclaw completions bash)
-  zeroclaw completions zsh > ~/.zfunc/_zeroclaw
-  zeroclaw completions fish > ~/.config/fish/completions/zeroclaw.fish
+  source <(kinetic completions bash)
+  kinetic completions zsh > ~/.zfunc/_kinetic
+  kinetic completions fish > ~/.config/fish/completions/kinetic.fish
 
 Examples (Windows PowerShell):
-  zeroclaw completions powershell | Out-String | Invoke-Expression
-  zeroclaw completions powershell > $PROFILE.CurrentUserAllHosts")]
+  kinetic completions powershell | Out-String | Invoke-Expression
+  kinetic completions powershell > $PROFILE.CurrentUserAllHosts")]
     Completions {
         /// Target shell
         #[arg(value_enum)]
@@ -1625,7 +1625,7 @@ Examples (Windows PowerShell):
     /// Launch the companion desktop app, or open its download page
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     #[command(long_about = "\
-Launch the ZeroClaw companion desktop app.
+Launch the KineticVM companion desktop app.
 
 The companion app is a lightweight menu bar / system tray application \
 that connects to the same gateway as the CLI. It provides quick access \
@@ -1635,15 +1635,15 @@ Use --install to open the download page for your platform. It does not \
 install anything itself.
 
 Examples:
-  zeroclaw desktop              # launch the companion app
-  zeroclaw desktop --install    # open the download page")]
+  kinetic desktop              # launch the companion app
+  kinetic desktop --install    # open the download page")]
     Desktop {
         /// Open the companion app's download page
         #[arg(long)]
         install: bool,
     },
 
-    /// Deprecated: use `zeroclaw config` instead
+    /// Deprecated: use `kinetic config` instead
     #[command(hide = true)]
     Props {
         #[command(subcommand)]
@@ -1668,9 +1668,9 @@ Pass a single locale. By default every catalogue is fetched; restrict with \
 --catalog (comma-separated): cli, tools, zerocode.
 
 Examples:
-  zeroclaw locales fetch ja
-  zeroclaw locales fetch fr --catalog cli,tools
-  zeroclaw locales fetch zh-CN --catalog zerocode")]
+  kinetic locales fetch ja
+  kinetic locales fetch fr --catalog cli,tools
+  kinetic locales fetch zh-CN --catalog zerocode")]
     Locales {
         #[command(subcommand)]
         locales_command: LocalesCommands,
@@ -1692,7 +1692,7 @@ enum LocalesCommands {
 }
 
 /// Stub enum that mirrors the old `props` subcommands so clap can still parse
-/// `zeroclaw props <anything>` and print a deprecation message.
+/// `kinetic props <anything>` and print a deprecation message.
 #[derive(Subcommand, Debug)]
 enum DeprecatedPropsCommands {
     #[command(external_subcommand)]
@@ -1702,7 +1702,7 @@ enum DeprecatedPropsCommands {
 #[cfg(feature = "agent-runtime")]
 fn quickstart_runtime_profile_for_provider(
     provider_type: &str,
-    providers: &[zeroclaw_runtime::quickstart::QuickstartTypeOption],
+    providers: &[kinetic_runtime::quickstart::QuickstartTypeOption],
     default_runtime_profile: &str,
 ) -> String {
     providers
@@ -1713,7 +1713,7 @@ fn quickstart_runtime_profile_for_provider(
         .to_string()
 }
 
-/// `zeroclaw quickstart` CLI entry — checklist UX, not a wizard.
+/// `kinetic quickstart` CLI entry — checklist UX, not a wizard.
 ///
 /// Mirrors the TUI Quickstart pane's structure: a single screen
 /// listing all six selectors with `[ ]` / `[✓]` status and a one-line
@@ -1726,9 +1726,9 @@ fn quickstart_runtime_profile_for_provider(
 /// "Create new" entry).
 ///
 /// All option lists, field shapes, presets, and the apply path come
-/// directly from `zeroclaw_runtime::quickstart` — the same module the
+/// directly from `kinetic_runtime::quickstart` — the same module the
 /// gateway and TUI surfaces consume. No RPC, no daemon: the CLI is
-/// compiled in-process with `zeroclaw-runtime` and calls
+/// compiled in-process with `kinetic-runtime` and calls
 /// `snapshot_state` / `field_shape` / `apply_with_surface` as plain
 /// functions.
 ///
@@ -1744,11 +1744,11 @@ async fn run_quickstart_cli(
     agent: Option<String>,
 ) -> anyhow::Result<()> {
     use dialoguer::{Confirm, Editor, FuzzySelect, Input};
-    use zeroclaw_config::presets::{
+    use kinetic_config::presets::{
         AgentIdentity, BuilderSubmission, ChannelQuickStart, MemoryChoice, ModelProviderChoice,
         RISK_PRESETS, SelectorChoice,
     };
-    use zeroclaw_runtime::quickstart::{
+    use kinetic_runtime::quickstart::{
         FieldSection, QuickstartTypeOption, Surface, apply_with_surface, field_shape,
         snapshot_state,
     };
@@ -1762,7 +1762,7 @@ async fn run_quickstart_cli(
                 "cli-quickstart-needs-tty",
                 "Quickstart is interactive and needs a terminal on stdin and stderr. \
                  Run it from an interactive shell, or use \
-                 `zeroclaw config set <path> <value>` for headless configuration."
+                 `kinetic config set <path> <value>` for headless configuration."
             )
         );
     }
@@ -1778,7 +1778,7 @@ async fn run_quickstart_cli(
         // `channels_visited == false` is *not* satisfied — the
         // selector still shows `[ ]`.
         channels_visited: bool,
-        peer_groups: Vec<zeroclaw_config::presets::QuickstartPeerGroup>,
+        peer_groups: Vec<kinetic_config::presets::QuickstartPeerGroup>,
         // Mirrors `channels_visited`: peer groups are optional, so an
         // empty `peer_groups` Vec only counts as satisfied once the
         // user has actually opened the selector and left it. Until
@@ -1819,7 +1819,7 @@ async fn run_quickstart_cli(
     struct AgentChoice {
         name: String,
         system_prompt: String,
-        personality_files: Vec<zeroclaw_config::presets::QuickstartPersonalityFile>,
+        personality_files: Vec<kinetic_config::presets::QuickstartPersonalityFile>,
     }
 
     impl Form {
@@ -1861,7 +1861,7 @@ async fn run_quickstart_cli(
     if providers.is_empty() {
         anyhow::bail!(
             "Quickstart could not enumerate model providers — \
-             zeroclaw_providers::list_model_providers() returned no entries."
+             kinetic_providers::list_model_providers() returned no entries."
         );
     }
 
@@ -1869,7 +1869,7 @@ async fn run_quickstart_cli(
 
     if let (Some(mp), Some(m)) = (model_provider.as_deref(), model.as_deref())
         && let Some((canonical_provider, codex_auth)) =
-            zeroclaw_runtime::quickstart::resolve_model_provider_type(mp)
+            kinetic_runtime::quickstart::resolve_model_provider_type(mp)
         && let Some(found) = providers
             .iter()
             .find(|p| p.kind.eq_ignore_ascii_case(canonical_provider))
@@ -1959,7 +1959,7 @@ async fn run_quickstart_cli(
         } else if form.channels.is_empty() {
             t(
                 "cli-quickstart-summary-channels-none",
-                "none (chat via `zeroclaw agent` only)",
+                "none (chat via `kinetic agent` only)",
             )
         } else {
             form.channels
@@ -2212,7 +2212,7 @@ async fn run_quickstart_cli(
                     .default("default".to_string())
                     .allow_empty(false)
                     .validate_with(|input: &String| {
-                        zeroclaw_config::helpers::validate_alias_key(input)
+                        kinetic_config::helpers::validate_alias_key(input)
                     })
                     .interact_text()
                 else {
@@ -2245,10 +2245,10 @@ async fn run_quickstart_cli(
                     let upgraded;
                     let d_used = if d.key.eq_ignore_ascii_case("model") {
                         let (models, _pricing, live) =
-                            zeroclaw_runtime::quickstart::model_catalog(&chosen.kind).await;
+                            kinetic_runtime::quickstart::model_catalog(&chosen.kind).await;
                         if live && !models.is_empty() {
-                            upgraded = zeroclaw_runtime::quickstart::FieldDescriptor {
-                                kind: zeroclaw_config::traits::PropKind::Enum,
+                            upgraded = kinetic_runtime::quickstart::FieldDescriptor {
+                                kind: kinetic_config::traits::PropKind::Enum,
                                 enum_variants: Some(models),
                                 ..d.clone()
                             };
@@ -2270,7 +2270,7 @@ async fn run_quickstart_cli(
                     // its schema identifier — no cherry-picking.
                     if d.key.eq_ignore_ascii_case("model") {
                         model = value;
-                    } else if !value.is_empty() && value != zeroclaw_config::traits::UNSET_DISPLAY {
+                    } else if !value.is_empty() && value != kinetic_config::traits::UNSET_DISPLAY {
                         field_buf.insert(d.key.clone(), value);
                     }
                 }
@@ -2428,7 +2428,7 @@ async fn run_quickstart_cli(
                                     "{}",
                                     t(
                                         "cli-quickstart-all-channels-bound",
-                                        "  Every configured channel is already bound to an agent. Free one with `zeroclaw config set agents.<alias>.channels ...` before reusing it here.",
+                                        "  Every configured channel is already bound to an agent. Free one with `kinetic config set agents.<alias>.channels ...` before reusing it here.",
                                     )
                                 );
                                 continue;
@@ -2494,8 +2494,7 @@ async fn run_quickstart_cli(
                                 aborted = true;
                                 break;
                             };
-                            if !value.is_empty() && value != zeroclaw_config::traits::UNSET_DISPLAY
-                            {
+                            if !value.is_empty() && value != kinetic_config::traits::UNSET_DISPLAY {
                                 extras.insert(d.key.clone(), value);
                             }
                         }
@@ -2609,7 +2608,7 @@ async fn run_quickstart_cli(
                             .filter(|s| !s.is_empty())
                             .collect();
                         form.peer_groups
-                            .push(zeroclaw_config::presets::QuickstartPeerGroup {
+                            .push(kinetic_config::presets::QuickstartPeerGroup {
                                 name,
                                 channel,
                                 external_peers,
@@ -2640,7 +2639,7 @@ async fn run_quickstart_cli(
                     .with_prompt(t("cli-quickstart-agent-alias-prompt", "Agent alias"))
                     .allow_empty(false)
                     .validate_with(|input: &String| {
-                        zeroclaw_config::helpers::validate_alias_key(input)
+                        kinetic_config::helpers::validate_alias_key(input)
                     });
                 if !default_name.is_empty() {
                     input = input.default(default_name);
@@ -2681,15 +2680,14 @@ async fn run_quickstart_cli(
                     .unwrap_or_default();
                 // Pre-render the default template set once; the per-file
                 // [t] Use template option seeds the editor from this map.
-                let template_ctx =
-                    zeroclaw_runtime::agent::personality_templates::TemplateContext {
-                        agent: trimmed_agent_name_for_templates(
-                            form.agent.as_ref().map(|a| a.name.as_str()),
-                        ),
-                        ..Default::default()
-                    };
+                let template_ctx = kinetic_runtime::agent::personality_templates::TemplateContext {
+                    agent: trimmed_agent_name_for_templates(
+                        form.agent.as_ref().map(|a| a.name.as_str()),
+                    ),
+                    ..Default::default()
+                };
                 let templates: std::collections::HashMap<String, String> =
-                    zeroclaw_runtime::agent::personality_templates::render_preset_default(
+                    kinetic_runtime::agent::personality_templates::render_preset_default(
                         &template_ctx,
                     )
                     .into_iter()
@@ -2823,12 +2821,12 @@ async fn run_quickstart_cli(
                     continue;
                 }
                 // Materialize in canonical file order; only files with content.
-                let personality_files: Vec<zeroclaw_config::presets::QuickstartPersonalityFile> =
+                let personality_files: Vec<kinetic_config::presets::QuickstartPersonalityFile> =
                     files
                         .iter()
                         .filter_map(|filename| {
                             personality_results.get(*filename).map(|content| {
-                                zeroclaw_config::presets::QuickstartPersonalityFile {
+                                kinetic_config::presets::QuickstartPersonalityFile {
                                     filename: (*filename).to_string(),
                                     content: content.clone(),
                                 }
@@ -2988,7 +2986,7 @@ fn model_path_provider_type(path: &str) -> Option<&'static str> {
         return None;
     }
     let family = parts[2];
-    zeroclaw_providers::list_model_providers()
+    kinetic_providers::list_model_providers()
         .iter()
         .find(|p| p.name == family)
         .map(|p| p.name)
@@ -3022,7 +3020,7 @@ fn alias_target_for_path<'a>(
 ) -> Option<(&'static str, &'a str)> {
     Config::map_key_sections()
         .into_iter()
-        .filter(|section| section.kind == zeroclaw_config::traits::MapKeyKind::Map)
+        .filter(|section| section.kind == kinetic_config::traits::MapKeyKind::Map)
         .filter(|section| !section.resource_key)
         .filter_map(|section| split(section.path, path).map(|key| (section.path, key)))
         .max_by_key(|(section_path, _)| section_path.len())
@@ -3040,7 +3038,7 @@ fn init_map_alias(config: &mut Config, section_arg: &str) -> Result<Option<Strin
     else {
         return Ok(None);
     };
-    match zeroclaw_config::alias_refs::create_map_key_checked(config, section_path, alias) {
+    match kinetic_config::alias_refs::create_map_key_checked(config, section_path, alias) {
         Ok(true) => Ok(Some(format!("{section_path}.{alias}"))),
         Ok(false) => Ok(None),
         Err(e) => Err(anyhow::Error::msg(e.to_string())),
@@ -3094,9 +3092,9 @@ fn ensure_map_key_for_prop_path(config: &mut Config, prop_path: &str) -> Result<
     // agents.default.enabled ...` auto-create the reserved runtime-fallback
     // agent alias, which the rename guard then refuses to ever rename.
     let created =
-        match zeroclaw_config::alias_refs::create_map_key_checked(config, section_path, key) {
+        match kinetic_config::alias_refs::create_map_key_checked(config, section_path, key) {
             Ok(created) => created,
-            Err(zeroclaw_config::alias_refs::CreateError::Reserved(_)) => return Ok(false),
+            Err(kinetic_config::alias_refs::CreateError::Reserved(_)) => return Ok(false),
             Err(e) => return Err(anyhow::Error::msg(e.to_string())),
         };
     if created {
@@ -3128,17 +3126,17 @@ fn trimmed_agent_name_for_templates(prior_name: Option<&str>) -> String {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| {
-            zeroclaw_runtime::agent::personality_templates::TemplateContext::default().agent
+            kinetic_runtime::agent::personality_templates::TemplateContext::default().agent
         })
 }
 
 #[cfg(feature = "agent-runtime")]
 fn prompt_for_field(
-    desc: &zeroclaw_runtime::quickstart::FieldDescriptor,
+    desc: &kinetic_runtime::quickstart::FieldDescriptor,
     seed: Option<&str>,
 ) -> anyhow::Result<Option<String>> {
     use dialoguer::{FuzzySelect, Input};
-    use zeroclaw_config::traits::PropKind;
+    use kinetic_config::traits::PropKind;
     if !desc.help.is_empty() {
         println!("  {}", desc.help);
     }
@@ -3180,7 +3178,7 @@ fn prompt_for_field(
         input = input.default(s.to_string());
     } else if let Some(d) = desc.default.as_deref()
         && !d.is_empty()
-        && d != zeroclaw_config::traits::UNSET_DISPLAY
+        && d != kinetic_config::traits::UNSET_DISPLAY
     {
         // `<unset>` is a display placeholder for an unset Option, not a
         // real default. Seeding it pre-fills the prompt so a bare Enter
@@ -3326,8 +3324,8 @@ enum PluginCommands {
 /// source with no WASM component has nothing to instantiate and passes.
 #[cfg(feature = "plugins-wasm")]
 async fn verify_plugin_loads_or_bail(
-    admitted: &zeroclaw::plugins::host::AdmittedSource,
-    limits: zeroclaw::plugins::component::PluginLimits,
+    admitted: &kinetic::plugins::host::AdmittedSource,
+    limits: kinetic::plugins::component::PluginLimits,
     no_verify: bool,
 ) -> Result<()> {
     let manifest = admitted.manifest();
@@ -3348,7 +3346,7 @@ async fn verify_plugin_loads_or_bail(
         );
         return Ok(());
     }
-    match zeroclaw::plugins::validate::verify_component_loads(component, manifest, limits).await {
+    match kinetic::plugins::validate::verify_component_loads(component, manifest, limits).await {
         Ok(()) => Ok(()),
         Err(error) => {
             let detail = format!("{error:#}");
@@ -3397,9 +3395,9 @@ impl PluginLoadStatus {
 /// Run the load-check for one installed plugin.
 #[cfg(feature = "plugins-wasm")]
 async fn installed_plugin_load_status(
-    host: &zeroclaw::plugins::host::PluginHost,
-    info: &zeroclaw::plugins::PluginInfo,
-    limits: zeroclaw::plugins::component::PluginLimits,
+    host: &kinetic::plugins::host::PluginHost,
+    info: &kinetic::plugins::PluginInfo,
+    limits: kinetic::plugins::component::PluginLimits,
 ) -> Result<PluginLoadStatus> {
     // The host's admitted bytes, not a reread of `wasm_path`: these are what
     // the daemon compiles, so the verdict describes what will actually run.
@@ -3409,7 +3407,7 @@ async fn installed_plugin_load_status(
     let manifest = host
         .manifest(&info.name)
         .ok_or_else(|| anyhow::Error::msg("installed plugin manifest is unavailable"))?;
-    match zeroclaw::plugins::validate::verify_component_loads(component, manifest, limits).await {
+    match kinetic::plugins::validate::verify_component_loads(component, manifest, limits).await {
         Ok(()) => Ok(PluginLoadStatus::Loads),
         Err(error) => Ok(PluginLoadStatus::Fails(format!("{error:#}"))),
     }
@@ -3423,13 +3421,13 @@ fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or(text).trim()
 }
 
-/// Render the body of `zeroclaw plugin list`.
+/// Render the body of `kinetic plugin list`.
 ///
 /// Each entry carries its load verdict only when `--verify` ran, so the default
 /// listing stays a directory read and costs no compilation.
 #[cfg(feature = "plugins-wasm")]
 fn plugin_list_lines(
-    entries: &[(zeroclaw::plugins::PluginInfo, Option<PluginLoadStatus>)],
+    entries: &[(kinetic::plugins::PluginInfo, Option<PluginLoadStatus>)],
 ) -> Vec<String> {
     if entries.is_empty() {
         return vec![t("cli-plugins-none", "No plugins installed.")];
@@ -3480,13 +3478,13 @@ fn plugin_list_lines(
     lines
 }
 
-/// Render `zeroclaw plugin info`. The load verdict is always the last line:
+/// Render `kinetic plugin info`. The load verdict is always the last line:
 /// "does this plugin work here" is the question the command exists to answer,
 /// and the manifest alone cannot answer it.
 #[cfg(feature = "plugins-wasm")]
 fn plugin_info_lines(
-    info: &zeroclaw::plugins::PluginInfo,
-    config_entries: &[(zeroclaw::plugins::PluginCapability, String)],
+    info: &kinetic::plugins::PluginInfo,
+    config_entries: &[(kinetic::plugins::PluginCapability, String)],
     status: &PluginLoadStatus,
 ) -> Vec<String> {
     let mut lines = vec![ta(
@@ -3549,13 +3547,13 @@ fn plugin_info_lines(
 #[cfg(feature = "plugins-wasm")]
 fn plugin_host_with_configured_security(
     config: &crate::config::schema::Config,
-) -> Result<zeroclaw::plugins::host::PluginHost> {
-    let mode = zeroclaw::plugins::host::PluginHost::resolve_signature_mode(
+) -> Result<kinetic::plugins::host::PluginHost> {
+    let mode = kinetic::plugins::host::PluginHost::resolve_signature_mode(
         &config.plugins.security.signature_mode,
     );
     let trusted = config.plugins.security.trusted_publisher_keys.clone();
     Ok(
-        zeroclaw::plugins::host::PluginHost::from_plugins_dir_with_security(
+        kinetic::plugins::host::PluginHost::from_plugins_dir_with_security(
             &config.plugins.resolved_plugins_dir(),
             mode,
             trusted,
@@ -3587,12 +3585,12 @@ fn plugin_host_with_configured_security(
 /// key to address. Pinned by
 /// `a_network_permission_alone_earns_a_row_so_the_operator_can_grant_reach`.
 ///
-/// [k]: zeroclaw::plugins::instance::PluginInstanceScope::config_entry_key
+/// [k]: kinetic::plugins::instance::PluginInstanceScope::config_entry_key
 #[cfg(feature = "plugins-wasm")]
 fn manifest_config_entries(
-    manifest: &zeroclaw::plugins::PluginManifest,
-) -> Result<Vec<(zeroclaw::plugins::PluginCapability, String)>> {
-    use zeroclaw::plugins::PluginPermission;
+    manifest: &kinetic::plugins::PluginManifest,
+) -> Result<Vec<(kinetic::plugins::PluginCapability, String)>> {
+    use kinetic::plugins::PluginPermission;
     let declares_network = manifest.permissions.iter().any(|p| {
         matches!(
             p,
@@ -3606,7 +3604,7 @@ fn manifest_config_entries(
     if !owns_state
         || !manifest
             .capabilities
-            .contains(&zeroclaw::plugins::PluginCapability::Tool)
+            .contains(&kinetic::plugins::PluginCapability::Tool)
     {
         return Ok(Vec::new());
     }
@@ -3616,22 +3614,22 @@ fn manifest_config_entries(
     // their production construction path lands; install must not invent one.
     // A channel-only package therefore yields no entry at all — the grant
     // ceremony stays silent for it rather than seeding a key nothing reads.
-    let scope = zeroclaw::plugins::instance::PluginInstanceScope::for_package_binding(
+    let scope = kinetic::plugins::instance::PluginInstanceScope::for_package_binding(
         manifest,
-        zeroclaw::plugins::PluginCapability::Tool,
+        kinetic::plugins::PluginCapability::Tool,
         std::iter::empty(),
     )?;
     Ok(vec![(
-        zeroclaw::plugins::PluginCapability::Tool,
+        kinetic::plugins::PluginCapability::Tool,
         scope.id().config_entry_key()?,
     )])
 }
 
 #[cfg(feature = "plugins-wasm")]
 fn installed_plugin_config_entries(
-    host: &zeroclaw::plugins::host::PluginHost,
+    host: &kinetic::plugins::host::PluginHost,
     plugin_name: &str,
-) -> Result<Vec<(zeroclaw::plugins::PluginCapability, String)>> {
+) -> Result<Vec<(kinetic::plugins::PluginCapability, String)>> {
     let manifest = host
         .manifest(plugin_name)
         .ok_or_else(|| anyhow::Error::msg("installed plugin manifest is unavailable"))?;
@@ -3656,13 +3654,13 @@ fn installed_plugin_config_entries(
 /// applies the same rule.
 #[cfg(feature = "plugins-wasm")]
 fn declared_egress_hosts(
-    host: &zeroclaw::plugins::host::PluginHost,
+    host: &kinetic::plugins::host::PluginHost,
     plugin_name: &str,
 ) -> Vec<String> {
     host.manifest(plugin_name)
         .filter(|m| {
             m.permissions
-                .contains(&zeroclaw::plugins::PluginPermission::HttpClient)
+                .contains(&kinetic::plugins::PluginPermission::HttpClient)
         })
         .map(|m| m.egress.hosts.clone())
         .unwrap_or_default()
@@ -3967,8 +3965,8 @@ fn egress_repair_incomplete_line(package: &str, reason: &str, instance_key: &str
 #[cfg(feature = "plugins-wasm")]
 fn print_egress_grant_gaps(
     config: &crate::config::schema::Config,
-    host: &zeroclaw::plugins::host::PluginHost,
-    plugins: &[zeroclaw::plugins::PluginInfo],
+    host: &kinetic::plugins::host::PluginHost,
+    plugins: &[kinetic::plugins::PluginInfo],
 ) -> Result<()> {
     if let Some(line) = egress_deployment_gap_line(config) {
         // Every plugin's policy is refused alike, and no per-plugin command
@@ -4002,7 +4000,7 @@ fn egress_runtime_inputs(
 
 /// The configuration directory every printed grant command addresses. The
 /// loaded config's path is the resolved one — `--config-dir` and
-/// `ZEROCLAW_CONFIG_DIR` are already folded in — so a command copied from this
+/// `KINETIC_CONFIG_DIR` are already folded in — so a command copied from this
 /// process acts on the profile the operator inspected, not on whichever one
 /// their shell resolves by default.
 #[cfg(feature = "plugins-wasm")]
@@ -4053,12 +4051,12 @@ fn egress_deployment_gap_line(config: &crate::config::schema::Config) -> Option<
 #[cfg(feature = "plugins-wasm")]
 fn egress_grant_gap_lines(
     config: &crate::config::schema::Config,
-    manifest: &zeroclaw::plugins::PluginManifest,
+    manifest: &kinetic::plugins::PluginManifest,
 ) -> Result<Vec<String>> {
     use crate::plugins::egress_ceremony::{
         deployment_rejection, plan_egress_gap, resolve_grant_state,
     };
-    use zeroclaw::plugins::PluginPermission;
+    use kinetic::plugins::PluginPermission;
 
     if !manifest.permissions.contains(&PluginPermission::HttpClient) {
         return Ok(Vec::new());
@@ -4256,7 +4254,7 @@ fn render_egress_gap_plan(
 async fn seed_plugin_config_entries(
     config: &mut crate::config::schema::Config,
     package: &str,
-    entries: &[(zeroclaw::plugins::PluginCapability, String)],
+    entries: &[(kinetic::plugins::PluginCapability, String)],
     declared_egress: &[String],
 ) -> Result<()> {
     if entries.is_empty() {
@@ -4277,7 +4275,7 @@ async fn seed_plugin_config_entries(
                     "warning: skipped seeding the plugin config entry: the \
                      [plugins] section on disk is malformed. Repair it, add \
                      `[[plugins.entries]]` with the instance key, then set values \
-                     with `zeroclaw config set plugins.entries.<instance-key>.config.<key>`."
+                     with `kinetic config set plugins.entries.<instance-key>.config.<key>`."
                 )
             );
         }
@@ -4362,7 +4360,7 @@ async fn seed_plugin_config_entries(
                     "cli-plugin-config-entry-seeded",
                     &[("name", instance_key)],
                     "Seeded config entry. Set plugin config values with \
-                     `zeroclaw config set plugins.entries.<instance-key>.config.<key>`."
+                     `kinetic config set plugins.entries.<instance-key>.config.<key>`."
                 )
             );
             print_egress_grant_ceremony(
@@ -4414,9 +4412,9 @@ async fn seed_plugin_config_entries(
 /// success first.
 #[cfg(feature = "plugins-wasm")]
 async fn publish_and_seed_plugin(
-    host: &mut zeroclaw::plugins::host::PluginHost,
+    host: &mut kinetic::plugins::host::PluginHost,
     config: &mut crate::config::schema::Config,
-    admitted: zeroclaw::plugins::host::AdmittedSource,
+    admitted: kinetic::plugins::host::AdmittedSource,
     announce_installed: impl FnOnce(&str),
 ) -> Result<()> {
     // A fresh publish: the package is now on disk and in the loaded set. An
@@ -4456,7 +4454,7 @@ async fn publish_and_seed_plugin(
         Err(rollback_err) => Err(seed_err.context(format!(
             "the plugin package '{name}' could not be seeded and rolling it back \
              ALSO failed ({rollback_err}); the package is still installed — remove \
-             it with `zeroclaw plugin remove {name}` before retrying"
+             it with `kinetic plugin remove {name}` before retrying"
         ))),
     }
 }
@@ -4653,7 +4651,7 @@ and POSTs the proof to the control plane. On success, writes [relay] so the daem
 registers against the relay on next start.
 
 Examples:
-  zeroclaw relay claim clm_XXXX --control https://control.zerorelay.net")]
+  kinetic relay claim clm_XXXX --control https://control.zerorelay.net")]
     Claim {
         /// One-time claim token issued by your ZeroRelay account.
         token: String,
@@ -4666,15 +4664,15 @@ Examples:
 
 /// Issue a WSS client certificate signed by the daemon's per-daemon mTLS CA.
 /// CA private-key at-rest protection sourced from the environment (decision:
-/// opt-in passphrase, 0600 floor; threat A4). `ZEROCLAW_CA_PASSPHRASE` (or a file
-/// referenced by `ZEROCLAW_CA_PASSPHRASE_FILE`) enables scrypt + XChaCha20-Poly1305
+/// opt-in passphrase, 0600 floor; threat A4). `KINETIC_CA_PASSPHRASE` (or a file
+/// referenced by `KINETIC_CA_PASSPHRASE_FILE`) enables scrypt + XChaCha20-Poly1305
 /// encryption of the CA key at rest; unset keeps the plaintext-0600 default so
 /// zero-config and headless bring-up are unaffected. The daemon sources it
 /// identically at CA generation (the WSS path) and at every CA read (enrollment
 /// + this CLI), so the on-disk form always matches.
 #[cfg(feature = "agent-runtime")]
-fn ca_key_protection_from_env() -> zeroclaw_tls::CaKeyProtection {
-    zeroclaw_tls::CaKeyProtection::from_env()
+fn ca_key_protection_from_env() -> kinetic_tls::CaKeyProtection {
+    kinetic_tls::CaKeyProtection::from_env()
 }
 
 /// Resolve the WSS mTLS policy without conflating the auto-CA and BYO-CA modes.
@@ -4683,7 +4681,7 @@ fn ca_key_protection_from_env() -> zeroclaw_tls::CaKeyProtection {
 /// CA replaces the daemon-generated CA; certificate pins apply in either mode.
 #[cfg(feature = "agent-runtime")]
 fn resolve_wss_client_auth(
-    client_auth: Option<&zeroclaw_config::schema::WssClientAuthConfig>,
+    client_auth: Option<&kinetic_config::schema::WssClientAuthConfig>,
 ) -> Result<(Option<String>, Vec<String>)> {
     if let Some(config) = client_auth
         && !config.ca_cert_path.is_empty()
@@ -4705,7 +4703,7 @@ fn resolve_wss_client_auth(
 }
 
 #[cfg(feature = "agent-runtime")]
-fn wss_server_sans(wss_cfg: &zeroclaw_config::schema::WssConfig) -> Vec<String> {
+fn wss_server_sans(wss_cfg: &kinetic_config::schema::WssConfig) -> Vec<String> {
     if wss_cfg.sans.is_empty() {
         return Vec::new();
     }
@@ -4727,7 +4725,7 @@ mod wss_client_auth_tests {
 
     #[test]
     fn auto_ca_honors_configured_client_certificate_pins() {
-        let auth = zeroclaw_config::schema::WssClientAuthConfig {
+        let auth = kinetic_config::schema::WssClientAuthConfig {
             pinned_certs: vec!["a".repeat(64)],
             ..Default::default()
         };
@@ -4742,8 +4740,8 @@ mod wss_client_auth_tests {
 
     #[test]
     fn disabled_byo_ca_is_rejected_before_listener_startup() {
-        let auth = zeroclaw_config::schema::WssClientAuthConfig {
-            ca_cert_path: "/etc/zeroclaw/client-ca.pem".into(),
+        let auth = kinetic_config::schema::WssClientAuthConfig {
+            ca_cert_path: "/etc/kinetic/client-ca.pem".into(),
             ..Default::default()
         };
 
@@ -4754,7 +4752,7 @@ mod wss_client_auth_tests {
 
     #[test]
     fn wss_server_sans_adds_local_and_configured_sans() {
-        let cfg = zeroclaw_config::schema::WssConfig {
+        let cfg = kinetic_config::schema::WssConfig {
             sans: vec!["relay.example.test".into(), " ".into()],
             ..Default::default()
         };
@@ -4767,7 +4765,7 @@ mod wss_client_auth_tests {
                 "relay.example.test".to_string(),
             ]
         );
-        assert!(wss_server_sans(&zeroclaw_config::schema::WssConfig::default()).is_empty());
+        assert!(wss_server_sans(&kinetic_config::schema::WssConfig::default()).is_empty());
     }
 }
 
@@ -4816,8 +4814,8 @@ fn issue_wss_client_cert(
     let ca_cert_pem = std::fs::read_to_string(&ca_cert)?;
     // Read the CA key honoring any at-rest passphrase, so an encrypted CA still
     // signs from the CLI (the key never leaves this process).
-    let ca_key_pem = zeroclaw_tls::load_ca_key_pem(&ca_key, &ca_key_protection_from_env())?;
-    let issued = zeroclaw_tls::issue_client_cert(&ca_cert_pem, &ca_key_pem, name)?;
+    let ca_key_pem = kinetic_tls::load_ca_key_pem(&ca_key, &ca_key_protection_from_env())?;
+    let issued = kinetic_tls::issue_client_cert(&ca_cert_pem, &ca_key_pem, name)?;
 
     // Directory 0700, private key written 0600 atomically (no world-readable window).
     if let Some(parent) = key_path.parent() {
@@ -4830,7 +4828,7 @@ fn issue_wss_client_cert(
     }
     std::fs::write(&cert_tmp_path, issued.cert_pem.as_bytes())
         .with_context(|| format!("write staged certificate {}", cert_tmp_path.display()))?;
-    if let Err(e) = zeroclaw_tls::certgen::write_private_pem(&key_tmp_path, &issued.key_pem) {
+    if let Err(e) = kinetic_tls::certgen::write_private_pem(&key_tmp_path, &issued.key_pem) {
         let _ = std::fs::remove_file(&cert_tmp_path);
         return Err(e)
             .with_context(|| format!("write staged private key {}", key_tmp_path.display()));
@@ -4844,11 +4842,11 @@ fn issue_wss_client_cert(
     // over-recorded credential is recoverable where an unrecorded one is not
     // (see CertLedger::record_issued). The row is therefore active-but-
     // undelivered until the renames below succeed.
-    use zeroclaw_runtime::security::cert_ledger::{
+    use kinetic_runtime::security::cert_ledger::{
         CertLedger, CertStatus, IssuanceActor, LedgerEntry,
     };
     let ledger_result = (|| -> Result<(CertLedger, String)> {
-        let fingerprint = zeroclaw_tls::single_cert_pem_sha256_fingerprint(&issued.cert_pem)
+        let fingerprint = kinetic_tls::single_cert_pem_sha256_fingerprint(&issued.cert_pem)
             .context("parse staged issued certificate")?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4945,7 +4943,7 @@ fn issue_wss_client_cert(
                 dest.display()
             )
         })?;
-        zeroclaw_tls::certgen::write_private_pem(&dest.join("client.key"), &issued.key_pem)
+        kinetic_tls::certgen::write_private_pem(&dest.join("client.key"), &issued.key_pem)
             .with_context(|| {
                 format!(
                     "write client.key into {}; the primary credentials were issued but \
@@ -4992,7 +4990,7 @@ fn issue_wss_client_cert(
     // the guidance rather than requiring the operator to have pinned it.
     let relay_ready = relay.enabled && !relay.url.is_empty();
     let relay_node = if relay_ready {
-        zeroclaw_runtime::relay::ensure_node_id(&config.data_dir, &relay.node_id)
+        kinetic_runtime::relay::ensure_node_id(&config.data_dir, &relay.node_id)
             .unwrap_or_else(|_| relay.node_id.clone())
     } else {
         relay.node_id.clone()
@@ -5064,7 +5062,7 @@ fn revoke_wss_client_cert(
     fingerprint: Option<String>,
     device: Option<String>,
 ) -> Result<()> {
-    use zeroclaw_runtime::security::cert_ledger::CertLedger;
+    use kinetic_runtime::security::cert_ledger::CertLedger;
     // `operator` matches the issuance actor `issue-client-cert` records.
     const ACTOR: &str = "operator";
     let ledger = CertLedger::open_at(&config.data_dir, None, effective_crl_path(config))?;
@@ -5132,7 +5130,7 @@ fn revoke_wss_client_cert(
 /// enforced.
 #[cfg(feature = "agent-runtime")]
 fn effective_crl_path(config: &Config) -> std::path::PathBuf {
-    zeroclaw_runtime::security::cert_ledger::effective_revoked_list_path(
+    kinetic_runtime::security::cert_ledger::effective_revoked_list_path(
         &config.data_dir,
         config.wss.client_auth.as_ref().map(|c| c.crl_path.as_str()),
     )
@@ -5143,7 +5141,7 @@ fn effective_crl_path(config: &Config) -> std::path::PathBuf {
 /// live certificate.
 #[cfg(feature = "agent-runtime")]
 fn list_wss_client_certs(config: &Config, json: bool) -> Result<()> {
-    use zeroclaw_runtime::security::cert_ledger::CertLedger;
+    use kinetic_runtime::security::cert_ledger::CertLedger;
     let ledger = CertLedger::open_at(&config.data_dir, None, effective_crl_path(config))?;
     let active = ledger.list_active()?;
     if json {
@@ -5496,7 +5494,7 @@ fn validated_locale(locale: &str) -> Result<String> {
     if !ok_shape {
         bail!("invalid locale code '{locale}'");
     }
-    let known = zeroclaw_runtime::i18n::available_locales();
+    let known = kinetic_runtime::i18n::available_locales();
     if !known.iter().any(|o| o.code == locale) {
         let codes: Vec<&str> = known.iter().map(|o| o.code.as_str()).collect();
         bail!(
@@ -5512,7 +5510,7 @@ async fn fetch_locales(locale: &str, catalog: Option<&str>) -> Result<()> {
     let locale = validated_locale(locale)?;
 
     let selected: Vec<&(&str, &str, &str)> = match catalog {
-        None => zeroclaw_config::schema::FTL_CATALOGS.iter().collect(),
+        None => kinetic_config::schema::FTL_CATALOGS.iter().collect(),
         Some(list) => {
             let names: Vec<&str> = list
                 .split(',')
@@ -5521,13 +5519,13 @@ async fn fetch_locales(locale: &str, catalog: Option<&str>) -> Result<()> {
                 .collect();
             let mut out = Vec::new();
             for name in &names {
-                match zeroclaw_config::schema::FTL_CATALOGS
+                match kinetic_config::schema::FTL_CATALOGS
                     .iter()
                     .find(|(n, _, _)| n == name)
                 {
                     Some(entry) => out.push(entry),
                     None => {
-                        let valid = zeroclaw_config::schema::FTL_CATALOGS
+                        let valid = kinetic_config::schema::FTL_CATALOGS
                             .iter()
                             .map(|(n, _, _)| *n)
                             .collect::<Vec<_>>()
@@ -5540,7 +5538,7 @@ async fn fetch_locales(locale: &str, catalog: Option<&str>) -> Result<()> {
         }
     };
 
-    let dest = zeroclaw_config::schema::ftl_locale_dir(&locale)?;
+    let dest = kinetic_config::schema::ftl_locale_dir(&locale)?;
     std::fs::create_dir_all(&dest).with_context(|| format!("creating {}", dest.display()))?;
     // Confinement check: the resolved dest must live under the data-dir FTL root.
     let ftl_root = dest
@@ -5633,7 +5631,7 @@ fn main() -> Result<()> {
     {
         // SAFETY: this synchronous bootstrap runs before the Tokio runtime (and
         // therefore its worker threads) is constructed.
-        unsafe { std::env::set_var("ZEROCLAW_CONFIG_DIR", config_dir) };
+        unsafe { std::env::set_var("KINETIC_CONFIG_DIR", config_dir) };
     }
 
     async_main(command)
@@ -5653,15 +5651,15 @@ fn async_main(command: clap::Command) -> Result<()> {
         .block_on(async_main_inner(command))
 }
 
-/// True when a desktop entry's `Name` deliberately identifies ZeroClaw: it is
-/// exactly "ZeroClaw" or "ZeroClaw" followed by a separator (e.g. "ZeroClaw
+/// True when a desktop entry's `Name` deliberately identifies KineticVM: it is
+/// exactly "KineticVM" or "KineticVM" followed by a separator (e.g. "KineticVM
 /// Companion"), case-insensitively. Matching the visible application name — not
-/// any field that merely contains the substring "zeroclaw" — is what stops an
-/// unrelated entry (or a lookalike like `not-zeroclaw-helper`) from qualifying.
+/// any field that merely contains the substring "kinetic" — is what stops an
+/// unrelated entry (or a lookalike like `not-kinetic-helper`) from qualifying.
 #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
-fn is_zeroclaw_name(name: &str) -> bool {
+fn is_kinetic_name(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
-    match lower.strip_prefix("zeroclaw") {
+    match lower.strip_prefix("kinetic") {
         Some("") => true,
         Some(rest) => rest.starts_with([' ', '-', '_']),
         None => false,
@@ -5790,7 +5788,7 @@ fn tokenize_exec_line(line: &str) -> Option<Vec<(String, bool)>> {
 /// Validate the field codes carried by a single tokenized `Exec` argument per the
 /// Desktop Entry Specification. Inside a token, the only permitted `%` is the
 /// escaped literal `%%`; a bare, embedded, or unknown field code (`%U`, `%Z`,
-/// `ZeroClaw-%Z.AppImage`, `--flag=%U`) invalidates the command line. The one
+/// `KineticVM-%Z.AppImage`, `--flag=%U`) invalidates the command line. The one
 /// exception is that an *argument* (never the program) that was *not* quoted may
 /// be exactly one known standalone field code such as `%U`. A field code inside a
 /// quoted argument is always rejected.
@@ -5827,7 +5825,7 @@ fn parse_exec_program(exec: &str) -> Option<String> {
     let (program, program_quoted) = tokens.next()?;
     // The executable may not be empty, carry an `=`, or contain any field code
     // (bare or embedded — only an escaped `%%` literal is allowed). This rejects
-    // a program like `ZeroClaw-%Z.AppImage` whose basename would otherwise pass
+    // a program like `KineticVM-%Z.AppImage` whose basename would otherwise pass
     // the AppImage-name check.
     if program.is_empty()
         || program.contains('=')
@@ -5846,52 +5844,52 @@ fn parse_exec_program(exec: &str) -> Option<String> {
     Some(program)
 }
 
-/// The published companion-app binary name (the `Exec` of `ZeroClaw.desktop` in
+/// The published companion-app binary name (the `Exec` of `KineticVM.desktop` in
 /// the v0.8.3 Debian package). This is the single source of truth for the
 /// supported non-AppImage executable, so discovery cannot select a lookalike
-/// such as `zeroclaw-helper` or `zeroclaw-evil`.
+/// such as `kinetic-helper` or `kinetic-evil`.
 #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
-const ZEROCLAW_DESKTOP_BIN: &str = "zeroclaw-desktop";
+const KINETIC_DESKTOP_BIN: &str = "kinetic-desktop";
 
-/// True when a desktop entry's resolved `Exec` program is a supported ZeroClaw
-/// executable: either the exact published binary `zeroclaw-desktop`, or a
-/// ZeroClaw AppImage in the published `ZeroClaw-*.AppImage` form. It is bound to
-/// those forms — not to any `zeroclaw*` basename — so a deliberate ZeroClaw
-/// `Name` cannot be paired with a lookalike (`zeroclaw-helper`, `zeroclaw-evil`)
+/// True when a desktop entry's resolved `Exec` program is a supported KineticVM
+/// executable: either the exact published binary `kinetic-desktop`, or a
+/// KineticVM AppImage in the published `KineticVM-*.AppImage` form. It is bound to
+/// those forms — not to any `kinetic*` basename — so a deliberate KineticVM
+/// `Name` cannot be paired with a lookalike (`kinetic-helper`, `kinetic-evil`)
 /// to preempt the real app.
 #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
-fn is_zeroclaw_program(program: &str) -> bool {
+fn is_kinetic_program(program: &str) -> bool {
     let Some(name) = Path::new(program).file_name().and_then(|n| n.to_str()) else {
         return false;
     };
     let lower = name.to_ascii_lowercase();
-    lower == ZEROCLAW_DESKTOP_BIN || is_zeroclaw_appimage_name(name)
+    lower == KINETIC_DESKTOP_BIN || is_kinetic_appimage_name(name)
 }
 
-/// True when a bare file name is a supported ZeroClaw AppImage in the published
-/// `ZeroClaw-*.AppImage` form: it begins with "zeroclaw-" (the separator is
+/// True when a bare file name is a supported KineticVM AppImage in the published
+/// `KineticVM-*.AppImage` form: it begins with "kinetic-" (the separator is
 /// required) and ends with ".appimage", case-insensitively. Requiring the
-/// separator rejects lookalikes with no boundary such as `ZeroClawevil.AppImage`
-/// as well as `not-zeroclaw-helper.AppImage`.
+/// separator rejects lookalikes with no boundary such as `KineticVMevil.AppImage`
+/// as well as `not-kinetic-helper.AppImage`.
 #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
-fn is_zeroclaw_appimage_name(file_name: &str) -> bool {
+fn is_kinetic_appimage_name(file_name: &str) -> bool {
     let lower = file_name.to_ascii_lowercase();
-    lower.starts_with("zeroclaw-") && lower.ends_with(".appimage")
+    lower.starts_with("kinetic-") && lower.ends_with(".appimage")
 }
 
 /// Read the `Exec` target from a desktop entry, but only when the entry is a
-/// ZeroClaw application, so an unrelated `.desktop` file is never launched.
+/// KineticVM application, so an unrelated `.desktop` file is never launched.
 /// Identity is a bounded combination, not a display name alone: the entry must
-/// be `Type=Application`, its `Name` must deliberately identify ZeroClaw (see
-/// [`is_zeroclaw_name`]), and its resolved `Exec` program must be a ZeroClaw
-/// executable (see [`is_zeroclaw_program`]). Only the `[Desktop Entry]` group is
+/// be `Type=Application`, its `Name` must deliberately identify KineticVM (see
+/// [`is_kinetic_name`]), and its resolved `Exec` program must be a KineticVM
+/// executable (see [`is_kinetic_program`]). Only the `[Desktop Entry]` group is
 /// consulted, a `Hidden=true` ("masked") entry is ignored, and the `Exec` value
 /// is parsed with the desktop-entry quoting grammar (see [`parse_exec_program`]).
 ///
 /// Gated with the `desktop` command's `which` dependency (`agent-runtime`) on
 /// Linux, matching its sole caller and the desktop-entry tests.
 #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
-fn zeroclaw_desktop_exec(contents: &str) -> Option<String> {
+fn kinetic_desktop_exec(contents: &str) -> Option<String> {
     let mut in_entry = false;
     let mut name: Option<String> = None;
     let mut exec: Option<String> = None;
@@ -5922,7 +5920,7 @@ fn zeroclaw_desktop_exec(contents: &str) -> Option<String> {
         return None;
     }
     // A launchable app entry only: `Type` must be `Application`, per the
-    // published `ZeroClaw.desktop` contract. A non-`Application` entry (e.g.
+    // published `KineticVM.desktop` contract. A non-`Application` entry (e.g.
     // `Link`/`Directory`) never resolves.
     if !entry_type
         .as_deref()
@@ -5930,11 +5928,11 @@ fn zeroclaw_desktop_exec(contents: &str) -> Option<String> {
     {
         return None;
     }
-    if !is_zeroclaw_name(&name?) {
+    if !is_kinetic_name(&name?) {
         return None;
     }
     let program = parse_exec_program(&exec?)?;
-    if !is_zeroclaw_program(&program) {
+    if !is_kinetic_program(&program) {
         return None;
     }
     Some(program)
@@ -5958,9 +5956,9 @@ fn resolve_executable(command: &str) -> Option<PathBuf> {
     if candidate.is_absolute() {
         return is_executable(candidate).then(|| candidate.to_path_buf());
     }
-    // A relative value containing a path separator (e.g. `./zeroclaw-helper`) would be
+    // A relative value containing a path separator (e.g. `./kinetic-helper`) would be
     // resolved by `which` against the current working directory, letting a desktop entry
-    // launch a binary from wherever `zeroclaw desktop` happened to run. Per the Desktop
+    // launch a binary from wherever `kinetic desktop` happened to run. Per the Desktop
     // Entry spec `Exec` must be an absolute path or a bare executable name resolved on
     // `PATH`, so reject any relative value that carries a separator.
     if command.contains('/') {
@@ -5971,7 +5969,7 @@ fn resolve_executable(command: &str) -> Option<PathBuf> {
 
 /// Maximum accepted size of one XDG desktop entry. Desktop files are small
 /// metadata documents; bounding ambient entries prevents one unrelated file
-/// from consuming unbounded memory before a valid ZeroClaw entry is reached.
+/// from consuming unbounded memory before a valid KineticVM entry is reached.
 #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
 const DESKTOP_ENTRY_MAX_BYTES: u64 = 256 * 1024;
 
@@ -6045,7 +6043,7 @@ fn collect_desktop_entries(
 }
 
 /// Scan `applications` subdirectories of the given XDG base dirs (already in
-/// precedence order) for a ZeroClaw desktop entry and return its executable
+/// precedence order) for a KineticVM desktop entry and return its executable
 /// `Exec` target. The first occurrence of a desktop-file ID wins and shadows the
 /// same ID in later (lower-precedence) directories, matching XDG masking.
 #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
@@ -6065,7 +6063,7 @@ fn discover_desktop_app(data_dirs: &[PathBuf]) -> Option<PathBuf> {
                 continue;
             };
             if let Some(target) =
-                zeroclaw_desktop_exec(&contents).and_then(|cmd| resolve_executable(&cmd))
+                kinetic_desktop_exec(&contents).and_then(|cmd| resolve_executable(&cmd))
             {
                 return Some(target);
             }
@@ -6076,7 +6074,7 @@ fn discover_desktop_app(data_dirs: &[PathBuf]) -> Option<PathBuf> {
 
 /// Discover an installed companion app on Linux that is not on `PATH`, such as
 /// an AppImage registered in the application menu. Reads the `Exec` target from
-/// a ZeroClaw XDG desktop entry (honouring `$XDG_DATA_HOME`/`$XDG_DATA_DIRS`
+/// a KineticVM XDG desktop entry (honouring `$XDG_DATA_HOME`/`$XDG_DATA_DIRS`
 /// precedence), then falls back to scanning common AppImage install locations.
 /// Returns the launchable binary/AppImage path.
 #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
@@ -6115,11 +6113,11 @@ fn find_linux_desktop_app() -> Option<PathBuf> {
         return Some(target);
     }
 
-    // Fall back to scanning common AppImage locations for a ZeroClaw image that
+    // Fall back to scanning common AppImage locations for a KineticVM image that
     // was made executable but never registered on PATH. `read_dir` order is
     // unspecified, so collect every match and pick deterministically: within
     // a directory the lexicographically greatest file name (so a higher version
-    // like `ZeroClaw-2...` is preferred over `ZeroClaw-1...`); earlier
+    // like `KineticVM-2...` is preferred over `KineticVM-1...`); earlier
     // directories in the list keep priority.
     if let Some(home) = &home {
         for dir in [home.join("Applications"), home.join(".local/bin")] {
@@ -6134,7 +6132,7 @@ fn find_linux_desktop_app() -> Option<PathBuf> {
                         .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or_default();
-                    is_zeroclaw_appimage_name(name) && is_executable(path)
+                    is_kinetic_appimage_name(name) && is_executable(path)
                 })
                 .collect();
             if !matches.is_empty() {
@@ -6201,12 +6199,12 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                 let schema = schemars::schema_for!(config::Config);
                 print!(
                     "{}",
-                    zeroclaw_config::schema_markdown::generate(&schema.to_value())
+                    kinetic_config::schema_markdown::generate(&schema.to_value())
                 );
                 return Ok(());
             }
             #[cfg(not(feature = "schema-export"))]
-            anyhow::bail!("zeroclaw was built without the 'schema-export' feature");
+            anyhow::bail!("kinetic was built without the 'schema-export' feature");
         }
         _ => {}
     }
@@ -6231,7 +6229,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
     let default_filter =
         format!("{default_floor},matrix_sdk=warn,matrix_sdk_base=warn,matrix_sdk_crypto=warn");
 
-    zeroclaw_log::install_global_subscriber(
+    kinetic_log::install_global_subscriber(
         recording_filter.as_deref(),
         &default_filter,
         cli.verbose,
@@ -6272,8 +6270,8 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
             || *tunnel_only;
         if any_legacy_flag {
             eprintln!(
-                "error: `zeroclaw onboard` is deprecated and its flags no longer apply. \
-                 Use `zeroclaw quickstart` to create a new agent, or `zeroclaw config set <path>=<value>` \
+                "error: `kinetic onboard` is deprecated and its flags no longer apply. \
+                 Use `kinetic quickstart` to create a new agent, or `kinetic config set <path>=<value>` \
                  for headless updates."
             );
             std::process::exit(2);
@@ -6282,7 +6280,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
             "{}",
             t(
                 "cli-onboard-deprecated",
-                "`zeroclaw onboard` is deprecated — use `zeroclaw quickstart`."
+                "`kinetic onboard` is deprecated — use `kinetic quickstart`."
             )
         );
         return Ok(());
@@ -6336,7 +6334,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
 
     // Standalone execution must resolve and acquire the actual runtime
     // data directory before loading the executable config. This avoids both a
-    // stale pre-lock snapshot and refusing an independent ZEROCLAW_DATA_DIR
+    // stale pre-lock snapshot and refusing an independent KINETIC_DATA_DIR
     // merely because the default instance is running.
     #[cfg(feature = "agent-runtime")]
     let standalone_command = match &cli.command {
@@ -6347,7 +6345,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
     };
     #[cfg(feature = "agent-runtime")]
     let standalone_ownership_path = if standalone_command.is_some() {
-        let (_, data_dir) = zeroclaw_config::schema::resolve_runtime_dirs().await?;
+        let (_, data_dir) = kinetic_config::schema::resolve_runtime_dirs().await?;
         Some(data_dir)
     } else {
         None
@@ -6357,11 +6355,11 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
         (standalone_command, standalone_ownership_path.as_ref())
     {
         Some(
-            zeroclaw_runtime::live_config_authority::ConfigOwnershipGuard::acquire(data_dir)
+            kinetic_runtime::live_config_authority::ConfigOwnershipGuard::acquire(data_dir)
                 .map_err(|error| {
                     if !matches!(
                         error,
-                        zeroclaw_runtime::live_config_authority::ConfigOwnershipError::AlreadyOwned { .. }
+                        kinetic_runtime::live_config_authority::ConfigOwnershipError::AlreadyOwned { .. }
                     ) {
                         return anyhow::Error::from(error);
                     }
@@ -6369,17 +6367,17 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         "cli-standalone-daemon-owned",
                         &[("command", command), ("path", &data_dir.display().to_string())],
                         format!(
-                            "Cannot run `zeroclaw {command}` while another ZeroClaw process owns the config state at {}. Stop the owning process or use its daemon-backed interface, then retry. No agent work was started.",
+                            "Cannot run `kinetic {command}` while another KineticVM process owns the config state at {}. Stop the owning process or use its daemon-backed interface, then retry. No agent work was started.",
                             data_dir.display()
                         ),
                     );
-                    ::zeroclaw_log::record!(
+                    ::kinetic_log::record!(
                         WARN,
-                        ::zeroclaw_log::Event::new(
+                        ::kinetic_log::Event::new(
                             module_path!(),
-                            ::zeroclaw_log::Action::Reject
+                            ::kinetic_log::Action::Reject
                         )
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure)
                         .with_attrs(::serde_json::json!({
                             "command": command,
                             "path": data_dir.display().to_string(),
@@ -6401,14 +6399,14 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
     // transfers continuously across reload generations in the daemon loop.
     #[cfg(feature = "agent-runtime")]
     let mut daemon_ownership = if matches!(&cli.command, Commands::Daemon { .. }) {
-        let (_, data_dir) = zeroclaw_config::schema::resolve_runtime_dirs().await?;
+        let (_, data_dir) = kinetic_config::schema::resolve_runtime_dirs().await?;
         Some((
             data_dir.clone(),
-            zeroclaw_runtime::live_config_authority::ConfigOwnershipGuard::acquire(&data_dir)
+            kinetic_runtime::live_config_authority::ConfigOwnershipGuard::acquire(&data_dir)
                 .map_err(|error| {
                     if !matches!(
                         error,
-                        zeroclaw_runtime::live_config_authority::ConfigOwnershipError::AlreadyOwned { .. }
+                        kinetic_runtime::live_config_authority::ConfigOwnershipError::AlreadyOwned { .. }
                     ) {
                         return anyhow::Error::from(error);
                     }
@@ -6416,17 +6414,17 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         "cli-standalone-daemon-owned",
                         &[("command", "daemon"), ("path", &data_dir.display().to_string())],
                         format!(
-                            "Cannot run `zeroclaw daemon` while another ZeroClaw process owns the config state at {}. Stop the owning process or use its daemon-backed interface, then retry. No agent work was started.",
+                            "Cannot run `kinetic daemon` while another KineticVM process owns the config state at {}. Stop the owning process or use its daemon-backed interface, then retry. No agent work was started.",
                             data_dir.display()
                         ),
                     );
-                    ::zeroclaw_log::record!(
+                    ::kinetic_log::record!(
                         WARN,
-                        ::zeroclaw_log::Event::new(
+                        ::kinetic_log::Event::new(
                             module_path!(),
-                            ::zeroclaw_log::Action::Reject
+                            ::kinetic_log::Action::Reject
                         )
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure)
                         .with_attrs(::serde_json::json!({
                             "command": "daemon",
                             "path": data_dir.display().to_string(),
@@ -6460,10 +6458,10 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
             config.data_dir.display()
         );
         let ownership = standalone_ownership.ok_or_else(|| {
-            ::zeroclaw_log::record!(
+            ::kinetic_log::record!(
                 ERROR,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                    .with_outcome(::kinetic_log::EventOutcome::Failure)
                     .with_attrs(::serde_json::json!({
                         "path": expected_data_dir.display().to_string(),
                     })),
@@ -6471,7 +6469,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
             );
             anyhow::Error::msg("standalone ownership was not acquired")
         })?;
-        Some(zeroclaw_runtime::LiveConfigAuthority::new_with_ownership(
+        Some(kinetic_runtime::LiveConfigAuthority::new_with_ownership(
             config.clone(),
             ownership,
         ))
@@ -6562,7 +6560,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                 "{}",
                 t(
                     "cli-otp-initialized",
-                    "Initialized OTP secret for ZeroClaw."
+                    "Initialized OTP secret for KineticVM."
                 )
             );
             println!(
@@ -6586,7 +6584,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
             } => {
                 if config.agent(&agent_alias).is_none() {
                     anyhow::bail!(
-                        "`zeroclaw agent --agent {agent_alias}` is not configured (no [agents.{agent_alias}] entry)"
+                        "`kinetic agent --agent {agent_alias}` is not configured (no [agents.{agent_alias}] entry)"
                     );
                 }
                 let agent_entry = config.model_provider_for_agent(&agent_alias);
@@ -6601,19 +6599,19 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         .models
                         .ensure(type_key, alias_key)
                         .ok_or_else(|| {
-                            ::zeroclaw_log::record!(
+                            ::kinetic_log::record!(
                                 WARN,
-                                ::zeroclaw_log::Event::new(
+                                ::kinetic_log::Event::new(
                                     module_path!(),
-                                    ::zeroclaw_log::Action::Reject
+                                    ::kinetic_log::Action::Reject
                                 )
-                                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                .with_outcome(::kinetic_log::EventOutcome::Failure)
                                 .with_attrs(::serde_json::json!({"family": type_key})),
                                 "ask CLI refused: --model-provider names an unknown family"
                             );
                             anyhow::Error::msg(format!(
                                 "Unknown model_provider family: {type_key}. \
-                             Configure a provider via `zeroclaw quickstart` or the /config editor."
+                             Configure a provider via `kinetic quickstart` or the /config editor."
                             ))
                         })?;
                     if let Some(m) = &model {
@@ -6627,7 +6625,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                 } else if config.model_provider_for_agent(&agent_alias).is_none() {
                     anyhow::bail!(
                         "No model model_provider configured for agent {agent_alias}. \
-                         Pass --model-provider <type> or run `zeroclaw quickstart` to configure one."
+                         Pass --model-provider <type> or run `kinetic quickstart` to configure one."
                     );
                 }
 
@@ -6635,7 +6633,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                     .resolved_model_provider_for_agent(&agent_alias)
                     .map(|(ty, _alias, entry)| (ty, Some(entry)))
                     .unwrap_or(("openai", None));
-                let model_provider = zeroclaw::providers::create_model_provider(
+                let model_provider = kinetic::providers::create_model_provider(
                     provider_name,
                     resolved_entry.and_then(|e| e.api_key.as_deref()),
                 )?;
@@ -6645,7 +6643,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                 match message {
                     Some(msg) => {
                         let response =
-                            zeroclaw_providers::ProviderDispatch::from_ref(&*model_provider)
+                            kinetic_providers::ProviderDispatch::from_ref(&*model_provider)
                                 .simple_chat(&msg, model_name, Some(final_temperature))
                                 .await?;
                         println!("{response}");
@@ -6674,7 +6672,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                                 }
                             };
                             let response =
-                                zeroclaw_providers::ProviderDispatch::from_ref(&*model_provider)
+                                kinetic_providers::ProviderDispatch::from_ref(&*model_provider)
                                     .simple_chat(line.trim(), model_name, Some(final_temperature))
                                     .await?;
                             println!("{response}");
@@ -6690,7 +6688,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                 let DeprecatedPropsCommands::Any(args) = props_command;
                 drop(args);
                 anyhow::bail!(
-                    "`zeroclaw props` has been renamed to `zeroclaw config`. \
+                    "`kinetic props` has been renamed to `kinetic config`. \
                      Replace `props` with `config` in your command and try again."
                 );
             }
@@ -6704,10 +6702,10 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
 
     #[cfg(feature = "agent-runtime")]
     {
-        zeroclaw_runtime::cron::scheduler::register_delivery_fn(Box::new(
+        kinetic_runtime::cron::scheduler::register_delivery_fn(Box::new(
             |config, channel, target, thread_id, output| {
                 Box::pin(async move {
-                    zeroclaw_channels::orchestrator::deliver_announcement(
+                    kinetic_channels::orchestrator::deliver_announcement(
                         &config, &channel, &target, thread_id, &output,
                     )
                     .await
@@ -6755,35 +6753,32 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
             // catches typos before any subsystem spins up.
             if config.agent(&agent_alias).is_none() {
                 anyhow::bail!(
-                    "`zeroclaw agent --agent {agent_alias}` is not configured (no [agents.{agent_alias}] entry)"
+                    "`kinetic agent --agent {agent_alias}` is not configured (no [agents.{agent_alias}] entry)"
                 );
             }
 
             // Wire CLI channel for interactive mode
-            zeroclaw_runtime::agent::loop_::register_cli_channel_fn(Box::new(|| {
-                Box::new(zeroclaw_channels::cli::CliChannel::new("cli"))
+            kinetic_runtime::agent::loop_::register_cli_channel_fn(Box::new(|| {
+                Box::new(kinetic_channels::cli::CliChannel::new("cli"))
             }));
 
-            // Wire peripheral tools (gpio_read/gpio_write etc.) for `zeroclaw agent`.
+            // Wire peripheral tools (gpio_read/gpio_write etc.) for `kinetic agent`.
             // Mirrors the registration done for the daemon command.
             #[cfg(feature = "hardware")]
-            zeroclaw_runtime::agent::loop_::register_peripheral_tools_fn(Box::new(|config| {
+            kinetic_runtime::agent::loop_::register_peripheral_tools_fn(Box::new(|config| {
                 Box::pin(async move {
-                    zeroclaw_hardware::peripherals::create_peripheral_tools(&config).await
+                    kinetic_hardware::peripherals::create_peripheral_tools(&config).await
                 })
             }));
 
             // Register channel map factory for late-bound tool handle population.
-            zeroclaw_runtime::agent::loop_::register_channel_map_fn(Box::new(
+            kinetic_runtime::agent::loop_::register_channel_map_fn(Box::new(
                 |config, agent_alias| {
-                    zeroclaw_channels::orchestrator::build_channel_map_for_agent(
-                        config,
-                        agent_alias,
-                    )
+                    kinetic_channels::orchestrator::build_channel_map_for_agent(config, agent_alias)
                 },
             ));
-            zeroclaw_runtime::agent::loop_::register_approval_channel_map_fn(Box::new(|config| {
-                zeroclaw_channels::orchestrator::build_channel_map(config)
+            kinetic_runtime::agent::loop_::register_approval_channel_map_fn(Box::new(|config| {
+                kinetic_channels::orchestrator::build_channel_map(config)
             }));
 
             Box::pin(agent::run(
@@ -6797,8 +6792,8 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                 true,
                 session_state_file,
                 None,
-                zeroclaw_api::ingress::TurnOrigin::Interactive,
-                zeroclaw_runtime::agent::loop_::AgentRunOverrides {
+                kinetic_api::ingress::TurnOrigin::Interactive,
+                kinetic_runtime::agent::loop_::AgentRunOverrides {
                     execution_capability: standalone_authority
                         .as_ref()
                         .map(|authority| authority.execution_capability()),
@@ -6817,10 +6812,10 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
             #[cfg(feature = "channel-acp-server")]
             {
                 let authority = standalone_authority.ok_or_else(|| {
-                    ::zeroclaw_log::record!(
+                    ::kinetic_log::record!(
                         ERROR,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure),
+                        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                            .with_outcome(::kinetic_log::EventOutcome::Failure),
                         "standalone ACP config ownership invariant failed"
                     );
                     anyhow::Error::msg("standalone ACP ownership was not acquired")
@@ -6836,16 +6831,16 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                     acp_config.session_timeout_secs = timeout;
                 }
                 let store =
-                    zeroclaw_infra::acp_session_store::AcpSessionStore::new(&config.data_dir)
+                    kinetic_infra::acp_session_store::AcpSessionStore::new(&config.data_dir)
                         .map(std::sync::Arc::new)
                         .inspect_err(|e| {
-                            ::zeroclaw_log::record!(
+                            ::kinetic_log::record!(
                                 WARN,
-                                ::zeroclaw_log::Event::new(
+                                ::kinetic_log::Event::new(
                                     module_path!(),
-                                    ::zeroclaw_log::Action::Note
+                                    ::kinetic_log::Action::Note
                                 )
-                                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                .with_outcome(::kinetic_log::EventOutcome::Unknown)
                                 .with_attrs(::serde_json::json!({"error": e.to_string()})),
                                 "Failed to open ACP session store"
                             );
@@ -6866,7 +6861,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
 
         Commands::Gateway { gateway_command } => {
             match gateway_command {
-                Some(zeroclaw::GatewayCommands::Restart {
+                Some(kinetic::GatewayCommands::Restart {
                     port,
                     host,
                     allow_degraded_security,
@@ -6874,22 +6869,22 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                     let _nag = gate_security_posture(&config, allow_degraded_security)?;
                     let (port, host) = resolve_gateway_addr(&config, port, host);
                     let addr = format!("{host}:{port}");
-                    ::zeroclaw_log::record!(
+                    ::kinetic_log::record!(
                         INFO,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
                             .with_attrs(::serde_json::json!({"addr": addr})),
-                        "🔄 Restarting ZeroClaw Gateway on"
+                        "🔄 Restarting KineticVM Gateway on"
                     );
 
                     // Try to gracefully shutdown existing gateway via admin endpoint
                     match shutdown_gateway(&host, port, config.gateway.path_prefix.as_deref()).await
                     {
                         Ok(()) => {
-                            ::zeroclaw_log::record!(
+                            ::kinetic_log::record!(
                                 INFO,
-                                ::zeroclaw_log::Event::new(
+                                ::kinetic_log::Event::new(
                                     module_path!(),
-                                    ::zeroclaw_log::Action::Note
+                                    ::kinetic_log::Action::Note
                                 )
                                 .with_attrs(::serde_json::json!({"addr": addr})),
                                 "✓ Existing gateway on shut down gracefully"
@@ -6901,13 +6896,13 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                                 match tokio::net::TcpStream::connect(&addr).await {
                                     Err(_) => break, // port is free
                                     Ok(_) if tokio::time::Instant::now() >= deadline => {
-                                        ::zeroclaw_log::record!(
+                                        ::kinetic_log::record!(
                                             WARN,
-                                            ::zeroclaw_log::Event::new(
+                                            ::kinetic_log::Event::new(
                                                 module_path!(),
-                                                ::zeroclaw_log::Action::Note
+                                                ::kinetic_log::Action::Note
                                             )
-                                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                                            .with_outcome(::kinetic_log::EventOutcome::Unknown)
                                             .with_attrs(::serde_json::json!({"port": port})),
                                             "Timed out waiting for port to be released"
                                         );
@@ -6921,11 +6916,11 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                             }
                         }
                         Err(e) => {
-                            ::zeroclaw_log::record!(
+                            ::kinetic_log::record!(
                                 INFO,
-                                ::zeroclaw_log::Event::new(
+                                ::kinetic_log::Event::new(
                                     module_path!(),
-                                    ::zeroclaw_log::Action::Note
+                                    ::kinetic_log::Action::Note
                                 )
                                 .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
                                 "   No existing gateway to shut down"
@@ -6936,7 +6931,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                     log_gateway_start(&host, port);
                     Box::pin(run_gateway_if_enabled(&host, port, config, None)).await
                 }
-                Some(zeroclaw::GatewayCommands::GetPaircode {
+                Some(kinetic::GatewayCommands::GetPaircode {
                     new,
                     rotate,
                     rotate_device,
@@ -7047,12 +7042,12 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                                     "   Is the gateway running? Start it with:"
                                 )
                             );
-                            println!("     zeroclaw gateway start"); // i18n-exempt: literal command/identifier example
+                            println!("     kinetic gateway start"); // i18n-exempt: literal command/identifier example
                         }
                     }
                     Ok(())
                 }
-                Some(zeroclaw::GatewayCommands::Start {
+                Some(kinetic::GatewayCommands::Start {
                     port,
                     host,
                     allow_degraded_security,
@@ -7063,7 +7058,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                     Box::pin(run_gateway_if_enabled(&host, port, config, None)).await
                 }
                 None => {
-                    // Bare `zeroclaw gateway` has no flag, so degraded security
+                    // Bare `kinetic gateway` has no flag, so degraded security
                     // is never auto-allowed here — fail closed.
                     let _nag = gate_security_posture(&config, false)?;
                     let port = config.gateway.port;
@@ -7093,16 +7088,16 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                     .is_some_and(|home| exe.starts_with(&home));
                 if under_home {
                     let install_hint = if cfg!(windows) {
-                        "Consider installing to a system-wide location (e.g. C:\\Program Files\\ZeroClaw) for service use."
+                        "Consider installing to a system-wide location (e.g. C:\\Program Files\\KineticVM) for service use."
                     } else if cfg!(target_os = "macos") {
                         "Consider installing to /usr/local/bin or /opt/homebrew/bin for system-wide service."
                     } else {
                         "Consider installing to /usr/local/bin for system-wide service."
                     };
-                    ::zeroclaw_log::record!(
+                    ::kinetic_log::record!(
                         WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+                        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                            .with_outcome(::kinetic_log::EventOutcome::Unknown),
                         &format!(
                             "Daemon running from user home directory: {}. {install_hint}",
                             exe.display()
@@ -7113,24 +7108,24 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
             let port = port.unwrap_or(config.gateway.port);
             let host = host.unwrap_or_else(|| config.gateway.host.clone());
             if port == 0 {
-                ::zeroclaw_log::record!(
+                ::kinetic_log::record!(
                     INFO,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
                         .with_attrs(::serde_json::json!({"host": host})),
-                    "🧠 Starting ZeroClaw Daemon on (random port)"
+                    "🧠 Starting KineticVM Daemon on (random port)"
                 );
             } else {
-                ::zeroclaw_log::record!(
+                ::kinetic_log::record!(
                     INFO,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
                         .with_attrs(::serde_json::json!({"host": host, "port": port})),
-                    "🧠 Starting ZeroClaw Daemon on"
+                    "🧠 Starting KineticVM Daemon on"
                 );
             }
 
             #[cfg(target_os = "linux")]
             {
-                use zeroclaw_config::schema::SandboxBackend;
+                use kinetic_config::schema::SandboxBackend;
                 // Any enabled agent whose risk_profile uses the docker
                 // sandbox triggers the warning — we just need to know
                 // *some* agent is using it.
@@ -7141,14 +7136,14 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                     .filter_map(|(alias, _)| config.risk_profile_for_agent(alias))
                     .any(|p| matches!(p.sandbox_config().backend, SandboxBackend::Docker));
                 let runtime_docker_mem = config.runtime.kind
-                    == zeroclaw_config::schema::RuntimeKind::Docker
+                    == kinetic_config::schema::RuntimeKind::Docker
                     && config
                         .runtime
                         .docker
                         .memory_limit_mb
                         .is_some_and(|mb| mb > 0);
                 if (sandbox_docker || runtime_docker_mem)
-                    && !zeroclaw_runtime::security::linux_memcg_available()
+                    && !kinetic_runtime::security::linux_memcg_available()
                 {
                     let which = match (sandbox_docker, runtime_docker_mem) {
                         (true, true) => {
@@ -7157,10 +7152,10 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         (true, false) => "security.sandbox.backend = \"docker\"",
                         _ => "runtime.kind = \"docker\"",
                     };
-                    ::zeroclaw_log::record!(
+                    ::kinetic_log::record!(
                         WARN,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                            .with_outcome(::kinetic_log::EventOutcome::Unknown)
                             .with_attrs(::serde_json::json!({"which": which})),
                         "Docker memory limits are configured but the Linux kernel has no memcg support. Affected config: . Consequence: --memory limits are silently ignored; agents can OOM the host. Fix: add 'cgroup_memory=1 cgroup_enable=memory' to /boot/firmware/cmdline.txt (Raspberry Pi) or enable CONFIG_MEMCG in your kernel, then reboot."
                     );
@@ -7169,15 +7164,15 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
 
             // Wire CLI channel for interactive mode
             #[cfg(feature = "agent-runtime")]
-            zeroclaw_runtime::agent::loop_::register_cli_channel_fn(Box::new(|| {
-                Box::new(zeroclaw_channels::cli::CliChannel::new("cli"))
+            kinetic_runtime::agent::loop_::register_cli_channel_fn(Box::new(|| {
+                Box::new(kinetic_channels::cli::CliChannel::new("cli"))
             }));
 
-            // Wire peripheral tools from zeroclaw-hardware
+            // Wire peripheral tools from kinetic-hardware
             #[cfg(feature = "hardware")]
-            zeroclaw_runtime::agent::loop_::register_peripheral_tools_fn(Box::new(|config| {
+            kinetic_runtime::agent::loop_::register_peripheral_tools_fn(Box::new(|config| {
                 Box::pin(async move {
-                    zeroclaw_hardware::peripherals::create_peripheral_tools(&config).await
+                    kinetic_hardware::peripherals::create_peripheral_tools(&config).await
                 })
             }));
 
@@ -7185,20 +7180,20 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
             // so it works for both `daemon` and `gateway start`.
 
             #[cfg(feature = "agent-runtime")]
-            zeroclaw_runtime::agent::loop_::register_channel_map_fn(Box::new(
+            kinetic_runtime::agent::loop_::register_channel_map_fn(Box::new(
                 |config, agent_alias| {
-                    zeroclaw_channels::orchestrator::live_channel_map_for_agent(config, agent_alias)
+                    kinetic_channels::orchestrator::live_channel_map_for_agent(config, agent_alias)
                 },
             ));
             #[cfg(feature = "agent-runtime")]
-            zeroclaw_runtime::agent::loop_::register_approval_channel_map_fn(Box::new(|_| {
-                zeroclaw_channels::orchestrator::live_channel_map()
+            kinetic_runtime::agent::loop_::register_approval_channel_map_fn(Box::new(|_| {
+                kinetic_channels::orchestrator::live_channel_map()
             }));
 
             // Capture the launch command now, before any in-app upgrade can
             // swap the binary on disk (after which `current_exe()` resolves to a
             // "(deleted)" path on Linux). Used by the post-loop self-respawn.
-            zeroclaw_runtime::restart::record_launch();
+            kinetic_runtime::restart::record_launch();
 
             // Reload loop. `daemon::run` returns DaemonExit::Shutdown on
             // SIGINT/SIGTERM (loop ends) or DaemonExit::Reload after a
@@ -7233,7 +7228,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                 let mut registry = daemon::DaemonRegistry::new();
                 #[cfg(feature = "agent-runtime")]
                 registry.register_channel_registry_clearer(std::sync::Arc::new(|| {
-                    zeroclaw_channels::orchestrator::prepare_live_channel_registry(true);
+                    kinetic_channels::orchestrator::prepare_live_channel_registry(true);
                 }));
 
                 let mut iteration_config = current_config.clone();
@@ -7245,36 +7240,36 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                 // is transferred back here on every reload), so this generation
                 // adopts a snapshot that no offline mutation can have raced.
                 let (expected_data_dir, ownership) = daemon_ownership.take().ok_or_else(|| {
-                    ::zeroclaw_log::record!(
+                    ::kinetic_log::record!(
                         ERROR,
-                        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure),
+                        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                            .with_outcome(::kinetic_log::EventOutcome::Failure),
                         "daemon config ownership invariant failed"
                     );
                     anyhow::Error::msg("daemon config ownership was not held for this generation")
                 })?;
-                let authority = zeroclaw_runtime::LiveConfigAuthority::new_with_ownership(
+                let authority = kinetic_runtime::LiveConfigAuthority::new_with_ownership(
                     iteration_config,
                     ownership,
                 );
                 #[cfg(feature = "gateway")]
-                let plugin_webhooks = Arc::new(zeroclaw_api::webhook::PluginWebhookRegistry::new());
+                let plugin_webhooks = Arc::new(kinetic_api::webhook::PluginWebhookRegistry::new());
                 #[cfg(feature = "gateway")]
                 let channel_plugin_webhooks = Some(Arc::clone(&plugin_webhooks));
                 #[cfg(not(feature = "gateway"))]
                 let channel_plugin_webhooks: Option<
-                    Arc<zeroclaw_api::webhook::PluginWebhookRegistry>,
+                    Arc<kinetic_api::webhook::PluginWebhookRegistry>,
                 > = None;
 
                 // SOP loading is gated on `runtime_enabled()`: `sops_dir` is unset
                 // (or empty) by default, so SOP runtime behavior is off until an
                 // operator opts in by setting a directory.
                 let (sop_engine, sop_audit) = if current_config.sop.runtime_enabled() {
-                    let mem: Arc<dyn zeroclaw_memory::Memory> = Arc::from(
-                        zeroclaw_memory::create_memory_from_config(&current_config, None)?,
+                    let mem: Arc<dyn kinetic_memory::Memory> = Arc::from(
+                        kinetic_memory::create_memory_from_config(&current_config, None)?,
                     );
                     let sop_adapters = build_sop_adapters(&current_config);
-                    let (engine, audit) = zeroclaw_runtime::sop::build_sop_engine_with_capability(
+                    let (engine, audit) = kinetic_runtime::sop::build_sop_engine_with_capability(
                         current_config.sop.clone(),
                         &current_config.decision_models,
                         &current_config.data_dir,
@@ -7292,7 +7287,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         guard.adopt_orphaned_run_settlements(unsettled.into_iter().map(|run_id| {
                             (
                                 run_id,
-                                zeroclaw_runtime::sop::OrphanedRunSettlement::DriverAborted,
+                                kinetic_runtime::sop::OrphanedRunSettlement::DriverAborted,
                             )
                         }));
                     }
@@ -7300,14 +7295,11 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                 } else {
                     let unsettled = std::mem::take(&mut carried_unsettled_sop_runs);
                     if !unsettled.is_empty() {
-                        ::zeroclaw_log::record!(
+                        ::kinetic_log::record!(
                             WARN,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Fail
-                            )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({ "run_ids": unsettled })),
+                            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                                .with_outcome(::kinetic_log::EventOutcome::Failure)
+                                .with_attrs(::serde_json::json!({ "run_ids": unsettled })),
                             "SOP runtime is disabled after reload, so runs whose driver was \
                              aborted at teardown cannot be settled; they stay Running in the \
                              store until the SOP runtime is enabled again"
@@ -7347,7 +7339,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                 // every driver it spawns in the generation's supervisor set.
                 let sop_driver_sink = match (sop_driver_supervisor.as_ref(), sop_engine.as_ref()) {
                     (Some(supervisor), Some(engine)) => {
-                        Some(zeroclaw_runtime::sop::SopDriverSink::new(
+                        Some(kinetic_runtime::sop::SopDriverSink::new(
                             current_config.clone(),
                             std::sync::Arc::clone(engine),
                             sop_audit.clone(),
@@ -7379,7 +7371,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         let sop_driver_handles = sop_dh.clone();
                         let plugin_webhooks = Arc::clone(&plugin_webhooks);
                         Box::pin(async move {
-                            Box::pin(zeroclaw_gateway::run_gateway_with_plugin_webhooks(
+                            Box::pin(kinetic_gateway::run_gateway_with_plugin_webhooks(
                                 &host,
                                 port,
                                 config,
@@ -7389,7 +7381,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                                 sop_engine,
                                 sop_audit,
                                 daemon_authority,
-                                zeroclaw_gateway::GatewaySupervision::new(
+                                kinetic_gateway::GatewaySupervision::new(
                                     ready_tx,
                                     plugin_webhooks,
                                     authority,
@@ -7413,7 +7405,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         let plugin_webhooks = plugin_webhooks.clone();
                         Box::pin(async move {
                             Box::pin(
-                                zeroclaw_channels::orchestrator::start_channels_with_authority_and_plugin_webhooks(
+                                kinetic_channels::orchestrator::start_channels_with_authority_and_plugin_webhooks(
                                     authority,
                                     cancel,
                                     sop_engine,
@@ -7438,7 +7430,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         let driver_sink = driver_sink.clone();
                         Box::pin(async move {
                             if let (Some(engine), Some(audit)) = (engine, audit) {
-                                zeroclaw_channels::orchestrator::mqtt::run_mqtt_sop_listener(
+                                kinetic_channels::orchestrator::mqtt::run_mqtt_sop_listener(
                                     &mqtt_config,
                                     engine,
                                     audit,
@@ -7449,11 +7441,11 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                                 // No SOPs directory configured — this is a valid
                                 // user state, not a misconfiguration. Skip the
                                 // listener gracefully.
-                                ::zeroclaw_log::record!(
+                                ::kinetic_log::record!(
                                     INFO,
-                                    ::zeroclaw_log::Event::new(
+                                    ::kinetic_log::Event::new(
                                         module_path!(),
-                                        ::zeroclaw_log::Action::Skip
+                                        ::kinetic_log::Action::Skip
                                     ),
                                     "MQTT SOP listener skipped — no SOPs directory configured"
                                 );
@@ -7463,9 +7455,9 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                     }
                 }));
 
-                let local_session_channel_factory: zeroclaw_runtime::rpc::dispatch::LocalRpcSessionChannelFactory =
+                let local_session_channel_factory: kinetic_runtime::rpc::dispatch::LocalRpcSessionChannelFactory =
                     std::sync::Arc::new(|config, agent_alias| {
-                        zeroclaw_channels::orchestrator::build_local_rpc_session_channels(
+                        kinetic_channels::orchestrator::build_local_rpc_session_channels(
                             config,
                             agent_alias,
                         )
@@ -7474,7 +7466,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                     let local_session_channel_factory =
                         std::sync::Arc::clone(&local_session_channel_factory);
                     Box::pin(async move {
-                        zeroclaw_runtime::rpc::local::run_local_listener_with_factory(
+                        kinetic_runtime::rpc::local::run_local_listener_with_factory(
                             ctx,
                             cancel,
                             client_count,
@@ -7527,7 +7519,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                                 // enrollment endpoint uses the same resolver so both
                                 // TLS surfaces present matching daemon identities.
                                 let server_sans = wss_server_sans(&wss_cfg);
-                                let mats = zeroclaw_tls::ensure_server_materials_protected(
+                                let mats = kinetic_tls::ensure_server_materials_protected(
                                     &data_dir.join("tls"),
                                     &server_sans,
                                     &ca_key_protection_from_env(),
@@ -7552,7 +7544,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         // the default file - revocation must never be split or
                         // disabled by an accepted configuration spelling.
                         let crl_path =
-                            zeroclaw_runtime::security::cert_ledger::effective_revoked_list_path(
+                            kinetic_runtime::security::cert_ledger::effective_revoked_list_path(
                                 &data_dir,
                                 wss_cfg.client_auth.as_ref().map(|c| c.crl_path.as_str()),
                             )
@@ -7565,7 +7557,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         // one, so a revoked cert kept authenticating.
                         {
                             let ledger =
-                                zeroclaw_runtime::security::cert_ledger::CertLedger::open_at(
+                                kinetic_runtime::security::cert_ledger::CertLedger::open_at(
                                     &data_dir,
                                     None,
                                     std::path::PathBuf::from(&crl_path),
@@ -7577,7 +7569,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                                 "materialize cert revocations before starting WSS listener",
                             )?;
                         }
-                        let tls_acceptor = zeroclaw_runtime::rpc::wss::build_tls_acceptor(
+                        let tls_acceptor = kinetic_runtime::rpc::wss::build_tls_acceptor(
                             &cert_path,
                             &key_path,
                             &ca_cert_path,
@@ -7586,7 +7578,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         )?;
                         let bind_addr: std::net::SocketAddr =
                             format!("{}:{}", wss_cfg.bind, wss_cfg.port).parse()?;
-                        let wss_limits = zeroclaw_runtime::rpc::wss::WssLimits {
+                        let wss_limits = kinetic_runtime::rpc::wss::WssLimits {
                             max_pending_handshakes: wss_cfg.max_pending_handshakes,
                             handshake_timeout: std::time::Duration::from_secs(
                                 wss_cfg.handshake_timeout_secs,
@@ -7597,7 +7589,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                                 wss_cfg.incomplete_message_timeout_secs,
                             ),
                         };
-                        zeroclaw_runtime::rpc::wss::run_wss_listener(
+                        kinetic_runtime::rpc::wss::run_wss_listener(
                             ctx,
                             cancel,
                             client_count,
@@ -7615,7 +7607,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                 // relay-routed rather than direct (finding: relay enrollment
                 // collapsed every client to the bridge's loopback identity, so
                 // one hostile client's failures locked out all relay enrollees).
-                let enroll_bridge_ports: zeroclaw_runtime::enroll::BridgePortSet =
+                let enroll_bridge_ports: kinetic_runtime::enroll::BridgePortSet =
                     std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
                 let enroll_bridge_ports_for_bridge = enroll_bridge_ports.clone();
                 let enroll_bridge_ports_for_endpoint = enroll_bridge_ports.clone();
@@ -7653,18 +7645,18 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         }
                         // Persistent Ed25519 identity the relay binds the node-id to.
                         let signing_key_pkcs8 =
-                            zeroclaw_runtime::relay::ensure_signing_key(&data_dir)?;
+                            kinetic_runtime::relay::ensure_signing_key(&data_dir)?;
                         // node_id is an unguessable 128-bit capability: auto-minted +
                         // persisted unless the operator pinned one in [relay].node_id.
-                        let node_id = zeroclaw_runtime::relay::ensure_node_id(
+                        let node_id = kinetic_runtime::relay::ensure_node_id(
                             &data_dir,
                             &relay_cfg.node_id,
                         )?;
-                        ::zeroclaw_log::record!(
+                        ::kinetic_log::record!(
                             INFO,
-                            ::zeroclaw_log::Event::new(
+                            ::kinetic_log::Event::new(
                                 module_path!(),
-                                ::zeroclaw_log::Action::Note,
+                                ::kinetic_log::Action::Note,
                             )
                             .with_attrs(::serde_json::json!({
                                 "node_id": node_id,
@@ -7686,7 +7678,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         // pinned [relay].node_id is fixed).
                         let rotation_allowed = relay_cfg.node_id.trim().is_empty();
                         let node_id_rotation_days = relay_cfg.node_id_rotation_days;
-                        let bridge_cfg = zeroclaw_runtime::relay::RelayBridgeConfig {
+                        let bridge_cfg = kinetic_runtime::relay::RelayBridgeConfig {
                             relay_addr: relay_cfg.url,
                             relay_host,
                             node_id,
@@ -7715,7 +7707,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                             node_id_rotation_days,
                             rotation_allowed,
                         };
-                        zeroclaw_runtime::relay::run_relay_bridge(bridge_cfg, cancel).await
+                        kinetic_runtime::relay::run_relay_bridge(bridge_cfg, cancel).await
                     })
                 }));
 
@@ -7769,11 +7761,11 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                             .map(|c| !c.ca_cert_path.is_empty())
                             .unwrap_or(false);
                         if byo_ca {
-                            ::zeroclaw_log::record!(
+                            ::kinetic_log::record!(
                                 WARN,
-                                ::zeroclaw_log::Event::new(
+                                ::kinetic_log::Event::new(
                                     module_path!(),
-                                    ::zeroclaw_log::Action::Note,
+                                    ::kinetic_log::Action::Note,
                                 ),
                                 "enrollment endpoint disabled: a bring-your-own CA has no signing \
                                  key; provision client certs out of band"
@@ -7791,16 +7783,16 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                             tls_dir.join("ca.crt").exists() && tls_dir.join("ca.key").exists();
                         let protection = ca_key_protection_from_env();
                         let server_sans = wss_server_sans(&wss_cfg);
-                        let mats = zeroclaw_tls::ensure_server_materials_protected(
+                        let mats = kinetic_tls::ensure_server_materials_protected(
                             &tls_dir,
                             &server_sans,
                             &protection,
                         )?;
-                        ::zeroclaw_log::record!(
+                        ::kinetic_log::record!(
                             INFO,
-                            ::zeroclaw_log::Event::new(
+                            ::kinetic_log::Event::new(
                                 module_path!(),
-                                ::zeroclaw_log::Action::Note,
+                                ::kinetic_log::Action::Note,
                             ),
                             if ca_provided {
                                 "enrollment signing against an operator-provided CA \
@@ -7811,17 +7803,17 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         );
                         let ca_cert_pem = std::fs::read_to_string(&mats.ca_cert_path)?;
                         let ca_key_pem =
-                            zeroclaw_tls::load_ca_key_pem(&mats.ca_key_path, &protection)?;
+                            kinetic_tls::load_ca_key_pem(&mats.ca_key_path, &protection)?;
                         let ca_fingerprint = {
                             let ders =
-                                zeroclaw_tls::load_certs(&mats.ca_cert_path.to_string_lossy())?;
-                            zeroclaw_tls::cert_sha256_fingerprint(ders[0].as_ref())
+                                kinetic_tls::load_certs(&mats.ca_cert_path.to_string_lossy())?;
+                            kinetic_tls::cert_sha256_fingerprint(ders[0].as_ref())
                         };
 
                         // Server-authentication-only TLS (no client cert; this is
                         // the bootstrap surface, explicitly not the mTLS plane).
                         let acceptor =
-                            zeroclaw_tls::build_tls_acceptor(&zeroclaw_tls::ServerConfigParams {
+                            kinetic_tls::build_tls_acceptor(&kinetic_tls::ServerConfigParams {
                                 cert_path: mats.server_cert_path.to_string_lossy().into_owned(),
                                 key_path: mats.server_key_path.to_string_lossy().into_owned(),
                                 client_auth: None,
@@ -7831,18 +7823,18 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         // with the renew path). The pin (relay LEAF sha256) is
                         // sourced from the relay bridge's pin store when present.
                         let relay_profile =
-                            zeroclaw_runtime::enroll::relay_profile(&data_dir, &relay_cfg);
+                            kinetic_runtime::enroll::relay_profile(&data_dir, &relay_cfg);
 
                         // One-time pairing code gates enrollment. Print it AND the
                         // CA-bound short-auth-string so the operator reads both to
                         // the client out of band (no blind trust-on-first-use).
-                        let pairing = std::sync::Arc::new(zeroclaw_config::pairing::PairingGuard::new(
+                        let pairing = std::sync::Arc::new(kinetic_config::pairing::PairingGuard::new(
                             true,
                             &[],
                             startup_pairing_code_policy,
                         ));
                         if let Some(code) = pairing.pairing_code() {
-                            let sas = zeroclaw_tls::enrollment_sas(&code, &ca_fingerprint);
+                            let sas = kinetic_tls::enrollment_sas(&code, &ca_fingerprint);
                             let enroll_bind = enroll_cfg.bind.to_string();
                             let enroll_port = enroll_cfg.port.to_string();
                             println!();
@@ -7907,10 +7899,10 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         // reading an unchanged operator-managed file: revoked in
                         // SQLite, still accepted at the handshake.
                         let ledger = std::sync::Arc::new(
-                            zeroclaw_runtime::security::cert_ledger::CertLedger::open_at(
+                            kinetic_runtime::security::cert_ledger::CertLedger::open_at(
                                 &data_dir,
                                 Some(audit),
-                                zeroclaw_runtime::security::cert_ledger::effective_revoked_list_path(
+                                kinetic_runtime::security::cert_ledger::effective_revoked_list_path(
                                     &data_dir,
                                     wss_cfg.client_auth.as_ref().map(|c| c.crl_path.as_str()),
                                 ),
@@ -7919,7 +7911,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
 
                         let bind_addr: std::net::SocketAddr =
                             format!("{}:{}", enroll_cfg.bind, enroll_cfg.port).parse()?;
-                        let server = std::sync::Arc::new(zeroclaw_runtime::enroll::EnrollServer {
+                        let server = std::sync::Arc::new(kinetic_runtime::enroll::EnrollServer {
                             bind_addr,
                             acceptor,
                             ca_cert_pem,
@@ -7939,10 +7931,10 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                             relay_profile,
                             bridge_ports: Some(enroll_bridge_ports.clone()),
                             relay_attempt_bucket:
-                                zeroclaw_runtime::enroll::RelayAttemptBucket::default(),
+                                kinetic_runtime::enroll::RelayAttemptBucket::default(),
                             paircode_admin_data_dir: Some(data_dir.clone()),
                         });
-                        zeroclaw_runtime::enroll::serve(server, cancel).await
+                        kinetic_runtime::enroll::serve(server, cancel).await
                     })
                 }));
 
@@ -7985,12 +7977,9 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                 match exit {
                     daemon::DaemonExit::Shutdown => break,
                     daemon::DaemonExit::Reload => {
-                        ::zeroclaw_log::record!(
+                        ::kinetic_log::record!(
                             INFO,
-                            ::zeroclaw_log::Event::new(
-                                module_path!(),
-                                ::zeroclaw_log::Action::Note
-                            ),
+                            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note),
                             "🔄 Daemon reload — re-reading config from disk"
                         );
                         // Continuous ownership: the previous generation drained
@@ -8000,13 +7989,13 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         daemon_ownership = Some((
                             expected_data_dir,
                             transferred_ownership.ok_or_else(|| {
-                                ::zeroclaw_log::record!(
+                                ::kinetic_log::record!(
                                     ERROR,
-                                    ::zeroclaw_log::Event::new(
+                                    ::kinetic_log::Event::new(
                                         module_path!(),
-                                        ::zeroclaw_log::Action::Fail
+                                        ::kinetic_log::Action::Fail
                                     )
-                                    .with_outcome(::zeroclaw_log::EventOutcome::Failure),
+                                    .with_outcome(::kinetic_log::EventOutcome::Failure),
                                     "daemon reload ownership transfer invariant failed"
                                 );
                                 anyhow::Error::msg("daemon reload did not retain config ownership")
@@ -8030,14 +8019,14 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
             if let Some(handle) = degraded_nag.take() {
                 handle.abort();
             }
-            if zeroclaw_runtime::restart::desktop_restart_requested() {
-                std::process::exit(zeroclaw_runtime::restart::DESKTOP_RESTART_EXIT_CODE);
+            if kinetic_runtime::restart::desktop_restart_requested() {
+                std::process::exit(kinetic_runtime::restart::DESKTOP_RESTART_EXIT_CODE);
             }
             // Bare-process auto-restart: the daemon has now torn down (the
             // gateway listener is released), so launch the upgraded binary as a
             // detached child before we exit. No-op unless an in-app upgrade
             // requested a self-respawn.
-            zeroclaw_runtime::restart::respawn_if_requested();
+            kinetic_runtime::restart::respawn_if_requested();
             Ok(())
         }
 
@@ -8065,7 +8054,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                     }
                 }
             }
-            println!("{}", t("cli-status-title", "🦀 ZeroClaw Status"));
+            println!("{}", t("cli-status-title", "🦀 KineticVM Status"));
             println!();
             println!("{}", ta("cli-status-version", &[("v", VERSION)], "Version"));
             println!(
@@ -8208,8 +8197,8 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
             }
             #[cfg(feature = "gateway")]
             {
-                match zeroclaw_gateway::resolve_web_dashboard_availability(&config) {
-                    Some(zeroclaw_gateway::WebDashboardAvailability::Embedded) => {
+                match kinetic_gateway::resolve_web_dashboard_availability(&config) {
+                    Some(kinetic_gateway::WebDashboardAvailability::Embedded) => {
                         let path = "embedded";
                         let fallback = format!("🌐 Web UI:        FOUND ({path})");
                         println!(
@@ -8217,7 +8206,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                             ta("cli-status-web-ui-found", &[("path", path)], &fallback)
                         );
                     }
-                    Some(zeroclaw_gateway::WebDashboardAvailability::Filesystem(web_dist_dir)) => {
+                    Some(kinetic_gateway::WebDashboardAvailability::Filesystem(web_dist_dir)) => {
                         let path = web_dist_dir.display().to_string();
                         let fallback = format!("🌐 Web UI:        FOUND ({path})");
                         println!(
@@ -8423,10 +8412,9 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                                     std::collections::HashMap::new()
                                 }
                             };
-                            let unpriced =
-                                zeroclaw_runtime::agent::cost::unpriced_models_in_summary(
-                                    &month_by_model,
-                                );
+                            let unpriced = kinetic_runtime::agent::cost::unpriced_models_in_summary(
+                                &month_by_model,
+                            );
                             if !unpriced.is_empty() {
                                 let uncosted_tokens: u64 =
                                     unpriced.iter().map(|m| m.unpriced_tokens).sum();
@@ -8498,7 +8486,7 @@ Add pricing to the active provider profile or supply a catalog entry."
             println!();
             println!("{}", t("cli-status-channels", "Channels:"));
             println!("{}", t("cli-status-cli-always", "  CLI:      ✅ always"));
-            for entry in zeroclaw_channels::listing::compiled_channels(&config.channels) {
+            for entry in kinetic_channels::listing::compiled_channels(&config.channels) {
                 let channel_status = if entry.configured {
                     t("cli-status-word-configured", "configured")
                 } else {
@@ -8520,7 +8508,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                 println!("  {:9} {}", entry.name, status);
             }
             let uncompiled =
-                zeroclaw_channels::listing::configured_uncompiled_channels(&config.channels);
+                kinetic_channels::listing::configured_uncompiled_channels(&config.channels);
             if !uncompiled.is_empty() {
                 println!(
                     "{}",
@@ -8597,7 +8585,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                 if !new {
                     anyhow::bail!("pass --new to mint a fresh enrollment pairing code");
                 }
-                let generated = zeroclaw_runtime::enroll::request_new_paircode(
+                let generated = kinetic_runtime::enroll::request_new_paircode(
                     &config.data_dir,
                     std::time::Duration::from_secs(timeout_secs),
                 )
@@ -8623,7 +8611,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                          Clear it to auto-mint (and enable rotation)."
                     );
                 }
-                zeroclaw_runtime::relay::request_node_id_rotation(&config.data_dir)?;
+                kinetic_runtime::relay::request_node_id_rotation(&config.data_dir)?;
                 let rotate_secs = 15.to_string();
                 println!(
                     "{}",
@@ -8679,7 +8667,7 @@ Add pricing to the active provider profile or supply a catalog entry."
         Commands::Providers {
             providers_command: None,
         } => {
-            let model_providers = zeroclaw_providers::list_model_providers();
+            let model_providers = kinetic_providers::list_model_providers();
             let configured_types: std::collections::HashSet<&str> = config
                 .providers
                 .models
@@ -8692,7 +8680,7 @@ Add pricing to the active provider profile or supply a catalog entry."
             );
             println!("  ID (use in config)  DESCRIPTION"); // i18n-exempt: literal command/identifier example
             println!("  ─────────────────── ───────────");
-            for category in zeroclaw_providers::ModelProviderCategory::all() {
+            for category in kinetic_providers::ModelProviderCategory::all() {
                 let in_category: Vec<_> = model_providers
                     .iter()
                     .filter(|p| p.category == *category)
@@ -8764,28 +8752,28 @@ Add pricing to the active provider profile or supply a catalog entry."
         Commands::Channel { channel_command } => match channel_command {
             ChannelCommands::Start => {
                 #[cfg(feature = "hardware")]
-                zeroclaw_runtime::agent::loop_::register_peripheral_tools_fn(Box::new(|config| {
+                kinetic_runtime::agent::loop_::register_peripheral_tools_fn(Box::new(|config| {
                     Box::pin(async move {
-                        zeroclaw_hardware::peripherals::create_peripheral_tools(&config).await
+                        kinetic_hardware::peripherals::create_peripheral_tools(&config).await
                     })
                 }));
 
                 let cancel = tokio_util::sync::CancellationToken::new();
-                let authority = zeroclaw_runtime::LiveConfigAuthority::new_owned(config.clone())?;
+                let authority = kinetic_runtime::LiveConfigAuthority::new_owned(config.clone())?;
                 // Single SIGINT consumer for the CLI path: cancel the
                 // shared lifecycle token. Channels subscribe via
                 // set_cancel_token so the same signal reaches all
                 // listeners deterministically.
                 let ctrlc_cancel = cancel.clone();
-                let _ctrlc_guard = ::zeroclaw_spawn::spawn!(async move {
+                let _ctrlc_guard = ::kinetic_spawn::spawn!(async move {
                     let _ = tokio::signal::ctrl_c().await;
                     ctrlc_cancel.cancel();
                 });
                 let (sop_engine, sop_audit) = if config.sop.runtime_enabled() {
-                    let mem: Arc<dyn zeroclaw_memory::Memory> =
-                        Arc::from(zeroclaw_memory::create_memory_from_config(&config, None)?);
+                    let mem: Arc<dyn kinetic_memory::Memory> =
+                        Arc::from(kinetic_memory::create_memory_from_config(&config, None)?);
                     let sop_adapters = build_sop_adapters(&config);
-                    let (engine, audit) = zeroclaw_runtime::sop::build_sop_engine_with_capability(
+                    let (engine, audit) = kinetic_runtime::sop::build_sop_engine_with_capability(
                         config.sop.clone(),
                         &config.decision_models,
                         &config.data_dir,
@@ -8815,7 +8803,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                 // every driver it spawns in the generation's supervisor set.
                 let sop_driver_sink = match (sop_driver_supervisor.as_ref(), sop_engine.as_ref()) {
                     (Some(supervisor), Some(engine)) => {
-                        Some(zeroclaw_runtime::sop::SopDriverSink::new(
+                        Some(kinetic_runtime::sop::SopDriverSink::new(
                             config.clone(),
                             std::sync::Arc::clone(engine),
                             sop_audit.clone(),
@@ -8825,7 +8813,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                     _ => None,
                 };
                 // Standalone channel mode owns the live-pricing refresher.
-                zeroclaw_runtime::daemon::spawn_pricing_refresher(&config);
+                kinetic_runtime::daemon::spawn_pricing_refresher(&config);
 
                 let result = Box::pin(channels::start_channels_with_authority(
                     authority,
@@ -8917,7 +8905,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                     "{}",
                     t(
                         "cli-desktop-download",
-                        "Opening the ZeroClaw companion app download page:"
+                        "Opening the KineticVM companion app download page:"
                     )
                 );
                 println!();
@@ -8932,7 +8920,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                             "Or install via Homebrew (coming soon):"
                         )
                     );
-                    println!("  brew install --cask zeroclaw"); // i18n-exempt: literal command/identifier example
+                    println!("  brew install --cask kinetic"); // i18n-exempt: literal command/identifier example
                 }
                 #[cfg(target_os = "linux")]
                 {
@@ -8970,13 +8958,13 @@ Add pricing to the active provider profile or supply a catalog entry."
             let desktop_bin = {
                 let mut found = None;
 
-                // 1. macOS: check /Applications/ZeroClaw.app
+                // 1. macOS: check /Applications/KineticVM.app
                 #[cfg(target_os = "macos")]
                 {
                     let app_paths = [
-                        PathBuf::from("/Applications/ZeroClaw.app/Contents/MacOS/ZeroClaw"),
+                        PathBuf::from("/Applications/KineticVM.app/Contents/MacOS/KineticVM"),
                         PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                            .join("Applications/ZeroClaw.app/Contents/MacOS/ZeroClaw"),
+                            .join("Applications/KineticVM.app/Contents/MacOS/KineticVM"),
                     ];
                     for app in &app_paths {
                         if app.is_file() {
@@ -8990,7 +8978,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                 if found.is_none()
                     && let Ok(exe) = std::env::current_exe()
                 {
-                    let sibling = exe.with_file_name("zeroclaw-desktop");
+                    let sibling = exe.with_file_name("kinetic-desktop");
                     if sibling.is_file() {
                         found = Some(sibling);
                     }
@@ -9005,9 +8993,9 @@ Add pricing to the active provider profile or supply a catalog entry."
                         directories::UserDirs::new().map(|u| u.home_dir().to_path_buf())
                 {
                     let bin_names: &[&str] = if cfg!(windows) {
-                        &["zeroclaw-desktop.exe", "zeroclaw-desktop"]
+                        &["kinetic-desktop.exe", "kinetic-desktop"]
                     } else {
-                        &["zeroclaw-desktop"]
+                        &["kinetic-desktop"]
                     };
                     // .cargo/bin works the same on Windows; .local/bin is XDG (Unix only).
                     let dirs: &[&str] = if cfg!(windows) {
@@ -9028,7 +9016,7 @@ Add pricing to the active provider profile or supply a catalog entry."
 
                 // 4. Fallback to PATH lookup
                 if found.is_none()
-                    && let Ok(path) = which::which("zeroclaw-desktop")
+                    && let Ok(path) = which::which("kinetic-desktop")
                 {
                     found = Some(path);
                 }
@@ -9050,7 +9038,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                         "{}",
                         t(
                             "cli-desktop-launching",
-                            "Launching ZeroClaw companion app..."
+                            "Launching KineticVM companion app..."
                         )
                     );
                     let _child = std::process::Command::new(&bin)
@@ -9063,7 +9051,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                         "{}",
                         t(
                             "cli-desktop-not-installed",
-                            "ZeroClaw companion app is not installed."
+                            "KineticVM companion app is not installed."
                         )
                     );
                     println!();
@@ -9075,7 +9063,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                             "Download it at"
                         )
                     );
-                    println!("  Or run: zeroclaw desktop --install"); // i18n-exempt: literal command
+                    println!("  Or run: kinetic desktop --install"); // i18n-exempt: literal command
                     println!();
                     println!(
                         "{}",
@@ -9123,7 +9111,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                 format,
             } => {
                 let suite_dir = suite.unwrap_or_else(|| config.eval.suite_dir.clone());
-                let mode: zeroclaw_eval::Mode =
+                let mode: kinetic_eval::Mode =
                     mode.unwrap_or_else(|| config.eval.mode.clone()).parse()?;
                 let report = commands::eval::run(std::path::PathBuf::from(suite_dir), mode).await?;
                 commands::eval::print_report(&report, format);
@@ -9150,7 +9138,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                             let mut out = full;
                             if let serde_json::Value::Object(ref mut map) = out {
                                 map.insert(
-                                    "x-zeroclaw-requested-path".into(),
+                                    "x-kinetic-requested-path".into(),
                                     serde_json::Value::String(prop_path.into()),
                                 );
                             }
@@ -9163,7 +9151,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                 #[cfg(not(feature = "schema-export"))]
                 {
                     let _ = path;
-                    anyhow::bail!("zeroclaw was built without the 'schema-export' feature")
+                    anyhow::bail!("kinetic was built without the 'schema-export' feature")
                 }
             }
             ConfigCommands::List { filter, secrets } => {
@@ -9209,7 +9197,7 @@ Add pricing to the active provider profile or supply a catalog entry."
             ConfigCommands::Get { path, json } => {
                 let known_paths: Vec<String> =
                     config.prop_fields().into_iter().map(|f| f.name).collect();
-                let path = zeroclaw_config::helpers::resolve_field_path(&known_paths, &path);
+                let path = kinetic_config::helpers::resolve_field_path(&known_paths, &path);
                 if Config::prop_is_secret(&path) {
                     let entries = config.prop_fields();
                     let populated = entries
@@ -9265,7 +9253,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                             // Same single-source-of-truth helper the gateway
                             // uses; never hardcode a code at the call site.
                             let api_err =
-                                zeroclaw_config::api_error::ConfigApiError::from_validation(
+                                kinetic_config::api_error::ConfigApiError::from_validation(
                                     anyhow::Error::msg(e.to_string()),
                                 )
                                 .with_path(&path);
@@ -9288,23 +9276,23 @@ Add pricing to the active provider profile or supply a catalog entry."
             } => {
                 let known_paths: Vec<String> =
                     config.prop_fields().into_iter().map(|f| f.name).collect();
-                let mut path = zeroclaw_config::helpers::resolve_field_path(&known_paths, &path);
+                let mut path = kinetic_config::helpers::resolve_field_path(&known_paths, &path);
                 if ensure_map_key_for_prop_path(&mut config, &path)? {
                     let known_paths: Vec<String> =
                         config.prop_fields().into_iter().map(|f| f.name).collect();
-                    path = zeroclaw_config::helpers::resolve_field_path(&known_paths, &path);
+                    path = kinetic_config::helpers::resolve_field_path(&known_paths, &path);
                 }
                 let selected_value = if no_interactive {
                     value.ok_or_else(|| {
-                        ::zeroclaw_log::record!(
+                        ::kinetic_log::record!(
                             WARN,
-                            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Reject)
+                                .with_outcome(::kinetic_log::EventOutcome::Failure)
                                 .with_attrs(::serde_json::json!({"path": path})),
                             "config set --no-interactive refused: positional value missing"
                         );
                         anyhow::Error::msg(format!(
-                            "Value required in --no-interactive mode. Usage: zeroclaw config set --no-interactive {path} <value>"
+                            "Value required in --no-interactive mode. Usage: kinetic config set --no-interactive {path} <value>"
                         ))
                     })?
                 } else if Config::prop_is_secret(&path) {
@@ -9332,7 +9320,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                         .nth(3)
                         .map(|alias| format!("{provider_type}.{alias}"));
                     let catalog_selector = provider_ref.as_deref().unwrap_or(provider_type);
-                    let catalog = zeroclaw_runtime::quickstart::model_catalog_with_config_result(
+                    let catalog = kinetic_runtime::quickstart::model_catalog_with_config_result(
                         Some(&config),
                         catalog_selector,
                     )
@@ -9431,13 +9419,13 @@ Add pricing to the active provider profile or supply a catalog entry."
                             .collect::<Vec<_>>()
                             .join(", ")
                     } else {
-                        anyhow::bail!("Value required. Usage: zeroclaw config set {path} <value>");
+                        anyhow::bail!("Value required. Usage: kinetic config set {path} <value>");
                     }
                 };
 
                 #[cfg(feature = "agent-runtime")]
                 let _offline_ownership =
-                    if zeroclaw_config::alias_refs::agent_alias_for_prop_path(&path).is_some() {
+                    if kinetic_config::alias_refs::agent_alias_for_prop_path(&path).is_some() {
                         match crate::alias_cli::route_agent_mutation(
                             &mut config,
                             "config/set",
@@ -9477,7 +9465,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                 if ensure_map_key_for_prop_path(&mut config, &path)? {
                     let known_paths: Vec<String> =
                         config.prop_fields().into_iter().map(|f| f.name).collect();
-                    path = zeroclaw_config::helpers::resolve_field_path(&known_paths, &path);
+                    path = kinetic_config::helpers::resolve_field_path(&known_paths, &path);
                 }
                 config.set_prop_persistent(&path, &selected_value)?;
                 Box::pin(config.save_dirty()).await?;
@@ -9516,7 +9504,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                     .await?
                     {
                         crate::alias_cli::AgentMutationRoute::Daemon(value) => {
-                            let result: zeroclaw_runtime::rpc::types::ConfigMapKeyCreateResult =
+                            let result: kinetic_runtime::rpc::types::ConfigMapKeyCreateResult =
                                 serde_json::from_value(value)
                                     .context("decode daemon config-init response")?;
                             let initialized = result
@@ -9605,7 +9593,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                         "\n{}",
                         t(
                             "cli-config-review-hint",
-                            "Run `zeroclaw config list` to review, then set required fields."
+                            "Run `kinetic config list` to review, then set required fields."
                         )
                     );
                 }
@@ -9751,7 +9739,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                     });
                     matches!(op_name, Some("add" | "replace" | "remove"))
                         && path.as_deref().is_some_and(|path| {
-                            zeroclaw_config::alias_refs::agent_alias_for_prop_path(path).is_some()
+                            kinetic_config::alias_refs::agent_alias_for_prop_path(path).is_some()
                         })
                 }) {
                     match crate::alias_cli::route_agent_mutation(
@@ -9856,13 +9844,13 @@ Add pricing to the active provider profile or supply a catalog entry."
                             let value = match op.get("value") {
                                 Some(value) => value,
                                 None => {
-                                    ::zeroclaw_log::record!(
+                                    ::kinetic_log::record!(
                                         WARN,
-                                        ::zeroclaw_log::Event::new(
+                                        ::kinetic_log::Event::new(
                                             module_path!(),
-                                            ::zeroclaw_log::Action::Reject
+                                            ::kinetic_log::Action::Reject
                                         )
-                                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                                        .with_outcome(::kinetic_log::EventOutcome::Failure)
                                         .with_attrs(
                                             ::serde_json::json!({
                                                 "op": op_name,
@@ -9971,7 +9959,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                                     config_patch_fail_json_or_human(json, api_err, human)?
                                 }
                             };
-                            let want_str = match zeroclaw_config::typed_value::coerce_for_set_prop(
+                            let want_str = match kinetic_config::typed_value::coerce_for_set_prop(
                                 want,
                                 config_patch_prop_kind(&config, &path),
                             ) {
@@ -10091,7 +10079,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                 if !daemon_running {
                     eprintln!(
                         "Note: gateway does not appear to be running at {host}:{port}. \
-                         Start it with `zeroclaw service start` (background) or `zeroclaw daemon` (foreground) to load the explorer."
+                         Start it with `kinetic service start` (background) or `kinetic daemon` (foreground) to load the explorer."
                     );
                 }
                 Ok(())
@@ -10107,13 +10095,13 @@ Add pricing to the active provider profile or supply a catalog entry."
             }
             ConfigCommands::Generate { version, encrypt } => {
                 let target = version.unwrap_or(crate::config::migration::CURRENT_SCHEMA_VERSION);
-                let zeroclaw_dir = config
+                let kinetic_dir = config
                     .config_path
                     .parent()
                     .map(std::path::Path::to_path_buf);
                 let opts = crate::config::migration::GenerateOptions {
                     encrypt_secrets: encrypt,
-                    secret_store_dir: zeroclaw_dir.as_deref(),
+                    secret_store_dir: kinetic_dir.as_deref(),
                 };
                 let toml_out = crate::config::migration::generate(target, &opts)?;
                 print!("{toml_out}");
@@ -10125,7 +10113,7 @@ Add pricing to the active provider profile or supply a catalog entry."
             let DeprecatedPropsCommands::Any(args) = props_command;
             drop(args);
             anyhow::bail!(
-                "`zeroclaw props` has been renamed to `zeroclaw config`. \
+                "`kinetic props` has been renamed to `kinetic config`. \
                  Replace `props` with `config` in your command and try again."
             );
         }
@@ -10136,7 +10124,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                 let host = plugin_host_with_configured_security(&config)?;
                 let plugins = host.list_plugins();
                 if verify {
-                    let limits = zeroclaw_runtime::plugin_runtime::plugin_limits(&config);
+                    let limits = kinetic_runtime::plugin_runtime::plugin_limits(&config);
                     let mut entries = Vec::new();
                     for info in &plugins {
                         entries.push((
@@ -10159,7 +10147,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                             "cli-plugin-legacy-detected",
                             &[("path", &legacy.display().to_string()), ("target", &target)],
                             "Note: plugins in a legacy location are not loaded by the agent — \
-                             run `zeroclaw plugin migrate` to move them.",
+                             run `kinetic plugin migrate` to move them.",
                         )
                     );
                 }
@@ -10168,7 +10156,7 @@ Add pricing to the active provider profile or supply a catalog entry."
             PluginCommands::Search { query, registry } => {
                 let registry_url = plugin_registry::registry_url(registry.as_deref());
                 let index = plugin_registry::fetch_registry_index(&registry_url).await?;
-                zeroclaw::plugins::registry::write_cached_registry_index(
+                kinetic::plugins::registry::write_cached_registry_index(
                     &config.data_dir,
                     &registry_url,
                     &index,
@@ -10224,11 +10212,11 @@ Add pricing to the active provider profile or supply a catalog entry."
             } => {
                 if plugin_registry::looks_like_url(&source) {
                     bail!(
-                        "`zeroclaw plugin install <url>` is not supported; use `--registry <url>` with a plugin name, or install a local plugin path"
+                        "`kinetic plugin install <url>` is not supported; use `--registry <url>` with a plugin name, or install a local plugin path"
                     );
                 }
                 let mut host = plugin_host_with_configured_security(&config)?;
-                let limits = zeroclaw_runtime::plugin_runtime::plugin_limits(&config);
+                let limits = kinetic_runtime::plugin_runtime::plugin_limits(&config);
                 if plugin_registry::is_local_plugin_source(&source) {
                     let admitted = host.admit_source(&source)?;
                     verify_plugin_loads_or_bail(&admitted, limits, no_verify).await?;
@@ -10308,7 +10296,7 @@ Add pricing to the active provider profile or supply a catalog entry."
             }
             PluginCommands::Info { name } => {
                 let host = plugin_host_with_configured_security(&config)?;
-                let limits = zeroclaw_runtime::plugin_runtime::plugin_limits(&config);
+                let limits = kinetic_runtime::plugin_runtime::plugin_limits(&config);
                 match host.get_plugin(&name) {
                     Some(info) => {
                         let config_entries = installed_plugin_config_entries(&host, &info.name)?;
@@ -10346,7 +10334,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                 let legacy_dirs = crate::config::schema::legacy_plugin_dirs_with_entries(&config);
                 let mut total = 0usize;
                 for legacy in &legacy_dirs {
-                    let moved = zeroclaw::plugins::host::migrate_plugins_dir(legacy, &target)?;
+                    let moved = kinetic::plugins::host::migrate_plugins_dir(legacy, &target)?;
                     if moved > 0 {
                         println!(
                             "{}",
@@ -10425,7 +10413,7 @@ fn handle_estop_command(
                         "{}",
                         t(
                             "cli-otp-initialized",
-                            "Initialized OTP secret for ZeroClaw."
+                            "Initialized OTP secret for KineticVM."
                         )
                     );
                     println!(
@@ -10585,22 +10573,22 @@ fn write_shell_completion<W: Write>(shell: CompletionShell, writer: &mut W) -> R
     match shell {
         CompletionShell::Bash => {
             generate(shells::Bash, &mut cmd, bin_name.clone(), writer);
-            // Wrap clap's _zeroclaw to inject dynamic config path completion
+            // Wrap clap's _kinetic to inject dynamic config path completion
             writeln!(
                 writer,
                 r#"
-# Dynamic completion for zeroclaw config get/set paths
-if type _zeroclaw &>/dev/null; then
+# Dynamic completion for kinetic config get/set paths
+if type _kinetic &>/dev/null; then
     # Capture the original clap-generated function body so the wrapper
     # can fall back to it without entering an infinite recursion loop.
-    eval "$(declare -f _zeroclaw | sed '1s/_zeroclaw/_zeroclaw_clap_orig/')"
-    _zeroclaw() {{
+    eval "$(declare -f _kinetic | sed '1s/_kinetic/_kinetic_clap_orig/')"
+    _kinetic() {{
         local cur="${{COMP_WORDS[COMP_CWORD]}}"
         if [[ "${{COMP_WORDS[*]}}" =~ "config "(get|set)" " ]]; then
-            COMPREPLY=($(compgen -W "$(zeroclaw config complete "$cur" 2>/dev/null)" -- "$cur"))
+            COMPREPLY=($(compgen -W "$(kinetic config complete "$cur" 2>/dev/null)" -- "$cur"))
             return
         fi
-        _zeroclaw_clap_orig "$@"
+        _kinetic_clap_orig "$@"
     }}
 fi"#
             )?;
@@ -10610,28 +10598,28 @@ fi"#
             writeln!(
                 writer,
                 r#"
-# Dynamic completion for zeroclaw config get/set paths
-complete -c zeroclaw -n '__fish_seen_subcommand_from config; and __fish_seen_subcommand_from get set' \
-    -a '(zeroclaw config complete (commandline -ct) 2>/dev/null)' -f"#
+# Dynamic completion for kinetic config get/set paths
+complete -c kinetic -n '__fish_seen_subcommand_from config; and __fish_seen_subcommand_from get set' \
+    -a '(kinetic config complete (commandline -ct) 2>/dev/null)' -f"#
             )?;
         }
         CompletionShell::Zsh => {
             generate(shells::Zsh, &mut cmd, bin_name.clone(), writer);
-            // Wrap clap's _zeroclaw to inject dynamic config path completion
+            // Wrap clap's _kinetic to inject dynamic config path completion
             writeln!(
                 writer,
                 r#"
-# Dynamic completion for zeroclaw config get/set paths
-if (( $+functions[_zeroclaw] )); then
-    functions[_zeroclaw_clap_orig]=$functions[_zeroclaw]
-    _zeroclaw() {{
+# Dynamic completion for kinetic config get/set paths
+if (( $+functions[_kinetic] )); then
+    functions[_kinetic_clap_orig]=$functions[_kinetic]
+    _kinetic() {{
         if [[ "${{words[*]}}" == *"config "(get|set)* ]] && (( CURRENT > 3 )); then
             local -a props
-            props=(${{(f)"$(zeroclaw config complete "$words[CURRENT]" 2>/dev/null)"}})
+            props=(${{(f)"$(kinetic config complete "$words[CURRENT]" 2>/dev/null)"}})
             compadd -a props
             return
         fi
-        _zeroclaw_clap_orig "$@"
+        _kinetic_clap_orig "$@"
     }}
 fi"#
             )?;
@@ -10660,18 +10648,18 @@ fn resolve_gateway_addr(config: &Config, port: Option<u16>, host: Option<String>
 #[cfg(feature = "agent-runtime")]
 fn log_gateway_start(host: &str, port: u16) {
     if port == 0 {
-        ::zeroclaw_log::record!(
+        ::kinetic_log::record!(
             INFO,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
                 .with_attrs(::serde_json::json!({"host": host})),
-            "🚀 Starting ZeroClaw Gateway on (random port)"
+            "🚀 Starting KineticVM Gateway on (random port)"
         );
     } else {
-        ::zeroclaw_log::record!(
+        ::kinetic_log::record!(
             INFO,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
                 .with_attrs(::serde_json::json!({"host": host, "port": port})),
-            "🚀 Starting ZeroClaw Gateway on"
+            "🚀 Starting KineticVM Gateway on"
         );
     }
 }
@@ -10691,10 +10679,10 @@ async fn shutdown_gateway(host: &str, port: u16, path_prefix: Option<&str>) -> R
         Ok(response) if response.status().is_success() => Ok(()),
         Ok(response) => {
             let status = response.status();
-            ::zeroclaw_log::record!(
+            ::kinetic_log::record!(
                 WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                    .with_outcome(::kinetic_log::EventOutcome::Failure)
                     .with_attrs(::serde_json::json!({"endpoint": url, "status": status.as_u16()})),
                 "gateway admin shutdown returned non-success status"
             );
@@ -10703,10 +10691,10 @@ async fn shutdown_gateway(host: &str, port: u16, path_prefix: Option<&str>) -> R
             )))
         }
         Err(e) => {
-            ::zeroclaw_log::record!(
+            ::kinetic_log::record!(
                 WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                    .with_outcome(::kinetic_log::EventOutcome::Failure)
                     .with_attrs(::serde_json::json!({"endpoint": url, "error": format!("{}", e)})),
                 "gateway admin shutdown: connect failed"
             );
@@ -11024,11 +11012,11 @@ async fn fetch_paircode(
     // The pairing-code admin routes accept only this run's admin token, which
     // the gateway writes owner-only into its data directory at startup.
     let admin_token =
-        zeroclaw_config::pairing::read_gateway_admin_token(data_dir).ok_or_else(|| {
+        kinetic_config::pairing::read_gateway_admin_token(data_dir).ok_or_else(|| {
             anyhow::Error::msg(format!(
                 "No gateway admin token at {}. Run this on the gateway host, as the user that \
              runs the gateway, while the gateway is running.",
-                zeroclaw_config::pairing::gateway_admin_token_path(data_dir).display()
+                kinetic_config::pairing::gateway_admin_token_path(data_dir).display()
             ))
         })?;
     let client = reqwest::Client::new();
@@ -11042,7 +11030,7 @@ async fn fetch_paircode(
         client
             .post(&url)
             .header(
-                zeroclaw_config::pairing::GATEWAY_ADMIN_TOKEN_HEADER,
+                kinetic_config::pairing::GATEWAY_ADMIN_TOKEN_HEADER,
                 &admin_token,
             )
             .timeout(std::time::Duration::from_secs(5))
@@ -11053,7 +11041,7 @@ async fn fetch_paircode(
         client
             .get(&url)
             .header(
-                zeroclaw_config::pairing::GATEWAY_ADMIN_TOKEN_HEADER,
+                kinetic_config::pairing::GATEWAY_ADMIN_TOKEN_HEADER,
                 &admin_token,
             )
             .timeout(std::time::Duration::from_secs(5))
@@ -11062,10 +11050,10 @@ async fn fetch_paircode(
     };
 
     let response = response.map_err(|e| {
-        ::zeroclaw_log::record!(
+        ::kinetic_log::record!(
             WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                .with_outcome(::kinetic_log::EventOutcome::Failure)
                 .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
             "gateway paircode fetch: connect failed"
         );
@@ -11074,10 +11062,10 @@ async fn fetch_paircode(
 
     let status = response.status();
     let json: serde_json::Value = response.json().await.map_err(|e| {
-        ::zeroclaw_log::record!(
+        ::kinetic_log::record!(
             WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                .with_outcome(::kinetic_log::EventOutcome::Failure)
                 .with_attrs(
                     ::serde_json::json!({"error": format!("{}", e), "status": status.as_u16()})
                 ),
@@ -11099,10 +11087,10 @@ async fn fetch_paircode(
 
     if json.get("success").and_then(|v| v.as_bool()) != Some(true) {
         if !status.is_success() {
-            ::zeroclaw_log::record!(
+            ::kinetic_log::record!(
                 WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                    .with_outcome(::kinetic_log::EventOutcome::Failure)
                     .with_attrs(::serde_json::json!({"status": status.as_u16()})),
                 "gateway paircode fetch returned non-success status"
             );
@@ -11165,7 +11153,7 @@ fn paircode_no_code_message(
         PaircodeAction::Show => {
             lines.push(t(
                 "cli-pairing-show-only",
-                "`zeroclaw gateway get-paircode` only displays an existing active code; it does not mint a new one.",
+                "`kinetic gateway get-paircode` only displays an existing active code; it does not mint a new one.",
             ));
             lines.push(t(
                 "cli-pairing-pair-another",
@@ -11244,7 +11232,7 @@ fn paircode_command(
     default_port: u16,
     flag: Option<&str>,
 ) -> String {
-    let mut command = "    zeroclaw gateway get-paircode".to_string();
+    let mut command = "    kinetic gateway get-paircode".to_string();
     if let Some(flag) = flag {
         command.push(' ');
         command.push_str(flag);
@@ -11275,7 +11263,7 @@ fn indent_paircode_lines(lines: Vec<String>) -> String {
 
 // Interactive CLI input helpers used by `auth paste-token` /
 // `auth setup-token` / `auth paste-redirect`. The dialoguer dep belongs
-// to the binary; auth/mod.rs in zeroclaw-providers shouldn't pull it in,
+// to the binary; auth/mod.rs in kinetic-providers shouldn't pull it in,
 // so reads live here and trait flows accept the resulting string.
 
 #[cfg(feature = "agent-runtime")]
@@ -11380,7 +11368,7 @@ async fn run_inline_provider_auth(auth: InlineProviderAuth, config: &mut Config)
             },
             t(
                 "cli-quickstart-auth-codex-skip-hint",
-                "  Finish later with: zeroclaw auth login --model-provider openai-codex",
+                "  Finish later with: kinetic auth login --model-provider openai-codex",
             ),
         ),
         InlineProviderAuth::AnthropicSetupToken { alias } => (
@@ -11559,7 +11547,7 @@ fn device_poll_wait(interval_secs: u64, remaining: std::time::Duration) -> std::
 
 #[cfg(feature = "agent-runtime")]
 async fn handle_oidc_command(oidc_command: OidcCommands, config: &Config) -> Result<()> {
-    use zeroclaw_runtime::security::auth_provider::{DevicePollOutcome, Enrollment};
+    use kinetic_runtime::security::auth_provider::{DevicePollOutcome, Enrollment};
 
     enum OidcFlow {
         Device,
@@ -11596,7 +11584,7 @@ async fn handle_oidc_command(oidc_command: OidcCommands, config: &Config) -> Res
     let token = match flow {
         OidcFlow::ClientCredentials => enrollment.client_credentials().await?,
         OidcFlow::Browser => {
-            use zeroclaw_runtime::security::auth_provider::LoopbackListener;
+            use kinetic_runtime::security::auth_provider::LoopbackListener;
             let listener = LoopbackListener::bind().await?;
             let pkce = enrollment.pkce_start(&listener.redirect_uri()).await?;
             eprintln!(
@@ -11699,7 +11687,7 @@ async fn handle_oidc_command(oidc_command: OidcCommands, config: &Config) -> Res
             &[("alias", &alias)],
             format!(
                 "Enrolled with [oidc.{alias}]. The access token is on stdout; present it as \
-                 auth_token in the RPC handshake or export it as ZEROCLAW_AUTH_TOKEN."
+                 auth_token in the RPC handshake or export it as KINETIC_AUTH_TOKEN."
             ),
         )
     );
@@ -11868,7 +11856,7 @@ async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Res
                 }
                 auth::RefreshStatus::NoProfile => {
                     bail!(
-                        "No auth profile found. Run `zeroclaw auth login --model-provider <provider>` first.",
+                        "No auth profile found. Run `kinetic auth login --model-provider <provider>` first.",
                     )
                 }
             }
@@ -11979,10 +11967,10 @@ async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Res
 fn running_executable_for_remediation() -> Option<std::path::PathBuf> {
     #[cfg(feature = "agent-runtime")]
     {
-        if let Some(executable) = zeroclaw_runtime::restart::recorded_launch_executable() {
+        if let Some(executable) = kinetic_runtime::restart::recorded_launch_executable() {
             return Some(executable.to_path_buf());
         }
-        if zeroclaw_runtime::restart::launch_command_recorded() {
+        if kinetic_runtime::restart::launch_command_recorded() {
             return None;
         }
         std::env::current_exe().ok()
@@ -11996,7 +11984,7 @@ fn running_executable_for_remediation() -> Option<std::path::PathBuf> {
 
 #[cfg(feature = "agent-runtime")]
 fn gate_security_posture(
-    config: &zeroclaw::config::Config,
+    config: &kinetic::config::Config,
     allow_degraded: bool,
 ) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
     if config.degraded_security.is_empty() {
@@ -12030,14 +12018,14 @@ fn gate_security_posture(
         );
     }
     let config_path = config.config_path.display().to_string();
-    let handle = ::zeroclaw_spawn::spawn!(async move {
+    let handle = ::kinetic_spawn::spawn!(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             ticker.tick().await;
-            ::zeroclaw_log::record!(
+            ::kinetic_log::record!(
                 WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                    .with_outcome(::kinetic_log::EventOutcome::Unknown)
                     .with_attrs(::serde_json::json!({ "degraded_security": sections })),
                 &format!(
                     "Running with DEGRADED security: sections ({sections}) were reset to \
@@ -12070,24 +12058,24 @@ fn gate_security_posture(
 /// `Handle::current()` so the sync, under-the-engine-lock adapter calls can bridge
 /// to the async channel/provider calls.
 #[cfg(feature = "agent-runtime")]
-fn build_sop_adapters(config: &Config) -> zeroclaw_runtime::sop::SopEngineAdapters {
+fn build_sop_adapters(config: &Config) -> kinetic_runtime::sop::SopEngineAdapters {
     // `llm.generate` runs on the DEFAULT agent's resolved model provider — the
     // daemon-level model of record. No resolvable provider = fail-closed.
-    let llm: Option<std::sync::Arc<dyn zeroclaw_runtime::sop::capability::LlmGenerateAdapter>> =
+    let llm: Option<std::sync::Arc<dyn kinetic_runtime::sop::capability::LlmGenerateAdapter>> =
         config
             .resolved_model_provider_for_agent("default")
             .and_then(|(provider_type, alias, entry)| {
                 // Alias-aware factory WITH the alias's runtime options: the options
-                // carry zeroclaw_dir (auth-profile store) and per-alias runtime
+                // carry kinetic_dir (auth-profile store) and per-alias runtime
                 // knobs — without them, OAuth/subscription providers (codex,
                 // opencode) sit unauthenticated and never answer. This mirrors the
                 // delegate tool's provider construction.
-                let options = zeroclaw::providers::provider_runtime_options_for_alias(
+                let options = kinetic::providers::provider_runtime_options_for_alias(
                     config,
                     provider_type,
                     alias,
                 );
-                let provider = match zeroclaw::providers::create_model_provider_for_alias(
+                let provider = match kinetic::providers::create_model_provider_for_alias(
                     config,
                     provider_type,
                     alias,
@@ -12096,13 +12084,13 @@ fn build_sop_adapters(config: &Config) -> zeroclaw_runtime::sop::SopEngineAdapte
                 ) {
                     Ok(p) => p,
                     Err(e) => {
-                        ::zeroclaw_log::record!(
+                        ::kinetic_log::record!(
                             WARN,
-                            ::zeroclaw_log::Event::new(
+                            ::kinetic_log::Event::new(
                                 module_path!(),
-                                ::zeroclaw_log::Action::Note
+                                ::kinetic_log::Action::Note
                             )
-                            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                            .with_outcome(::kinetic_log::EventOutcome::Failure)
                             .with_attrs(::serde_json::json!({"error": e.to_string()})),
                             "SOP llm.generate adapter unavailable: default model provider failed to build"
                         );
@@ -12111,14 +12099,14 @@ fn build_sop_adapters(config: &Config) -> zeroclaw_runtime::sop::SopEngineAdapte
                 };
                 let model = entry.model.clone().unwrap_or_else(|| "default".to_string());
                 Some(std::sync::Arc::new(
-                    zeroclaw_runtime::sop::capability::ProviderLlmAdapter::new(
+                    kinetic_runtime::sop::capability::ProviderLlmAdapter::new(
                         std::sync::Arc::from(provider),
                         model,
                     ),
                 ) as _)
             });
 
-    let channels = zeroclaw_channels::orchestrator::build_channel_map(config);
+    let channels = kinetic_channels::orchestrator::build_channel_map(config);
     // Startup validation: this send-only adapter's channel map omits channels that
     // need runtime SOP handles (e.g. AMQP SOP-dispatch channels). Surface at BOOT any
     // configured approval route whose channel is absent here, so a `request_route` /
@@ -12134,20 +12122,20 @@ fn build_sop_adapters(config: &Config) -> zeroclaw_runtime::sop::SopEngineAdapte
         .filter(|(_, ch)| ch.supports_outbound_send())
         .map(|(key, _)| key.clone())
         .collect();
-    for issue in zeroclaw_runtime::sop::approval::unresolvable_approval_routes(
+    for issue in kinetic_runtime::sop::approval::unresolvable_approval_routes(
         &config.sop.approval,
         &deliverable_keys,
     ) {
         match issue {
-            zeroclaw_runtime::sop::approval::ApprovalRouteIssue::Malformed {
+            kinetic_runtime::sop::approval::ApprovalRouteIssue::Malformed {
                 policy,
                 route_kind,
                 route,
             } => {
-                ::zeroclaw_log::record!(
+                ::kinetic_log::record!(
                     WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure)
                         .with_attrs(::serde_json::json!({
                             "policy": policy,
                             "route_kind": route_kind,
@@ -12156,16 +12144,16 @@ fn build_sop_adapters(config: &Config) -> zeroclaw_runtime::sop::SopEngineAdapte
                     "SOP approval route is malformed; use the required channel:recipient format"
                 );
             }
-            zeroclaw_runtime::sop::approval::ApprovalRouteIssue::UndeliverableChannel {
+            kinetic_runtime::sop::approval::ApprovalRouteIssue::UndeliverableChannel {
                 policy,
                 route_kind,
                 route,
                 channel_key,
             } => {
-                ::zeroclaw_log::record!(
+                ::kinetic_log::record!(
                     WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure)
                         .with_attrs(::serde_json::json!({
                             "policy": policy,
                             "route_kind": route_kind,
@@ -12180,27 +12168,27 @@ fn build_sop_adapters(config: &Config) -> zeroclaw_runtime::sop::SopEngineAdapte
         }
     }
     if channels.is_empty() {
-        return zeroclaw_runtime::sop::SopEngineAdapters {
+        return kinetic_runtime::sop::SopEngineAdapters {
             llm,
             ..Default::default()
         };
     }
     let handle = tokio::runtime::Handle::current();
-    let route: std::sync::Arc<dyn zeroclaw_runtime::sop::approval::ApprovalRouteAdapter> =
-        std::sync::Arc::new(zeroclaw_runtime::sop::approval::ChannelRouteAdapter::new(
+    let route: std::sync::Arc<dyn kinetic_runtime::sop::approval::ApprovalRouteAdapter> =
+        std::sync::Arc::new(kinetic_runtime::sop::approval::ChannelRouteAdapter::new(
             channels.clone(),
             handle.clone(),
         ));
     // Only offer the forge adapter when a git channel actually exists, so
     // `forge.comment` stays fail-closed on daemons without a forge.
     let has_git = channels.keys().any(|k| k == "git" || k.starts_with("git."));
-    let forge: Option<std::sync::Arc<dyn zeroclaw_runtime::sop::capability::ForgeCommentAdapter>> =
+    let forge: Option<std::sync::Arc<dyn kinetic_runtime::sop::capability::ForgeCommentAdapter>> =
         has_git.then(|| {
-            std::sync::Arc::new(zeroclaw_runtime::sop::capability::ChannelForgeAdapter::new(
+            std::sync::Arc::new(kinetic_runtime::sop::capability::ChannelForgeAdapter::new(
                 channels,
             )) as _
         });
-    zeroclaw_runtime::sop::SopEngineAdapters {
+    kinetic_runtime::sop::SopEngineAdapters {
         route: Some(route),
         forge,
         llm,
@@ -12231,23 +12219,23 @@ fn reap_orphaned_sop_drivers(
     if orphaned == 0 {
         return None;
     }
-    ::zeroclaw_log::record!(
+    ::kinetic_log::record!(
         WARN,
-        ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-            .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+            .with_outcome(::kinetic_log::EventOutcome::Failure)
             .with_attrs(::serde_json::json!({"orphaned": orphaned})),
         "SOP cron driver(s) from a previous generation are still running, but this \
          configuration runs no SOP maintenance to own them; re-aborted and handed to a \
          reaper that joins them"
     );
-    Some(::zeroclaw_spawn::spawn!(async move {
+    Some(::kinetic_spawn::spawn!(async move {
         for driver in carried {
             let _ = driver.await;
         }
-        ::zeroclaw_log::record!(
+        ::kinetic_log::record!(
             INFO,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Success)
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                .with_outcome(::kinetic_log::EventOutcome::Success)
                 .with_attrs(::serde_json::json!({"orphaned": orphaned})),
             "orphaned SOP cron driver(s) from a superseded generation have stopped"
         );
@@ -12265,8 +12253,8 @@ fn reap_orphaned_sop_drivers(
 #[cfg(feature = "agent-runtime")]
 fn spawn_sop_maintenance(
     config: &Config,
-    sop_engine: Option<&std::sync::Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
-    sop_audit: Option<&std::sync::Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
+    sop_engine: Option<&std::sync::Arc<std::sync::Mutex<kinetic_runtime::sop::SopEngine>>>,
+    sop_audit: Option<&std::sync::Arc<kinetic_runtime::sop::SopAuditLogger>>,
     interval_secs: u64,
     // The generation's supervisor set: the tick registers every driver it
     // starts here, and the supervisor — not this ticker — owns the drain.
@@ -12281,9 +12269,9 @@ fn spawn_sop_maintenance(
     let config = config.clone();
     let cron_cache = audit
         .as_ref()
-        .map(|_| zeroclaw_runtime::sop::dispatch::SopCronCache::from_engine(&engine));
+        .map(|_| kinetic_runtime::sop::dispatch::SopCronCache::from_engine(&engine));
     let tick_drivers = drivers;
-    let ticker = ::zeroclaw_spawn::spawn!(async move {
+    let ticker = ::kinetic_spawn::spawn!(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_cron_check = chrono::Utc::now();
@@ -12302,9 +12290,9 @@ fn spawn_sop_maintenance(
                 continue;
             };
             if !report.is_empty() {
-                ::zeroclaw_log::record!(
+                ::kinetic_log::record!(
                     INFO,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
                         .with_attrs(::serde_json::json!({
                             "timed_out": report.maintenance.timed_out,
                             "reaped_claims": report.maintenance.reaped_claims,
@@ -12327,7 +12315,7 @@ fn spawn_sop_maintenance(
 /// Shared between every producer that registers drivers and the
 /// [`SopDriverSupervisor`] that drains them before the subsystem rebuilds.
 #[cfg(feature = "agent-runtime")]
-type SopDriverSet = zeroclaw_runtime::sop::SopDriverHandles;
+type SopDriverSet = kinetic_runtime::sop::SopDriverHandles;
 
 /// How long a daemon generation waits for its in-flight cron drivers to finish
 /// before aborting the stragglers. Long enough for a step already in a provider
@@ -12405,9 +12393,9 @@ impl SopMaintenance {
 impl SopDriverSupervisor {
     fn new(carried: Vec<tokio::task::JoinHandle<()>>) -> Self {
         if !carried.is_empty() {
-            ::zeroclaw_log::record!(
+            ::kinetic_log::record!(
                 INFO,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
                     .with_attrs(::serde_json::json!({"carried": carried.len()})),
                 "Adopted SOP driver(s) that a previous generation aborted but that had not \
                  stopped; this generation tracks them until they do"
@@ -12515,10 +12503,10 @@ impl SopDriverSupervisor {
             }
         })
         .await;
-        ::zeroclaw_log::record!(
+        ::kinetic_log::record!(
             WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                .with_outcome(::kinetic_log::EventOutcome::Unknown)
                 .with_attrs(::serde_json::json!({
                     "drain_timeout_secs": drain_timeout.as_secs(),
                     "abort_join_timeout_secs": abort_join_timeout.as_secs(),
@@ -12543,14 +12531,14 @@ impl SopDriverSupervisor {
                 Ok(mut guard) => guard
                     .settle_orphaned_run(
                         run_id,
-                        zeroclaw_runtime::sop::OrphanedRunSettlement::DriverAborted,
+                        kinetic_runtime::sop::OrphanedRunSettlement::DriverAborted,
                     )
                     .map_err(|e| e.to_string()),
                 Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned
                     .into_inner()
                     .settle_orphaned_run(
                         run_id,
-                        zeroclaw_runtime::sop::OrphanedRunSettlement::DriverAborted,
+                        kinetic_runtime::sop::OrphanedRunSettlement::DriverAborted,
                     )
                     .map_err(|e| e.to_string()),
                 Err(std::sync::TryLockError::WouldBlock) => {
@@ -12558,10 +12546,10 @@ impl SopDriverSupervisor {
                 }
             };
             if let Err(error) = settled {
-                ::zeroclaw_log::record!(
+                ::kinetic_log::record!(
                     WARN,
-                    ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail)
-                        .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure)
                         .with_attrs(::serde_json::json!({
                             "run_id": run_id,
                             "error": error,
@@ -12579,10 +12567,10 @@ impl SopDriverSupervisor {
                 .map(|driver| driver.handle),
         );
         if !still_running.is_empty() {
-            ::zeroclaw_log::record!(
+            ::kinetic_log::record!(
                 WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                    .with_outcome(::kinetic_log::EventOutcome::Failure)
                     .with_attrs(::serde_json::json!({
                         "abort_join_timeout_secs": abort_join_timeout.as_secs(),
                         "still_running": still_running.len(),
@@ -12603,7 +12591,7 @@ impl SopDriverSupervisor {
 #[cfg(feature = "agent-runtime")]
 #[derive(Default)]
 struct SopMaintenanceTickReport {
-    maintenance: zeroclaw_runtime::sop::MaintenanceSummary,
+    maintenance: kinetic_runtime::sop::MaintenanceSummary,
     cron_started: usize,
     cron_skipped: usize,
     cron_blocked_unsafe: usize,
@@ -12624,19 +12612,19 @@ impl SopMaintenanceTickReport {
 #[cfg(feature = "agent-runtime")]
 async fn run_sop_maintenance_tick(
     config: &Config,
-    engine: &std::sync::Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>,
-    audit: Option<&std::sync::Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
-    cron_cache: Option<&zeroclaw_runtime::sop::dispatch::SopCronCache>,
+    engine: &std::sync::Arc<std::sync::Mutex<kinetic_runtime::sop::SopEngine>>,
+    audit: Option<&std::sync::Arc<kinetic_runtime::sop::SopAuditLogger>>,
+    cron_cache: Option<&kinetic_runtime::sop::dispatch::SopCronCache>,
     last_cron_check: &mut chrono::DateTime<chrono::Utc>,
     drivers: &SopDriverSet,
 ) -> Option<SopMaintenanceTickReport> {
     let maintenance = match engine.lock() {
         Ok(mut e) => e.run_maintenance_tick(),
         Err(_) => {
-            ::zeroclaw_log::record!(
+            ::kinetic_log::record!(
                 WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                    .with_outcome(::kinetic_log::EventOutcome::Unknown),
                 "SOP maintenance tick: engine lock poisoned; skipping this pass"
             );
             return None;
@@ -12649,7 +12637,7 @@ async fn run_sop_maintenance_tick(
     };
 
     if let (Some(audit), Some(cache)) = (audit, cron_cache) {
-        let results = zeroclaw_runtime::sop::dispatch::check_sop_cron_triggers(
+        let results = kinetic_runtime::sop::dispatch::check_sop_cron_triggers(
             engine,
             audit,
             cache,
@@ -12658,12 +12646,12 @@ async fn run_sop_maintenance_tick(
         .await;
         for result in &results {
             match result {
-                zeroclaw_runtime::sop::dispatch::DispatchResult::Started { action, .. } => {
+                kinetic_runtime::sop::dispatch::DispatchResult::Started { action, .. } => {
                     report.cron_started += 1;
                     if matches!(
                         action.as_ref(),
-                        zeroclaw_runtime::sop::SopRunAction::ExecuteStep { .. }
-                            | zeroclaw_runtime::sop::SopRunAction::DeterministicStep { .. }
+                        kinetic_runtime::sop::SopRunAction::ExecuteStep { .. }
+                            | kinetic_runtime::sop::SopRunAction::DeterministicStep { .. }
                     ) {
                         // Admitted so this daemon generation can drain the
                         // driver before a reload swaps the config and engine it
@@ -12672,7 +12660,7 @@ async fn run_sop_maintenance_tick(
                         // rather than starting one nothing will drain. Finished
                         // handles are dropped on the way in so a long-lived
                         // daemon does not accumulate them.
-                        zeroclaw_runtime::sop::spawn_and_register_sop_driver(
+                        kinetic_runtime::sop::spawn_and_register_sop_driver(
                             drivers,
                             config.clone(),
                             std::sync::Arc::clone(engine),
@@ -12681,18 +12669,18 @@ async fn run_sop_maintenance_tick(
                         );
                     }
                 }
-                zeroclaw_runtime::sop::dispatch::DispatchResult::Skipped { .. }
-                | zeroclaw_runtime::sop::dispatch::DispatchResult::Deferred { .. }
-                | zeroclaw_runtime::sop::dispatch::DispatchResult::Coalesced { .. } => {
+                kinetic_runtime::sop::dispatch::DispatchResult::Skipped { .. }
+                | kinetic_runtime::sop::dispatch::DispatchResult::Deferred { .. }
+                | kinetic_runtime::sop::dispatch::DispatchResult::Coalesced { .. } => {
                     // A2: deferred (backpressure) / coalesced triggers did not start a
                     // run this tick; the cron schedule re-fires them next pass. The
                     // precise outcome is logged by process_headless_results below.
                     report.cron_skipped += 1;
                 }
-                zeroclaw_runtime::sop::dispatch::DispatchResult::BlockedUnsafe { .. } => {
+                kinetic_runtime::sop::dispatch::DispatchResult::BlockedUnsafe { .. } => {
                     report.cron_blocked_unsafe += 1;
                 }
-                zeroclaw_runtime::sop::dispatch::DispatchResult::NoMatch => {
+                kinetic_runtime::sop::dispatch::DispatchResult::NoMatch => {
                     report.cron_no_match += 1;
                 }
             }
@@ -12702,17 +12690,17 @@ async fn run_sop_maintenance_tick(
             .filter(|result| {
                 !matches!(
                     result,
-                    zeroclaw_runtime::sop::dispatch::DispatchResult::Started { action, .. }
+                    kinetic_runtime::sop::dispatch::DispatchResult::Started { action, .. }
                         if matches!(
                             action.as_ref(),
-                            zeroclaw_runtime::sop::SopRunAction::ExecuteStep { .. }
-                                | zeroclaw_runtime::sop::SopRunAction::DeterministicStep { .. }
+                            kinetic_runtime::sop::SopRunAction::ExecuteStep { .. }
+                                | kinetic_runtime::sop::SopRunAction::DeterministicStep { .. }
                         )
                 )
             })
             .cloned()
             .collect::<Vec<_>>();
-        zeroclaw_runtime::sop::dispatch::process_headless_results(&unhandled);
+        kinetic_runtime::sop::dispatch::process_headless_results(&unhandled);
     }
 
     Some(report)
@@ -12722,26 +12710,26 @@ async fn run_sop_maintenance_tick(
 async fn run_gateway_if_enabled(
     host: &str,
     port: u16,
-    config: zeroclaw::config::Config,
-    event_bus: Option<zeroclaw_runtime::observability::EventBus>,
+    config: kinetic::config::Config,
+    event_bus: Option<kinetic_runtime::observability::EventBus>,
 ) -> anyhow::Result<()> {
     let default_host = config.gateway.host.clone();
     let default_port = config.gateway.port;
     // Capture the launch command before the gateway starts so in-app upgrade
     // can self-respawn after the listener is released. Must mirror the same
     // call in the Daemon branch.
-    zeroclaw_runtime::restart::record_launch();
+    kinetic_runtime::restart::record_launch();
     // With no daemon, this command owns what the daemon would: the
     // live-pricing refresher and the gateway-start hook, which fires once
     // the listener reports its bound address.
-    zeroclaw_runtime::daemon::spawn_pricing_refresher(&config);
+    kinetic_runtime::daemon::spawn_pricing_refresher(&config);
     let hooks = config.hooks.enabled.then(|| {
-        std::sync::Arc::new(zeroclaw_runtime::hooks::HookRunner::from_config(
+        std::sync::Arc::new(kinetic_runtime::hooks::HookRunner::from_config(
             &config.hooks,
         ))
     });
     let readiness =
-        zeroclaw_runtime::daemon::gateway_start_hook_reporter(hooks, host.to_string(), None);
+        kinetic_runtime::daemon::gateway_start_hook_reporter(hooks, host.to_string(), None);
     // Standalone gateway (no daemon supervisor): pass None for reload_tx so
     // /admin/reload returns 503 with a clear "no supervisor; restart
     // manually" message, and None for tui_registry (no TUI socket).
@@ -12752,7 +12740,7 @@ async fn run_gateway_if_enabled(
     // Self-respawn after the listener is released, if an in-app upgrade
     // requested it. No-op when no respawn was requested or on supervised
     // restart modes.
-    zeroclaw_runtime::restart::respawn_if_requested();
+    kinetic_runtime::restart::respawn_if_requested();
     match result {
         Err(err) if is_addr_in_use_error(&err) => {
             let restart_port = available_gateway_restart_hint_port(host, port);
@@ -12770,8 +12758,8 @@ async fn run_gateway_if_enabled(
 async fn run_gateway_if_enabled(
     _host: &str,
     _port: u16,
-    _config: zeroclaw::config::Config,
-    _event_bus: Option<zeroclaw_runtime::observability::EventBus>,
+    _config: kinetic::config::Config,
+    _event_bus: Option<kinetic_runtime::observability::EventBus>,
 ) -> anyhow::Result<()> {
     anyhow::bail!("Gateway feature is not enabled. Rebuild with --features gateway")
 }
@@ -12810,7 +12798,7 @@ fn gateway_addr_in_use_message(
     let mut lines = vec![
         format!("Port {port} is already in use, so the gateway could not start."),
         String::new(),
-        "A ZeroClaw daemon or another service may already be running on this port.".to_string(),
+        "A KineticVM daemon or another service may already be running on this port.".to_string(),
         "Try one of:".to_string(),
         String::new(),
     ];
@@ -12845,7 +12833,7 @@ fn gateway_addr_in_use_message(
 
 #[cfg(any(all(feature = "agent-runtime", feature = "gateway"), test))]
 fn gateway_restart_recovery_command(host: &str, port: u16, default_host: &str) -> String {
-    let mut command = format!("    zeroclaw gateway start --port {port}");
+    let mut command = format!("    kinetic gateway start --port {port}");
     if host != default_host {
         write!(command, " --host {host}").expect("writing to String cannot fail");
     }
@@ -12860,10 +12848,10 @@ fn gateway_paircode_recovery_command(
     default_port: u16,
 ) -> String {
     if host == default_host && port == default_port {
-        return "    zeroclaw gateway get-paircode".to_string();
+        return "    kinetic gateway get-paircode".to_string();
     }
 
-    let mut command = format!("    zeroclaw gateway get-paircode --port {port}");
+    let mut command = format!("    kinetic gateway get-paircode --port {port}");
     if host != default_host {
         write!(command, " --host {host}").expect("writing to String cannot fail");
     }
@@ -12878,7 +12866,7 @@ fn available_gateway_restart_hint_port(host: &str, port: u16) -> Option<u16> {
         let Some(candidate) = port.checked_add(offset) else {
             break;
         };
-        if std::net::TcpListener::bind(zeroclaw_infra::effective_gateway_bind_socket_addr(
+        if std::net::TcpListener::bind(kinetic_infra::effective_gateway_bind_socket_addr(
             host, candidate,
         ))
         .is_ok()
@@ -12901,9 +12889,7 @@ async fn handle_models_set(config: &mut Config, model: &str) -> Result<()> {
             .iter_entries()
             .find(|(_, _, entry)| entry.model.as_ref().map_or(false, |m| !m.trim().is_empty()))
             .ok_or_else(|| {
-                anyhow::Error::msg(
-                    "No model provider configured. Run `zeroclaw config init` first.",
-                )
+                anyhow::Error::msg("No model provider configured. Run `kinetic config init` first.")
             })?;
         (entry.0, entry.1.to_string())
     };
@@ -12980,7 +12966,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_nanos());
         let marker = std::env::temp_dir().join(format!(
-            "zeroclaw-spawn-detached-{}-{nanos}.marker",
+            "kinetic-spawn-detached-{}-{nanos}.marker",
             std::process::id()
         ));
         let marker_path = marker.to_string_lossy().into_owned();
@@ -13605,23 +13591,23 @@ mod tests {
         let locales: [(&str, &str); 5] = [
             (
                 "en",
-                include_str!("../crates/zeroclaw-runtime/locales/en/cli.ftl"),
+                include_str!("../crates/kinetic-runtime/locales/en/cli.ftl"),
             ),
             (
                 "es",
-                include_str!("../crates/zeroclaw-runtime/locales/es/cli.ftl"),
+                include_str!("../crates/kinetic-runtime/locales/es/cli.ftl"),
             ),
             (
                 "fr",
-                include_str!("../crates/zeroclaw-runtime/locales/fr/cli.ftl"),
+                include_str!("../crates/kinetic-runtime/locales/fr/cli.ftl"),
             ),
             (
                 "ja",
-                include_str!("../crates/zeroclaw-runtime/locales/ja/cli.ftl"),
+                include_str!("../crates/kinetic-runtime/locales/ja/cli.ftl"),
             ),
             (
                 "zh-CN",
-                include_str!("../crates/zeroclaw-runtime/locales/zh-CN/cli.ftl"),
+                include_str!("../crates/kinetic-runtime/locales/zh-CN/cli.ftl"),
             ),
         ];
 
@@ -13671,7 +13657,7 @@ mod tests {
         // 1 and every label fitted to ".". Both must now be rejected before
         // any interaction can start.
         let rows = quickstart_checklist_rows_for_locale(include_str!(
-            "../crates/zeroclaw-runtime/locales/en/cli.ftl"
+            "../crates/kinetic-runtime/locales/en/cli.ftl"
         ));
 
         for width in [0usize, 1, 2, 3, 4, 5, 10, 19] {
@@ -13914,88 +13900,88 @@ mod tests {
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
     #[test]
-    fn zeroclaw_desktop_exec_reads_appimage_from_entry() {
+    fn kinetic_desktop_exec_reads_appimage_from_entry() {
         let entry = "[Desktop Entry]\n\
-             Name=ZeroClaw\n\
-             Exec=/home/user/Applications/ZeroClaw-x86_64.AppImage %U\n\
-             Icon=zeroclaw\n\
+             Name=KineticVM\n\
+             Exec=/home/user/Applications/KineticVM-x86_64.AppImage %U\n\
+             Icon=kinetic\n\
              Type=Application\n";
         assert_eq!(
-            zeroclaw_desktop_exec(entry).as_deref(),
-            Some("/home/user/Applications/ZeroClaw-x86_64.AppImage")
+            kinetic_desktop_exec(entry).as_deref(),
+            Some("/home/user/Applications/KineticVM-x86_64.AppImage")
         );
     }
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
     #[test]
-    fn zeroclaw_desktop_exec_ignores_unrelated_entry() {
+    fn kinetic_desktop_exec_ignores_unrelated_entry() {
         let entry = "[Desktop Entry]\n\
              Name=Some Other App\n\
              Exec=/usr/bin/other %F\n\
              Type=Application\n";
-        assert_eq!(zeroclaw_desktop_exec(entry), None);
+        assert_eq!(kinetic_desktop_exec(entry), None);
     }
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
     #[test]
-    fn zeroclaw_desktop_exec_rejects_substring_lookalike() {
-        // Identity is the visible Name, not any field containing "zeroclaw":
+    fn kinetic_desktop_exec_rejects_substring_lookalike() {
+        // Identity is the visible Name, not any field containing "kinetic":
         // an unrelated entry whose Exec merely mentions the substring must not
         // qualify, otherwise it could preempt the real companion app.
         let entry = "[Desktop Entry]\n\
              Name=Unrelated App\n\
-             Exec=/tmp/not-zeroclaw-helper %U\n\
+             Exec=/tmp/not-kinetic-helper %U\n\
              Type=Application\n";
-        assert_eq!(zeroclaw_desktop_exec(entry), None);
+        assert_eq!(kinetic_desktop_exec(entry), None);
     }
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
     #[test]
-    fn zeroclaw_desktop_exec_keeps_quoted_path_with_spaces() {
+    fn kinetic_desktop_exec_keeps_quoted_path_with_spaces() {
         let entry = "[Desktop Entry]\n\
-             Name=ZeroClaw\n\
-             Exec=\"/home/user/My Applications/ZeroClaw-x86_64.AppImage\" %U\n\
+             Name=KineticVM\n\
+             Exec=\"/home/user/My Applications/KineticVM-x86_64.AppImage\" %U\n\
              Type=Application\n";
         assert_eq!(
-            zeroclaw_desktop_exec(entry).as_deref(),
-            Some("/home/user/My Applications/ZeroClaw-x86_64.AppImage")
+            kinetic_desktop_exec(entry).as_deref(),
+            Some("/home/user/My Applications/KineticVM-x86_64.AppImage")
         );
     }
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
     #[test]
-    fn zeroclaw_desktop_exec_rejects_unquoted_reserved_and_escaped_space() {
+    fn kinetic_desktop_exec_rejects_unquoted_reserved_and_escaped_space() {
         // Per the Desktop Entry spec a space (a reserved character) must be
         // quoted; a backslash-escaped space outside quotes is malformed. The
         // parser fails closed rather than launching a partially interpreted path.
         let escaped_space = "[Desktop Entry]\n\
-             Name=ZeroClaw\n\
-             Exec=/home/user/My\\ Apps/zeroclaw-desktop %U\n\
+             Name=KineticVM\n\
+             Exec=/home/user/My\\ Apps/kinetic-desktop %U\n\
              Type=Application\n";
-        assert_eq!(zeroclaw_desktop_exec(escaped_space), None);
+        assert_eq!(kinetic_desktop_exec(escaped_space), None);
     }
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
     #[test]
-    fn zeroclaw_desktop_exec_decodes_quoted_literal_dollar_and_backslash() {
+    fn kinetic_desktop_exec_decodes_quoted_literal_dollar_and_backslash() {
         // A literal `$` in a quoted path is written `\\$` (general unescape
         // `\\`->`\`, then the Exec layer unescapes `\$`->`$`); a literal
         // backslash is written `\\\\`.
         let dollar = "[Desktop Entry]\n\
-             Name=ZeroClaw\n\
-             Exec=\"/opt/\\\\$dir/zeroclaw-desktop\" %U\n\
+             Name=KineticVM\n\
+             Exec=\"/opt/\\\\$dir/kinetic-desktop\" %U\n\
              Type=Application\n";
         assert_eq!(
-            zeroclaw_desktop_exec(dollar).as_deref(),
-            Some("/opt/$dir/zeroclaw-desktop")
+            kinetic_desktop_exec(dollar).as_deref(),
+            Some("/opt/$dir/kinetic-desktop")
         );
         let backslash = "[Desktop Entry]\n\
-             Name=ZeroClaw\n\
-             Exec=\"/opt/a\\\\\\\\b/zeroclaw-desktop\"\n\
+             Name=KineticVM\n\
+             Exec=\"/opt/a\\\\\\\\b/kinetic-desktop\"\n\
              Type=Application\n";
         assert_eq!(
-            zeroclaw_desktop_exec(backslash).as_deref(),
-            Some("/opt/a\\b/zeroclaw-desktop")
+            kinetic_desktop_exec(backslash).as_deref(),
+            Some("/opt/a\\b/kinetic-desktop")
         );
     }
 
@@ -14003,108 +13989,108 @@ mod tests {
     #[test]
     fn parse_exec_program_fails_closed_on_malformed_input() {
         // Unterminated quote.
-        assert_eq!(parse_exec_program("\"/opt/zeroclaw-desktop"), None);
+        assert_eq!(parse_exec_program("\"/opt/kinetic-desktop"), None);
         // Dangling escape inside a quote.
-        assert_eq!(parse_exec_program("\"/opt/zeroclaw\\"), None);
+        assert_eq!(parse_exec_program("\"/opt/kinetic\\"), None);
         // Dangling escape outside quotes (invalid general escape).
-        assert_eq!(parse_exec_program("/opt/zeroclaw\\"), None);
+        assert_eq!(parse_exec_program("/opt/kinetic\\"), None);
         // A forbidden `=` in the executable token.
-        assert_eq!(parse_exec_program("/opt/a=b/zeroclaw-desktop"), None);
+        assert_eq!(parse_exec_program("/opt/a=b/kinetic-desktop"), None);
         // Unquoted reserved character.
-        assert_eq!(parse_exec_program("/opt/$HOME/zeroclaw-desktop"), None);
+        assert_eq!(parse_exec_program("/opt/$HOME/kinetic-desktop"), None);
         // A valid bare token still parses.
         assert_eq!(
-            parse_exec_program("zeroclaw-desktop %U").as_deref(),
-            Some("zeroclaw-desktop")
+            parse_exec_program("kinetic-desktop %U").as_deref(),
+            Some("kinetic-desktop")
         );
         // The WHOLE line is validated, not just the first token:
         // an unknown field code invalidates it.
-        assert_eq!(parse_exec_program("zeroclaw-desktop %Z"), None);
+        assert_eq!(parse_exec_program("kinetic-desktop %Z"), None);
         // Text directly adjacent to a closing quote is malformed.
-        assert_eq!(parse_exec_program("\"/opt/zeroclaw-desktop\"junk"), None);
+        assert_eq!(parse_exec_program("\"/opt/kinetic-desktop\"junk"), None);
         // A raw (unescaped) reserved character inside quotes is malformed.
-        assert_eq!(parse_exec_program("\"/opt/$HOME/zeroclaw-desktop\""), None);
-        assert_eq!(parse_exec_program("\"/opt/`x`/zeroclaw-desktop\""), None);
+        assert_eq!(parse_exec_program("\"/opt/$HOME/kinetic-desktop\""), None);
+        assert_eq!(parse_exec_program("\"/opt/`x`/kinetic-desktop\""), None);
         // Known field codes and extra plain args are accepted.
         assert_eq!(
-            parse_exec_program("zeroclaw-desktop %U --flag").as_deref(),
-            Some("zeroclaw-desktop")
+            parse_exec_program("kinetic-desktop %U --flag").as_deref(),
+            Some("kinetic-desktop")
         );
         assert_eq!(
-            parse_exec_program("zeroclaw-desktop %%").as_deref(),
-            Some("zeroclaw-desktop")
+            parse_exec_program("kinetic-desktop %%").as_deref(),
+            Some("kinetic-desktop")
         );
         // A field code embedded in the PROGRAM token (not just a leading `%`)
         // invalidates it, even though the basename would pass the AppImage-name
         // check — both an unknown (`%Z`) and a known (`%U`) code are rejected.
-        assert_eq!(parse_exec_program("/tmp/ZeroClaw-%Z.AppImage"), None);
-        assert_eq!(parse_exec_program("/tmp/ZeroClaw-%U.AppImage"), None);
+        assert_eq!(parse_exec_program("/tmp/KineticVM-%Z.AppImage"), None);
+        assert_eq!(parse_exec_program("/tmp/KineticVM-%U.AppImage"), None);
         // A field code embedded in an ARGUMENT token (must stand alone) is
         // rejected for both unknown and known codes.
-        assert_eq!(parse_exec_program("zeroclaw-desktop --flag=%Z"), None);
-        assert_eq!(parse_exec_program("zeroclaw-desktop --flag=%U"), None);
+        assert_eq!(parse_exec_program("kinetic-desktop --flag=%Z"), None);
+        assert_eq!(parse_exec_program("kinetic-desktop --flag=%U"), None);
         // A field code inside a quoted argument is rejected — the quote context
         // is retained so `"%U"` cannot masquerade as a standalone field code.
-        assert_eq!(parse_exec_program("zeroclaw-desktop \"%U\""), None);
+        assert_eq!(parse_exec_program("kinetic-desktop \"%U\""), None);
         // An escaped literal percent embedded in a path stays valid.
         assert_eq!(
-            parse_exec_program("/opt/zeroclaw-desktop 100%%done").as_deref(),
-            Some("/opt/zeroclaw-desktop")
+            parse_exec_program("/opt/kinetic-desktop 100%%done").as_deref(),
+            Some("/opt/kinetic-desktop")
         );
     }
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
     #[test]
-    fn zeroclaw_desktop_exec_strips_field_codes_and_quotes() {
+    fn kinetic_desktop_exec_strips_field_codes_and_quotes() {
         let entry = "[Desktop Entry]\n\
-             Name=ZeroClaw Companion\n\
-             Exec=\"/opt/zeroclaw/zeroclaw-desktop\" %u\n\
+             Name=KineticVM Companion\n\
+             Exec=\"/opt/kinetic/kinetic-desktop\" %u\n\
              Type=Application\n";
         assert_eq!(
-            zeroclaw_desktop_exec(entry).as_deref(),
-            Some("/opt/zeroclaw/zeroclaw-desktop")
+            kinetic_desktop_exec(entry).as_deref(),
+            Some("/opt/kinetic/kinetic-desktop")
         );
         // A bare field code with no real command must not resolve.
-        let bad = "[Desktop Entry]\nName=ZeroClaw\nExec=%U\nType=Application\n";
-        assert_eq!(zeroclaw_desktop_exec(bad), None);
+        let bad = "[Desktop Entry]\nName=KineticVM\nExec=%U\nType=Application\n";
+        assert_eq!(kinetic_desktop_exec(bad), None);
     }
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
     #[test]
-    fn zeroclaw_desktop_exec_honours_hidden_and_group_scope() {
-        // Otherwise a fully valid ZeroClaw Application entry — it resolves only
+    fn kinetic_desktop_exec_honours_hidden_and_group_scope() {
+        // Otherwise a fully valid KineticVM Application entry — it resolves only
         // because `Hidden=true` masks it, so the fixture actually exercises the
         // Hidden rule rather than passing on some other missing field.
         let masked = "[Desktop Entry]\n\
              Type=Application\n\
-             Name=ZeroClaw\n\
-             Exec=/opt/zeroclaw/zeroclaw-desktop\n\
+             Name=KineticVM\n\
+             Exec=/opt/kinetic/kinetic-desktop\n\
              Hidden=true\n";
-        assert_eq!(zeroclaw_desktop_exec(masked), None);
+        assert_eq!(kinetic_desktop_exec(masked), None);
 
         // Only the [Desktop Entry] group is consulted. The main group is an
-        // otherwise valid ZeroClaw Application with no Name of its own, so it
-        // resolves iff a `Name=ZeroClaw` from the Desktop Action group leaks in.
+        // otherwise valid KineticVM Application with no Name of its own, so it
+        // resolves iff a `Name=KineticVM` from the Desktop Action group leaks in.
         // It must not.
         let action_only = "[Desktop Entry]\n\
              Type=Application\n\
-             Exec=/opt/zeroclaw/zeroclaw-desktop\n\
+             Exec=/opt/kinetic/kinetic-desktop\n\
              [Desktop Action foo]\n\
-             Name=ZeroClaw\n\
+             Name=KineticVM\n\
              Exec=/tmp/evil\n";
-        assert_eq!(zeroclaw_desktop_exec(action_only), None);
+        assert_eq!(kinetic_desktop_exec(action_only), None);
     }
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
     #[test]
-    fn is_zeroclaw_name_matches_deliberate_identity() {
-        assert!(is_zeroclaw_name("ZeroClaw"));
-        assert!(is_zeroclaw_name("zeroclaw"));
-        assert!(is_zeroclaw_name("ZeroClaw Companion"));
-        assert!(is_zeroclaw_name("ZeroClaw-desktop"));
-        assert!(!is_zeroclaw_name("ZeroClawesome"));
-        assert!(!is_zeroclaw_name("Not ZeroClaw"));
-        assert!(!is_zeroclaw_name("Some Other App"));
+    fn is_kinetic_name_matches_deliberate_identity() {
+        assert!(is_kinetic_name("KineticVM"));
+        assert!(is_kinetic_name("kinetic"));
+        assert!(is_kinetic_name("KineticVM Companion"));
+        assert!(is_kinetic_name("KineticVM-desktop"));
+        assert!(!is_kinetic_name("KineticVMesome"));
+        assert!(!is_kinetic_name("Not KineticVM"));
+        assert!(!is_kinetic_name("Some Other App"));
     }
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
@@ -14124,7 +14110,7 @@ mod tests {
             std::fs::write(
                 apps.join(id),
                 format!(
-                    "[Desktop Entry]\nName=ZeroClaw\nExec={}\nType=Application\n",
+                    "[Desktop Entry]\nName=KineticVM\nExec={}\nType=Application\n",
                     exec.display()
                 ),
             )
@@ -14134,15 +14120,15 @@ mod tests {
         let high = tempfile::tempdir().unwrap();
         let low = tempfile::tempdir().unwrap();
 
-        // Both are the supported `zeroclaw-desktop` binary, in separate dirs.
-        let high_bin = high.path().join("zeroclaw-desktop");
-        let low_bin = low.path().join("zeroclaw-desktop");
+        // Both are the supported `kinetic-desktop` binary, in separate dirs.
+        let high_bin = high.path().join("kinetic-desktop");
+        let low_bin = low.path().join("kinetic-desktop");
         write_exec(&high_bin);
         write_exec(&low_bin);
 
         // Same desktop-file ID in both dirs: the higher-precedence one wins.
-        write_entry(high.path(), "ZeroClaw.desktop", &high_bin);
-        write_entry(low.path(), "ZeroClaw.desktop", &low_bin);
+        write_entry(high.path(), "KineticVM.desktop", &high_bin);
+        write_entry(low.path(), "KineticVM.desktop", &low_bin);
 
         let dirs = [high.path().to_path_buf(), low.path().to_path_buf()];
         assert_eq!(
@@ -14152,9 +14138,9 @@ mod tests {
 
         // A non-executable Exec target is skipped rather than returned.
         let broken = tempfile::tempdir().unwrap();
-        let non_exec = broken.path().join("zeroclaw-desktop");
+        let non_exec = broken.path().join("kinetic-desktop");
         std::fs::write(&non_exec, "not executable").unwrap();
-        write_entry(broken.path(), "ZeroClaw.desktop", &non_exec);
+        write_entry(broken.path(), "KineticVM.desktop", &non_exec);
         assert_eq!(discover_desktop_app(&[broken.path().to_path_buf()]), None);
     }
 
@@ -14174,16 +14160,16 @@ mod tests {
             std::fs::set_permissions(path, perms).unwrap();
         }
 
-        // A lexically earlier entry (`000...`) with a ZeroClaw Name but a
+        // A lexically earlier entry (`000...`) with a KineticVM Name but a
         // lookalike executable must not preempt the real companion app.
-        let lookalike = dir.path().join("zeroclaw-helper");
-        let real = dir.path().join("zeroclaw-desktop");
+        let lookalike = dir.path().join("kinetic-helper");
+        let real = dir.path().join("kinetic-desktop");
         write_exec(&lookalike);
         write_exec(&real);
         std::fs::write(
             apps.join("000-lookalike.desktop"),
             format!(
-                "[Desktop Entry]\nType=Application\nName=ZeroClaw\nExec={}\n",
+                "[Desktop Entry]\nType=Application\nName=KineticVM\nExec={}\n",
                 lookalike.display()
             ),
         )
@@ -14191,7 +14177,7 @@ mod tests {
         std::fs::write(
             apps.join("zzz-real.desktop"),
             format!(
-                "[Desktop Entry]\nType=Application\nName=ZeroClaw\nExec={}\n",
+                "[Desktop Entry]\nType=Application\nName=KineticVM\nExec={}\n",
                 real.display()
             ),
         )
@@ -14217,24 +14203,24 @@ mod tests {
         fn write_entry(dir: &Path, body: &str) {
             let apps = dir.join("applications");
             std::fs::create_dir_all(&apps).unwrap();
-            std::fs::write(apps.join("ZeroClaw.desktop"), body).unwrap();
+            std::fs::write(apps.join("KineticVM.desktop"), body).unwrap();
         }
 
         let high = tempfile::tempdir().unwrap();
         let low = tempfile::tempdir().unwrap();
-        let low_bin = low.path().join("zeroclaw-desktop");
+        let low_bin = low.path().join("kinetic-desktop");
         write_exec(&low_bin);
 
         // A higher-precedence Hidden=true entry masks the same desktop-file ID in
         // the lower directory, so the lower (valid) entry must not be launched.
         write_entry(
             high.path(),
-            "[Desktop Entry]\nType=Application\nName=ZeroClaw\nExec=/opt/zeroclaw/zeroclaw-desktop\nHidden=true\n",
+            "[Desktop Entry]\nType=Application\nName=KineticVM\nExec=/opt/kinetic/kinetic-desktop\nHidden=true\n",
         );
         write_entry(
             low.path(),
             &format!(
-                "[Desktop Entry]\nType=Application\nName=ZeroClaw\nExec={}\n",
+                "[Desktop Entry]\nType=Application\nName=KineticVM\nExec={}\n",
                 low_bin.display()
             ),
         );
@@ -14248,9 +14234,9 @@ mod tests {
     fn resolve_executable_rejects_relative_path_with_separator() {
         // A relative Exec value with a separator would be resolved by `which` against the
         // current working directory, so it must be rejected rather than launched.
-        assert_eq!(resolve_executable("./zeroclaw-helper"), None);
-        assert_eq!(resolve_executable("../bin/zeroclaw-helper"), None);
-        assert_eq!(resolve_executable("sub/dir/zeroclaw-helper"), None);
+        assert_eq!(resolve_executable("./kinetic-helper"), None);
+        assert_eq!(resolve_executable("../bin/kinetic-helper"), None);
+        assert_eq!(resolve_executable("sub/dir/kinetic-helper"), None);
     }
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
@@ -14260,8 +14246,8 @@ mod tests {
         let apps = dir.path().join("applications");
         std::fs::create_dir_all(&apps).unwrap();
         std::fs::write(
-            apps.join("ZeroClaw.desktop"),
-            "[Desktop Entry]\nName=ZeroClaw\nExec=/usr/bin/zeroclaw\nType=Application\n",
+            apps.join("KineticVM.desktop"),
+            "[Desktop Entry]\nName=KineticVM\nExec=/usr/bin/kinetic\nType=Application\n",
         )
         .unwrap();
         // A directory symlink pointing back at its own parent would recurse forever if
@@ -14274,7 +14260,7 @@ mod tests {
 
         // Terminates (no infinite loop) and collects only the real entry.
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].0, "ZeroClaw.desktop");
+        assert_eq!(out[0].0, "KineticVM.desktop");
     }
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
@@ -14304,7 +14290,7 @@ mod tests {
         std::fs::write(&oversized, vec![b'x'; oversized_len]).unwrap();
         assert_eq!(read_desktop_entry(&oversized), None);
 
-        let real = dir.path().join("zeroclaw-desktop");
+        let real = dir.path().join("kinetic-desktop");
         std::fs::write(&real, "#!/bin/sh\nexit 0\n").unwrap();
         let mut permissions = std::fs::metadata(&real).unwrap().permissions();
         permissions.set_mode(0o755);
@@ -14312,7 +14298,7 @@ mod tests {
         std::fs::write(
             apps.join("zzz-real.desktop"),
             format!(
-                "[Desktop Entry]\nType=Application\nName=ZeroClaw\nExec={}\n",
+                "[Desktop Entry]\nType=Application\nName=KineticVM\nExec={}\n",
                 real.display()
             ),
         )
@@ -14326,63 +14312,63 @@ mod tests {
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
     #[test]
-    fn zeroclaw_desktop_exec_rejects_zeroclaw_name_with_unrelated_exec() {
-        // A ZeroClaw display name paired with an unrelated executable must not
-        // resolve: identity is Type + Name + a ZeroClaw-shaped Exec target, not
+    fn kinetic_desktop_exec_rejects_kinetic_name_with_unrelated_exec() {
+        // A KineticVM display name paired with an unrelated executable must not
+        // resolve: identity is Type + Name + a KineticVM-shaped Exec target, not
         // the display name alone. A lexically earlier entry like this must not
         // preempt the real app.
         let entry = "[Desktop Entry]\n\
-             Name=ZeroClaw Helper\n\
+             Name=KineticVM Helper\n\
              Exec=/tmp/unrelated %U\n\
              Type=Application\n";
-        assert_eq!(zeroclaw_desktop_exec(entry), None);
+        assert_eq!(kinetic_desktop_exec(entry), None);
     }
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
     #[test]
-    fn zeroclaw_desktop_exec_requires_application_type() {
-        // A non-Application entry never resolves, even with a ZeroClaw Name and
-        // a ZeroClaw executable.
+    fn kinetic_desktop_exec_requires_application_type() {
+        // A non-Application entry never resolves, even with a KineticVM Name and
+        // a KineticVM executable.
         let link = "[Desktop Entry]\n\
-             Name=ZeroClaw\n\
-             Exec=/opt/zeroclaw/zeroclaw-desktop\n\
+             Name=KineticVM\n\
+             Exec=/opt/kinetic/kinetic-desktop\n\
              Type=Link\n";
-        assert_eq!(zeroclaw_desktop_exec(link), None);
+        assert_eq!(kinetic_desktop_exec(link), None);
 
         // Missing Type is also rejected (the published entry always sets it).
         let no_type = "[Desktop Entry]\n\
-             Name=ZeroClaw\n\
-             Exec=/opt/zeroclaw/zeroclaw-desktop\n";
-        assert_eq!(zeroclaw_desktop_exec(no_type), None);
+             Name=KineticVM\n\
+             Exec=/opt/kinetic/kinetic-desktop\n";
+        assert_eq!(kinetic_desktop_exec(no_type), None);
     }
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
     #[test]
-    fn is_zeroclaw_appimage_name_anchors_identity() {
-        // The published `ZeroClaw-*.AppImage` form (separator required).
-        assert!(is_zeroclaw_appimage_name("ZeroClaw-x86_64.AppImage"));
-        assert!(is_zeroclaw_appimage_name("zeroclaw-aarch64.appimage"));
+    fn is_kinetic_appimage_name_anchors_identity() {
+        // The published `KineticVM-*.AppImage` form (separator required).
+        assert!(is_kinetic_appimage_name("KineticVM-x86_64.AppImage"));
+        assert!(is_kinetic_appimage_name("kinetic-aarch64.appimage"));
         // A no-boundary lookalike must not qualify.
-        assert!(!is_zeroclaw_appimage_name("ZeroClawevil.AppImage"));
+        assert!(!is_kinetic_appimage_name("KineticVMevil.AppImage"));
         // Missing the separator (not a published form).
-        assert!(!is_zeroclaw_appimage_name("zeroclaw.appimage"));
+        assert!(!is_kinetic_appimage_name("kinetic.appimage"));
         // A lookalike whose name merely contains the substring must not qualify.
-        assert!(!is_zeroclaw_appimage_name("not-zeroclaw-helper.AppImage"));
-        assert!(!is_zeroclaw_appimage_name("ZeroClaw.txt"));
+        assert!(!is_kinetic_appimage_name("not-kinetic-helper.AppImage"));
+        assert!(!is_kinetic_appimage_name("KineticVM.txt"));
     }
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
     #[test]
-    fn is_zeroclaw_program_binds_to_supported_names() {
+    fn is_kinetic_program_binds_to_supported_names() {
         // Exact published binary, or a published-form AppImage.
-        assert!(is_zeroclaw_program("/usr/bin/zeroclaw-desktop"));
-        assert!(is_zeroclaw_program(
-            "/home/user/Applications/ZeroClaw-x86_64.AppImage"
+        assert!(is_kinetic_program("/usr/bin/kinetic-desktop"));
+        assert!(is_kinetic_program(
+            "/home/user/Applications/KineticVM-x86_64.AppImage"
         ));
         // Lookalikes sharing the prefix are rejected.
-        assert!(!is_zeroclaw_program("/tmp/zeroclaw-helper"));
-        assert!(!is_zeroclaw_program("/tmp/zeroclaw-evil"));
-        assert!(!is_zeroclaw_program("/usr/bin/zeroclaw"));
+        assert!(!is_kinetic_program("/tmp/kinetic-helper"));
+        assert!(!is_kinetic_program("/tmp/kinetic-evil"));
+        assert!(!is_kinetic_program("/usr/bin/kinetic"));
     }
 
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
@@ -14402,7 +14388,7 @@ mod tests {
             std::fs::write(
                 full,
                 format!(
-                    "[Desktop Entry]\nName=ZeroClaw\nExec={}\nType=Application\n",
+                    "[Desktop Entry]\nName=KineticVM\nExec={}\nType=Application\n",
                     exec.display()
                 ),
             )
@@ -14411,17 +14397,17 @@ mod tests {
 
         let high = tempfile::tempdir().unwrap();
         let low = tempfile::tempdir().unwrap();
-        let high_bin = high.path().join("zeroclaw-desktop");
-        let low_bin = low.path().join("zeroclaw-desktop");
+        let high_bin = high.path().join("kinetic-desktop");
+        let low_bin = low.path().join("kinetic-desktop");
         write_exec(&high_bin);
         write_exec(&low_bin);
 
-        // Same nested desktop-file ID (`vendor/ZeroClaw.desktop` -> ID
-        // `vendor-ZeroClaw.desktop`) in both dirs: the higher-precedence entry
+        // Same nested desktop-file ID (`vendor/KineticVM.desktop` -> ID
+        // `vendor-KineticVM.desktop`) in both dirs: the higher-precedence entry
         // must mask the lower one, which only works if IDs are derived
         // recursively rather than from top-level basenames.
-        write_nested_entry(high.path(), "vendor/ZeroClaw.desktop", &high_bin);
-        write_nested_entry(low.path(), "vendor/ZeroClaw.desktop", &low_bin);
+        write_nested_entry(high.path(), "vendor/KineticVM.desktop", &high_bin);
+        write_nested_entry(low.path(), "vendor/KineticVM.desktop", &low_bin);
 
         let dirs = [high.path().to_path_buf(), low.path().to_path_buf()];
         assert_eq!(
@@ -14433,7 +14419,7 @@ mod tests {
     #[test]
     fn sop_logs_cli_parses_run_limit_and_json_output() {
         let cli = Cli::try_parse_from([
-            "zeroclaw",
+            "kinetic",
             "sop",
             "logs",
             "run-123-0001",
@@ -14461,7 +14447,7 @@ mod tests {
             ("stdout", ServiceLogStream::Stdout),
             ("stderr", ServiceLogStream::Stderr),
         ] {
-            let cli = Cli::try_parse_from(["zeroclaw", "service", "run-openrc-log-writer", value])
+            let cli = Cli::try_parse_from(["kinetic", "service", "run-openrc-log-writer", value])
                 .expect("internal OpenRC logger should parse");
             assert!(matches!(
                 cli.command,
@@ -14473,7 +14459,7 @@ mod tests {
         }
         assert!(
             Cli::try_parse_from([
-                "zeroclaw",
+                "kinetic",
                 "service",
                 "run-openrc-log-writer",
                 "/tmp/arbitrary.log"
@@ -14486,7 +14472,7 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     fn desktop_daemon_cli_parses_hidden_command() {
         let cli = Cli::try_parse_from([
-            "zeroclaw",
+            "kinetic",
             "service",
             "run-desktop-daemon",
             "--port",
@@ -14509,7 +14495,7 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     fn windows_daemon_cli_requires_config_dir_and_stays_hidden() {
         let cli = Cli::try_parse_from([
-            "zeroclaw",
+            "kinetic",
             "--config-dir",
             "C:\\Users\\agent\\Zero Claw",
             "service",
@@ -14550,25 +14536,22 @@ mod tests {
         // argv[0] is consumed by clap as the binary name.
         // Space form.
         assert_eq!(
-            probe_config_dir(&command, argv(&["zeroclaw", "--config-dir", "/x"])),
+            probe_config_dir(&command, argv(&["kinetic", "--config-dir", "/x"])),
             Some("/x".to_string())
         );
         // Equals form.
         assert_eq!(
-            probe_config_dir(&command, argv(&["zeroclaw", "--config-dir=/y"])),
+            probe_config_dir(&command, argv(&["kinetic", "--config-dir=/y"])),
             Some("/y".to_string())
         );
         // Global arg: may appear *after* a subcommand.
         assert_eq!(
-            probe_config_dir(
-                &command,
-                argv(&["zeroclaw", "status", "--config-dir", "/z"])
-            ),
+            probe_config_dir(&command, argv(&["kinetic", "status", "--config-dir", "/z"])),
             Some("/z".to_string())
         );
         // Absent.
         assert_eq!(
-            probe_config_dir(&command, argv(&["zeroclaw", "status"])),
+            probe_config_dir(&command, argv(&["kinetic", "status"])),
             None
         );
         // `--` ends option parsing; later values must never redirect config.
@@ -14576,7 +14559,7 @@ mod tests {
             probe_config_dir(
                 &command,
                 argv(&[
-                    "zeroclaw",
+                    "kinetic",
                     "config",
                     "set",
                     "locale",
@@ -14588,7 +14571,7 @@ mod tests {
         );
         // Present but empty — returned verbatim for clap's validation path.
         assert_eq!(
-            probe_config_dir(&command, argv(&["zeroclaw", "--config-dir", ""])),
+            probe_config_dir(&command, argv(&["kinetic", "--config-dir", ""])),
             Some(String::new())
         );
     }
@@ -14605,7 +14588,7 @@ mod tests {
 
         let command = Cli::command();
         let external_payload = [
-            "zeroclaw",
+            "kinetic",
             "props",
             "legacy-command",
             "--config-dir=/unintended",
@@ -14620,20 +14603,20 @@ mod tests {
 
         // Option-looking and terminating tokens cannot satisfy the spaced
         // form's required value.
-        assert!(Cli::try_parse_from(["zeroclaw", "--config-dir", "--help"]).is_err());
+        assert!(Cli::try_parse_from(["kinetic", "--config-dir", "--help"]).is_err());
         assert_eq!(
-            probe_config_dir(&command, argv(&["zeroclaw", "--config-dir", "--help"])),
+            probe_config_dir(&command, argv(&["kinetic", "--config-dir", "--help"])),
             None
         );
         assert_eq!(
-            probe_config_dir(&command, argv(&["zeroclaw", "--config-dir", "--"])),
+            probe_config_dir(&command, argv(&["kinetic", "--config-dir", "--"])),
             None
         );
     }
 
     #[test]
     fn acp_cli_accepts_process_default_agent() {
-        let cli = Cli::try_parse_from(["zeroclaw", "acp", "--agent", "fable"])
+        let cli = Cli::try_parse_from(["kinetic", "acp", "--agent", "fable"])
             .expect("standalone ACP should accept a process default agent");
 
         match cli.command {
@@ -14647,7 +14630,7 @@ mod tests {
     #[test]
     #[cfg(feature = "agent-runtime")]
     fn cli_quickstart_uses_advertised_local_provider_runtime_default() {
-        let providers = vec![zeroclaw_runtime::quickstart::QuickstartTypeOption {
+        let providers = vec![kinetic_runtime::quickstart::QuickstartTypeOption {
             kind: "lmstudio".into(),
             display_name: "LM Studio".into(),
             local: true,
@@ -14663,7 +14646,7 @@ mod tests {
     #[test]
     #[cfg(feature = "agent-runtime")]
     fn cli_quickstart_uses_advertised_remote_provider_runtime_default() {
-        let providers = vec![zeroclaw_runtime::quickstart::QuickstartTypeOption {
+        let providers = vec![kinetic_runtime::quickstart::QuickstartTypeOption {
             kind: "anthropic".into(),
             display_name: "Anthropic".into(),
             local: false,
@@ -14679,7 +14662,7 @@ mod tests {
     #[test]
     #[cfg(feature = "agent-runtime")]
     fn cli_quickstart_uses_state_fallback_when_provider_has_no_override() {
-        let providers = vec![zeroclaw_runtime::quickstart::QuickstartTypeOption {
+        let providers = vec![kinetic_runtime::quickstart::QuickstartTypeOption {
             kind: "ollama".into(),
             display_name: "Ollama".into(),
             local: true,
@@ -14822,8 +14805,8 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     fn gateway_admin_url_prepends_configured_path_prefix() {
         assert_eq!(
-            gateway_admin_url("localhost", 42617, Some("/zeroclaw"), "/admin/paircode/new"),
-            "http://localhost:42617/zeroclaw/admin/paircode/new"
+            gateway_admin_url("localhost", 42617, Some("/kinetic"), "/admin/paircode/new"),
+            "http://localhost:42617/kinetic/admin/paircode/new"
         );
     }
 
@@ -14831,7 +14814,7 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     fn onboard_cli_accepts_model_provider_and_api_key_in_quick_mode() {
         let cli = Cli::try_parse_from([
-            "zeroclaw",
+            "kinetic",
             "onboard",
             "--model-provider",
             "openrouter",
@@ -14865,7 +14848,7 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     fn completions_cli_parses_supported_shells() {
         for shell in ["bash", "fish", "zsh", "powershell", "elvish"] {
-            let cli = Cli::try_parse_from(["zeroclaw", "completions", shell])
+            let cli = Cli::try_parse_from(["kinetic", "completions", shell])
                 .expect("completions invocation should parse");
             match cli.command {
                 Commands::Completions { .. } => {}
@@ -14882,7 +14865,7 @@ mod tests {
             .expect("completion generation should succeed");
         let script = String::from_utf8(output).expect("completion output should be valid utf-8");
         assert!(
-            script.contains("zeroclaw"),
+            script.contains("kinetic"),
             "completion script should reference binary name"
         );
     }
@@ -14895,22 +14878,22 @@ mod tests {
             .expect("completion generation should succeed");
         let script = String::from_utf8(output).expect("completion output should be valid utf-8");
         // The wrapper must capture the original clap-generated function body
-        // (via declare -f) rather than calling _zeroclaw by name, which would
-        // create an infinite recursion loop after _zeroclaw is redefined.
+        // (via declare -f) rather than calling _kinetic by name, which would
+        // create an infinite recursion loop after _kinetic is redefined.
         assert!(
-            script.contains("declare -f _zeroclaw"),
-            "bash completion should use declare -f to capture the original _zeroclaw function body"
+            script.contains("declare -f _kinetic"),
+            "bash completion should use declare -f to capture the original _kinetic function body"
         );
         assert!(
-            !script.contains("_zeroclaw_clap_orig() { _zeroclaw \"$@\"; }"),
-            "bash completion must not define _zeroclaw_clap_orig as a simple forwarder to _zeroclaw"
+            !script.contains("_kinetic_clap_orig() { _kinetic \"$@\"; }"),
+            "bash completion must not define _kinetic_clap_orig as a simple forwarder to _kinetic"
         );
     }
 
     #[test]
     #[cfg(feature = "agent-runtime")]
     fn onboard_cli_accepts_force_flag() {
-        let cli = Cli::try_parse_from(["zeroclaw", "onboard", "--force"])
+        let cli = Cli::try_parse_from(["kinetic", "onboard", "--force"])
             .expect("onboard --force should parse");
 
         match cli.command {
@@ -14923,13 +14906,13 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     fn onboard_cli_rejects_removed_interactive_flag() {
         // --interactive was removed; onboard auto-detects TTY instead.
-        assert!(Cli::try_parse_from(["zeroclaw", "onboard", "--interactive"]).is_err());
+        assert!(Cli::try_parse_from(["kinetic", "onboard", "--interactive"]).is_err());
     }
 
     #[test]
     #[cfg(feature = "agent-runtime")]
     fn onboard_cli_parses_quick_flag() {
-        let cli = Cli::try_parse_from(["zeroclaw", "onboard", "--quick"])
+        let cli = Cli::try_parse_from(["kinetic", "onboard", "--quick"])
             .expect("onboard --quick should parse");
 
         match cli.command {
@@ -14942,7 +14925,7 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     fn gateway_get_paircode_cli_accepts_port_and_host_overrides() {
         let cli = Cli::try_parse_from([
-            "zeroclaw",
+            "kinetic",
             "gateway",
             "get-paircode",
             "--new",
@@ -14956,7 +14939,7 @@ mod tests {
         match cli.command {
             Commands::Gateway {
                 gateway_command:
-                    Some(zeroclaw::GatewayCommands::GetPaircode {
+                    Some(kinetic::GatewayCommands::GetPaircode {
                         new,
                         rotate,
                         rotate_device,
@@ -14979,12 +14962,12 @@ mod tests {
     #[test]
     #[cfg(feature = "agent-runtime")]
     fn security_status_cli_requires_agent_and_parses_json_form() {
-        let err = Cli::try_parse_from(["zeroclaw", "security", "status"])
+        let err = Cli::try_parse_from(["kinetic", "security", "status"])
             .expect_err("security status requires --agent");
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
 
         let cli =
-            Cli::try_parse_from(["zeroclaw", "security", "status", "--agent", "ops", "--json"])
+            Cli::try_parse_from(["kinetic", "security", "status", "--agent", "ops", "--json"])
                 .expect("security status --agent --json should parse");
         match cli.command {
             Commands::Security {
@@ -15007,7 +14990,7 @@ mod tests {
             ..Default::default()
         };
         let tls_dir = config.data_dir.join("tls");
-        zeroclaw_tls::ensure_server_materials(&tls_dir, &[]).expect("daemon TLS materials");
+        kinetic_tls::ensure_server_materials(&tls_dir, &[]).expect("daemon TLS materials");
         std::fs::create_dir(tls_dir.join("ledger.db")).expect("poison ledger path");
 
         let err = issue_wss_client_cert(
@@ -15057,7 +15040,7 @@ mod tests {
             data_dir: dir.path().to_path_buf(),
             ..Default::default()
         };
-        zeroclaw_tls::ensure_server_materials(&config.data_dir.join("tls"), &[])
+        kinetic_tls::ensure_server_materials(&config.data_dir.join("tls"), &[])
             .expect("daemon TLS materials");
 
         // Obstruct the drop-in ca.crt with a non-empty directory so the copy
@@ -15087,14 +15070,14 @@ mod tests {
     #[test]
     #[cfg(feature = "agent-runtime")]
     fn issue_client_cert_rename_failure_leaves_an_undelivered_row_that_reconciles_away() {
-        use zeroclaw_runtime::security::cert_ledger::{CertLedger, CertStatus, revoked_list_path};
+        use kinetic_runtime::security::cert_ledger::{CertLedger, CertStatus, revoked_list_path};
         let dir = tempfile::tempdir().expect("tempdir");
         let out = tempfile::tempdir().expect("out tempdir");
         let config = Config {
             data_dir: dir.path().to_path_buf(),
             ..Default::default()
         };
-        zeroclaw_tls::ensure_server_materials(&config.data_dir.join("tls"), &[])
+        kinetic_tls::ensure_server_materials(&config.data_dir.join("tls"), &[])
             .expect("daemon TLS materials");
 
         // Make the publication rename fail the way a real filesystem does:
@@ -15211,7 +15194,7 @@ mod tests {
     #[test]
     #[cfg(feature = "agent-runtime")]
     fn revoke_client_cert_handler_materializes_the_revoked_file() {
-        use zeroclaw_runtime::security::cert_ledger::{
+        use kinetic_runtime::security::cert_ledger::{
             CertLedger, CertStatus, IssuanceActor, LedgerEntry, revoked_list_path,
         };
         let dir = tempfile::tempdir().expect("tempdir");
@@ -15263,11 +15246,11 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     fn revoke_and_list_client_cert_cli_parsing() {
         // Neither selector -> rejected.
-        assert!(Cli::try_parse_from(["zeroclaw", "security", "revoke-client-cert"]).is_err());
+        assert!(Cli::try_parse_from(["kinetic", "security", "revoke-client-cert"]).is_err());
         // Both selectors -> rejected (mutually exclusive).
         assert!(
             Cli::try_parse_from([
-                "zeroclaw",
+                "kinetic",
                 "security",
                 "revoke-client-cert",
                 "--fingerprint",
@@ -15279,7 +15262,7 @@ mod tests {
         );
         // Exactly one selector -> parses.
         let cli = Cli::try_parse_from([
-            "zeroclaw",
+            "kinetic",
             "security",
             "revoke-client-cert",
             "--fingerprint",
@@ -15300,7 +15283,7 @@ mod tests {
             other => panic!("expected revoke-client-cert, got {other:?}"),
         }
         // list-client-certs parses with --json.
-        let cli = Cli::try_parse_from(["zeroclaw", "security", "list-client-certs", "--json"])
+        let cli = Cli::try_parse_from(["kinetic", "security", "list-client-certs", "--json"])
             .expect("list parses");
         assert!(matches!(
             cli.command,
@@ -15316,17 +15299,17 @@ mod tests {
     #[test]
     #[cfg(feature = "agent-runtime")]
     fn gateway_get_paircode_rotate_flags_parse_and_conflict() {
-        let cli = Cli::try_parse_from(["zeroclaw", "gateway", "get-paircode", "--rotate"])
+        let cli = Cli::try_parse_from(["kinetic", "gateway", "get-paircode", "--rotate"])
             .expect("gateway get-paircode --rotate should parse");
         match cli.command {
             Commands::Gateway {
-                gateway_command: Some(zeroclaw::GatewayCommands::GetPaircode { rotate, .. }),
+                gateway_command: Some(kinetic::GatewayCommands::GetPaircode { rotate, .. }),
             } => assert!(rotate),
             other => panic!("expected gateway get-paircode command, got {other:?}"),
         }
 
         let cli = Cli::try_parse_from([
-            "zeroclaw",
+            "kinetic",
             "gateway",
             "get-paircode",
             "--rotate-device",
@@ -15335,19 +15318,19 @@ mod tests {
         .expect("gateway get-paircode --rotate-device should parse");
         match cli.command {
             Commands::Gateway {
-                gateway_command: Some(zeroclaw::GatewayCommands::GetPaircode { rotate_device, .. }),
+                gateway_command: Some(kinetic::GatewayCommands::GetPaircode { rotate_device, .. }),
             } => assert_eq!(rotate_device.as_deref(), Some("dash-1")),
             other => panic!("expected gateway get-paircode command, got {other:?}"),
         }
 
         assert!(
-            Cli::try_parse_from(["zeroclaw", "gateway", "get-paircode", "--new", "--rotate"])
+            Cli::try_parse_from(["kinetic", "gateway", "get-paircode", "--new", "--rotate"])
                 .is_err(),
             "--new and --rotate must conflict"
         );
         assert!(
             Cli::try_parse_from([
-                "zeroclaw",
+                "kinetic",
                 "gateway",
                 "get-paircode",
                 "--rotate",
@@ -15393,10 +15376,10 @@ mod tests {
 
         assert!(msg.contains(&t(
             "cli-pairing-show-only",
-            "`zeroclaw gateway get-paircode` only displays an existing active code; it does not mint a new one.",
+            "`kinetic gateway get-paircode` only displays an existing active code; it does not mint a new one.",
         )));
-        assert!(msg.contains("zeroclaw gateway get-paircode --new"));
-        assert!(msg.contains("zeroclaw gateway get-paircode --rotate"));
+        assert!(msg.contains("kinetic gateway get-paircode --new"));
+        assert!(msg.contains("kinetic gateway get-paircode --rotate"));
         assert!(msg.contains("open http://127.0.0.1:42617"));
     }
 
@@ -15414,11 +15397,9 @@ mod tests {
             None,
         );
 
+        assert!(msg.contains("kinetic gateway get-paircode --new --port 9001 --host 192.168.1.20"));
         assert!(
-            msg.contains("zeroclaw gateway get-paircode --new --port 9001 --host 192.168.1.20")
-        );
-        assert!(
-            msg.contains("zeroclaw gateway get-paircode --rotate --port 9001 --host 192.168.1.20")
+            msg.contains("kinetic gateway get-paircode --rotate --port 9001 --host 192.168.1.20")
         );
         assert!(msg.contains("open http://192.168.1.20:9001"));
     }
@@ -15461,8 +15442,8 @@ mod tests {
             None,
         );
 
-        assert!(msg.contains("zeroclaw gateway get-paircode --new\n"));
-        assert!(msg.contains("zeroclaw gateway get-paircode --rotate\n"));
+        assert!(msg.contains("kinetic gateway get-paircode --new\n"));
+        assert!(msg.contains("kinetic gateway get-paircode --rotate\n"));
         assert!(!msg.contains("--port 9001"));
         assert!(!msg.contains("--host 192.168.1.20"));
     }
@@ -15485,7 +15466,7 @@ mod tests {
             "cli-pairing-new-code-unavailable",
             "The gateway did not mint a new pairing code. A code may already be pending, or pairing may need a reset.",
         )));
-        assert!(msg.contains("zeroclaw gateway get-paircode --rotate"));
+        assert!(msg.contains("kinetic gateway get-paircode --rotate"));
     }
 
     #[test]
@@ -15509,16 +15490,16 @@ mod tests {
             String::new(),
             t(
                 "cli-pairing-show-only",
-                "`zeroclaw gateway get-paircode` only displays an existing active code; it does not mint a new one.",
+                "`kinetic gateway get-paircode` only displays an existing active code; it does not mint a new one.",
             ),
             t("cli-pairing-pair-another", "To pair another device, run:"),
-            "    zeroclaw gateway get-paircode --new".into(),
+            "    kinetic gateway get-paircode --new".into(),
             String::new(),
             t(
                 "cli-pairing-revoke-replace",
                 "To revoke existing pairings and mint a replacement code, run:",
             ),
-            "    zeroclaw gateway get-paircode --rotate".into(),
+            "    kinetic gateway get-paircode --rotate".into(),
             String::new(),
             t("cli-pairing-inspect", "To inspect the running gateway:"),
             "    open http://127.0.0.1:42617".into(),
@@ -15605,8 +15586,8 @@ mod tests {
 
         assert!(msg.contains("Port 42617 is already in use"));
         assert!(msg.contains("open http://127.0.0.1:42617"));
-        assert!(msg.contains("zeroclaw gateway get-paircode\n"));
-        assert!(msg.contains("zeroclaw gateway start --port 42618"));
+        assert!(msg.contains("kinetic gateway get-paircode\n"));
+        assert!(msg.contains("kinetic gateway start --port 42618"));
         assert!(msg.contains("lsof -nP -iTCP:42617 -sTCP:LISTEN"));
     }
 
@@ -15617,8 +15598,8 @@ mod tests {
             gateway_addr_in_use_message("0.0.0.0", 9001, &default.host, default.port, Some(9002));
 
         assert!(!msg.contains("open http://127.0.0.1:42617"));
-        assert!(msg.contains("zeroclaw gateway get-paircode --port 9001 --host 0.0.0.0"));
-        assert!(msg.contains("zeroclaw gateway start --port 9002 --host 0.0.0.0"));
+        assert!(msg.contains("kinetic gateway get-paircode --port 9001 --host 0.0.0.0"));
+        assert!(msg.contains("kinetic gateway start --port 9002 --host 0.0.0.0"));
         assert!(msg.contains("lsof -nP -iTCP:9001 -sTCP:LISTEN"));
     }
 
@@ -15641,8 +15622,8 @@ mod tests {
         let msg =
             gateway_addr_in_use_message("127.0.0.1", 42617, &default.host, default.port, None);
 
-        assert!(msg.contains("zeroclaw gateway get-paircode\n"));
-        assert!(!msg.contains("zeroclaw gateway start --port"));
+        assert!(msg.contains("kinetic gateway get-paircode\n"));
+        assert!(!msg.contains("kinetic gateway start --port"));
         assert!(msg.contains("lsof -nP -iTCP:42617 -sTCP:LISTEN"));
     }
 
@@ -15663,11 +15644,11 @@ mod tests {
         );
 
         assert!(
-            !msg.contains(&format!("zeroclaw gateway start --port {}", port + 1)),
+            !msg.contains(&format!("kinetic gateway start --port {}", port + 1)),
             "{msg}"
         );
         assert!(
-            msg.contains(&format!("zeroclaw gateway start --port {available_port}")),
+            msg.contains(&format!("kinetic gateway start --port {available_port}")),
             "{msg}"
         );
     }
@@ -15677,7 +15658,7 @@ mod tests {
         let msg = gateway_addr_in_use_message("192.168.1.20", 9001, "192.168.1.20", 9001, None);
 
         assert!(msg.contains("open http://192.168.1.20:9001"));
-        assert!(msg.contains("zeroclaw gateway get-paircode\n"));
+        assert!(msg.contains("kinetic gateway get-paircode\n"));
         assert!(!msg.contains("get-paircode --port 9001"));
     }
 
@@ -15695,7 +15676,7 @@ mod tests {
 
     #[test]
     fn gateway_bind_addr_resolver_accepts_bracketed_ipv6_hosts() {
-        let addr = zeroclaw_infra::effective_gateway_bind_socket_addr("[::1]", 9001);
+        let addr = kinetic_infra::effective_gateway_bind_socket_addr("[::1]", 9001);
 
         assert_eq!(addr.port(), 9001);
         assert!(addr.is_ipv6());
@@ -15744,7 +15725,7 @@ mod tests {
     fn onboard_cli_quick_and_channels_only_conflict() {
         // --quick and --channels-only should both parse at the CLI level
         // (the conflict is checked at runtime), but we verify both flags parse.
-        let cli = Cli::try_parse_from(["zeroclaw", "onboard", "--quick", "--channels-only"]);
+        let cli = Cli::try_parse_from(["kinetic", "onboard", "--quick", "--channels-only"]);
         assert!(
             cli.is_ok(),
             "--quick --channels-only should parse at CLI level"
@@ -15754,7 +15735,7 @@ mod tests {
     #[test]
     #[cfg(feature = "agent-runtime")]
     fn onboard_cli_bare_parses() {
-        let cli = Cli::try_parse_from(["zeroclaw", "onboard"]).expect("bare onboard should parse");
+        let cli = Cli::try_parse_from(["kinetic", "onboard"]).expect("bare onboard should parse");
 
         match cli.command {
             Commands::Onboard { section, .. } => assert!(section.is_none()),
@@ -15765,8 +15746,8 @@ mod tests {
     #[test]
     #[cfg(feature = "agent-runtime")]
     fn onboard_cli_positional_sections_parse() {
-        for w in zeroclaw_config::sections::QUICKSTART_SECTIONS {
-            let cli = Cli::try_parse_from(["zeroclaw", "onboard", w.as_str()])
+        for w in kinetic_config::sections::QUICKSTART_SECTIONS {
+            let cli = Cli::try_parse_from(["kinetic", "onboard", w.as_str()])
                 .unwrap_or_else(|_| panic!("onboard {} should parse", w.as_str()));
             match cli.command {
                 Commands::Onboard { section, .. } => assert_eq!(section, Some(*w)),
@@ -15778,7 +15759,7 @@ mod tests {
     #[test]
     #[cfg(feature = "agent-runtime")]
     fn cli_parses_estop_default_engage() {
-        let cli = Cli::try_parse_from(["zeroclaw", "estop"]).expect("estop command should parse");
+        let cli = Cli::try_parse_from(["kinetic", "estop"]).expect("estop command should parse");
 
         match cli.command {
             Commands::Estop {
@@ -15799,7 +15780,7 @@ mod tests {
     #[test]
     #[cfg(feature = "agent-runtime")]
     fn cli_parses_estop_resume_domain() {
-        let cli = Cli::try_parse_from(["zeroclaw", "estop", "resume", "--domain", "*.chase.com"])
+        let cli = Cli::try_parse_from(["kinetic", "estop", "resume", "--domain", "*.chase.com"])
             .expect("estop resume command should parse");
 
         match cli.command {
@@ -15815,7 +15796,7 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     fn agent_command_parses_with_temperature() {
         let cli = Cli::try_parse_from([
-            "zeroclaw",
+            "kinetic",
             "agent",
             "--agent",
             "morning-shift",
@@ -15836,7 +15817,7 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     fn agent_command_parses_without_temperature() {
         let cli = Cli::try_parse_from([
-            "zeroclaw",
+            "kinetic",
             "agent",
             "--agent",
             "morning-shift",
@@ -15857,7 +15838,7 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     fn agent_command_parses_session_state_file() {
         let cli = Cli::try_parse_from([
-            "zeroclaw",
+            "kinetic",
             "agent",
             "--agent",
             "morning-shift",
@@ -15935,7 +15916,7 @@ mod tests {
         );
 
         let known_paths: Vec<String> = config.prop_fields().into_iter().map(|f| f.name).collect();
-        let api_key_path = zeroclaw_config::helpers::resolve_field_path(
+        let api_key_path = kinetic_config::helpers::resolve_field_path(
             &known_paths,
             "providers.models.openrouter.default.api-key",
         );
@@ -16029,12 +16010,12 @@ mod tests {
         // Mirror the CLI `config set` path exactly: resolve, materialize the
         // map key, then re-resolve so the now-present alias field is found.
         let known: Vec<String> = config.prop_fields().into_iter().map(|f| f.name).collect();
-        let mut path = zeroclaw_config::helpers::resolve_field_path(&known, raw);
+        let mut path = kinetic_config::helpers::resolve_field_path(&known, raw);
         let created = ensure_map_key_for_prop_path(&mut config, &path)
             .expect("known typed transcription provider path should be materialized");
         assert!(created, "missing transcription alias should be created");
         let known: Vec<String> = config.prop_fields().into_iter().map(|f| f.name).collect();
-        path = zeroclaw_config::helpers::resolve_field_path(&known, &path);
+        path = kinetic_config::helpers::resolve_field_path(&known, &path);
 
         config
             .set_prop_persistent(&path, "whisper-large-v3")
@@ -16124,15 +16105,15 @@ mod tests {
         let raw = "agents.assistant.workspace.path";
 
         let known: Vec<String> = config.prop_fields().into_iter().map(|f| f.name).collect();
-        let mut path = zeroclaw_config::helpers::resolve_field_path(&known, raw);
+        let mut path = kinetic_config::helpers::resolve_field_path(&known, raw);
         let created = ensure_map_key_for_prop_path(&mut config, &path)
             .expect("agent alias and workspace path should materialize");
         assert!(created, "missing agent alias should be created");
 
         let known: Vec<String> = config.prop_fields().into_iter().map(|f| f.name).collect();
-        path = zeroclaw_config::helpers::resolve_field_path(&known, &path);
+        path = kinetic_config::helpers::resolve_field_path(&known, &path);
         config
-            .set_prop_persistent(&path, "/srv/zeroclaw/assistant")
+            .set_prop_persistent(&path, "/srv/kinetic/assistant")
             .expect("agent workspace path should be writable");
 
         assert_eq!(path, raw);
@@ -16141,7 +16122,7 @@ mod tests {
                 .agents
                 .get("assistant")
                 .and_then(|agent| agent.workspace.path.as_deref()),
-            Some(std::path::Path::new("/srv/zeroclaw/assistant"))
+            Some(std::path::Path::new("/srv/kinetic/assistant"))
         );
     }
 
@@ -16170,7 +16151,7 @@ mod tests {
         let mut config = Config::default();
         config.cron.insert(
             "morning-brief".to_string(),
-            zeroclaw_config::schema::CronJobDecl::default(),
+            kinetic_config::schema::CronJobDecl::default(),
         );
 
         let created = ensure_map_key_for_prop_path(&mut config, "cron.morning-brief.name")
@@ -16200,7 +16181,7 @@ mod tests {
 
     // `config init` alias tests. Every test in this module builds a bare
     // `Config::default()`, whose `config_path` points at the developer's real
-    // `~/.zeroclaw/config.toml`, and no gate catches a write from `src/`. These
+    // `~/.kinetic/config.toml`, and no gate catches a write from `src/`. These
     // stay safe only by calling `init_map_alias` and in-memory readers such as
     // `get_map_keys` — never `save()`, `save_dirty()`, a persisting `set_prop`,
     // `ensure_disk_at_current_version`, or the real `ConfigCommands::Init` arm.
@@ -16335,9 +16316,9 @@ mod tests {
         _tmp: tempfile::TempDir,
         _server: wiremock::MockServer,
         config: Config,
-        engine: std::sync::Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>,
-        audit: std::sync::Arc<zeroclaw_runtime::sop::SopAuditLogger>,
-        cache: zeroclaw_runtime::sop::dispatch::SopCronCache,
+        engine: std::sync::Arc<std::sync::Mutex<kinetic_runtime::sop::SopEngine>>,
+        audit: std::sync::Arc<kinetic_runtime::sop::SopAuditLogger>,
+        cache: kinetic_runtime::sop::dispatch::SopCronCache,
         drivers: SopDriverSet,
     }
 
@@ -16350,8 +16331,8 @@ mod tests {
     }
 
     #[cfg(feature = "agent-runtime")]
-    fn orphaned_run_sop(name: &str) -> zeroclaw_runtime::sop::Sop {
-        use zeroclaw_runtime::sop::{
+    fn orphaned_run_sop(name: &str) -> kinetic_runtime::sop::Sop {
+        use kinetic_runtime::sop::{
             Sop, SopExecutionMode, SopPriority, SopStep, SopStepKind, SopTrigger,
         };
         Sop {
@@ -16375,7 +16356,7 @@ mod tests {
             max_concurrent: 2,
             location: None,
             deterministic: false,
-            admission_policy: zeroclaw_runtime::sop::types::SopAdmissionPolicy::Parallel,
+            admission_policy: kinetic_runtime::sop::types::SopAdmissionPolicy::Parallel,
             max_pending_approvals: 0,
             agent: None,
             decision: None,
@@ -16386,20 +16367,20 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     fn engine_with_one_running_run(
         name: &str,
-        store: std::sync::Arc<dyn zeroclaw_runtime::sop::SopRunStore>,
+        store: std::sync::Arc<dyn kinetic_runtime::sop::SopRunStore>,
     ) -> (
-        std::sync::Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>,
+        std::sync::Arc<std::sync::Mutex<kinetic_runtime::sop::SopEngine>>,
         String,
     ) {
         let mut engine =
-            zeroclaw_runtime::sop::SopEngine::new(zeroclaw_config::schema::SopConfig::default())
+            kinetic_runtime::sop::SopEngine::new(kinetic_config::schema::SopConfig::default())
                 .with_store(store);
         engine.set_sops_for_test(vec![orphaned_run_sop(name)]);
         let action = engine
             .start_run(
                 name,
-                zeroclaw_runtime::sop::SopEvent {
-                    source: zeroclaw_runtime::sop::SopTriggerSource::Manual,
+                kinetic_runtime::sop::SopEvent {
+                    source: kinetic_runtime::sop::SopTriggerSource::Manual,
                     topic: None,
                     payload: None,
                     timestamp: "2026-09-24T00:00:00Z".into(),
@@ -16407,7 +16388,7 @@ mod tests {
             )
             .expect("the run starts");
         let run_id = match &action {
-            zeroclaw_runtime::sop::SopRunAction::ExecuteStep { run_id, .. } => run_id.clone(),
+            kinetic_runtime::sop::SopRunAction::ExecuteStep { run_id, .. } => run_id.clone(),
             other => panic!("expected the run to be ready for a driver, got {other:?}"),
         };
         (std::sync::Arc::new(std::sync::Mutex::new(engine)), run_id)
@@ -16424,14 +16405,14 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "agent-runtime")]
     async fn an_aborted_driver_settles_its_run_before_the_next_generation_restores_it() {
-        use zeroclaw_runtime::sop::SopRunStore as _;
-        use zeroclaw_runtime::sop::types::SopRunStatus;
+        use kinetic_runtime::sop::SopRunStore as _;
+        use kinetic_runtime::sop::types::SopRunStatus;
 
         let tmp = tempfile::tempdir().expect("temp dir");
         let db = tmp.path().join("sop-runs.db");
         let name = "aborted-driver";
         let store =
-            std::sync::Arc::new(zeroclaw_runtime::sop::SqliteRunStore::open(&db).expect("store"));
+            std::sync::Arc::new(kinetic_runtime::sop::SqliteRunStore::open(&db).expect("store"));
         let (engine, run_id) = engine_with_one_running_run(name, store.clone());
         assert_eq!(
             store.claim_counts(name).unwrap().0,
@@ -16441,11 +16422,11 @@ mod tests {
 
         // A driver mid-step that will not finish on its own.
         let drivers = SopDriverSet::default();
-        assert!(zeroclaw_runtime::sop::admit_sop_driver_for_run(
+        assert!(kinetic_runtime::sop::admit_sop_driver_for_run(
             &drivers,
             &run_id,
             &engine,
-            || ::zeroclaw_spawn::spawn!(std::future::pending::<()>()),
+            || ::kinetic_spawn::spawn!(std::future::pending::<()>()),
         ));
 
         let teardown = SopDriverSupervisor {
@@ -16491,9 +16472,9 @@ mod tests {
 
         // The replacement generation opens the same database.
         let reopened =
-            std::sync::Arc::new(zeroclaw_runtime::sop::SqliteRunStore::open(&db).expect("store"));
+            std::sync::Arc::new(kinetic_runtime::sop::SqliteRunStore::open(&db).expect("store"));
         let mut rebuilt =
-            zeroclaw_runtime::sop::SopEngine::new(zeroclaw_config::schema::SopConfig::default())
+            kinetic_runtime::sop::SopEngine::new(kinetic_config::schema::SopConfig::default())
                 .with_store(reopened.clone());
         rebuilt.set_sops_for_test(vec![orphaned_run_sop(name)]);
         rebuilt.restore_runs();
@@ -16516,24 +16497,24 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "agent-runtime")]
     async fn a_run_teardown_could_not_settle_is_settled_by_the_next_generation() {
-        use zeroclaw_runtime::sop::SopRunStore as _;
-        use zeroclaw_runtime::sop::store::testing::FailFirstTerminalWrite;
-        use zeroclaw_runtime::sop::types::SopRunStatus;
+        use kinetic_runtime::sop::SopRunStore as _;
+        use kinetic_runtime::sop::store::testing::FailFirstTerminalWrite;
+        use kinetic_runtime::sop::types::SopRunStatus;
 
         let tmp = tempfile::tempdir().expect("temp dir");
         let db = tmp.path().join("sop-runs.db");
         let name = "unsettled-at-teardown";
         let store = std::sync::Arc::new(FailFirstTerminalWrite::new(
-            zeroclaw_runtime::sop::SqliteRunStore::open(&db).expect("store"),
+            kinetic_runtime::sop::SqliteRunStore::open(&db).expect("store"),
         ));
         let (engine, run_id) = engine_with_one_running_run(name, store.clone());
 
         let drivers = SopDriverSet::default();
-        assert!(zeroclaw_runtime::sop::admit_sop_driver_for_run(
+        assert!(kinetic_runtime::sop::admit_sop_driver_for_run(
             &drivers,
             &run_id,
             &engine,
-            || ::zeroclaw_spawn::spawn!(std::future::pending::<()>()),
+            || ::kinetic_spawn::spawn!(std::future::pending::<()>()),
         ));
         let teardown = SopDriverSupervisor {
             drivers,
@@ -16562,7 +16543,7 @@ mod tests {
         // The next generation, as the daemon loop builds it: a fresh engine on
         // the same store that restores active runs, then adopts the hand-off.
         let mut next =
-            zeroclaw_runtime::sop::SopEngine::new(zeroclaw_config::schema::SopConfig::default())
+            kinetic_runtime::sop::SopEngine::new(kinetic_config::schema::SopConfig::default())
                 .with_store(store.clone());
         next.set_sops_for_test(vec![orphaned_run_sop(name)]);
         next.restore_runs();
@@ -16573,7 +16554,7 @@ mod tests {
         next.adopt_orphaned_run_settlements(teardown.unsettled_runs.into_iter().map(|run_id| {
             (
                 run_id,
-                zeroclaw_runtime::sop::OrphanedRunSettlement::DriverAborted,
+                kinetic_runtime::sop::OrphanedRunSettlement::DriverAborted,
             )
         }));
         let summary = next.run_maintenance_tick();
@@ -16591,14 +16572,14 @@ mod tests {
     /// assert on what the step recorded having run.
     #[cfg(feature = "agent-runtime")]
     async fn cron_sop_harness_with(owner: Option<&str>, calls_tool: bool) -> CronSopHarness {
-        use std::sync::{Arc, Mutex};
-        use zeroclaw_config::schema::{
+        use kinetic_config::schema::{
             AliasedAgentConfig, MemoryConfig, RiskProfileConfig, SopConfig,
         };
-        use zeroclaw_memory::traits::Memory;
-        use zeroclaw_runtime::sop::{
+        use kinetic_memory::traits::Memory;
+        use kinetic_runtime::sop::{
             Sop, SopEngine, SopExecutionMode, SopPriority, SopStep, SopStepKind, SopTrigger,
         };
+        use std::sync::{Arc, Mutex};
 
         let server = wiremock::MockServer::start().await;
         if calls_tool {
@@ -16678,7 +16659,7 @@ mod tests {
             max_concurrent: 2,
             location: None,
             deterministic: false,
-            admission_policy: zeroclaw_runtime::sop::types::SopAdmissionPolicy::Parallel,
+            admission_policy: kinetic_runtime::sop::types::SopAdmissionPolicy::Parallel,
             max_pending_approvals: 0,
             agent: owner.map(str::to_string),
             decision: None,
@@ -16691,11 +16672,11 @@ mod tests {
             ..MemoryConfig::default()
         };
         let memory: Arc<dyn Memory> =
-            Arc::from(zeroclaw_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-        let audit = Arc::new(zeroclaw_runtime::sop::SopAuditLogger::new(memory));
-        let cache = zeroclaw_runtime::sop::dispatch::SopCronCache::from_engine(&engine);
+            Arc::from(kinetic_memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
+        let audit = Arc::new(kinetic_runtime::sop::SopAuditLogger::new(memory));
+        let cache = kinetic_runtime::sop::dispatch::SopCronCache::from_engine(&engine);
 
-        let mut providers = zeroclaw_config::providers::Providers::default();
+        let mut providers = kinetic_config::providers::Providers::default();
         {
             let base = providers
                 .models
@@ -16750,7 +16731,7 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     async fn await_terminal_cron_run(
         harness: &CronSopHarness,
-    ) -> zeroclaw_runtime::sop::types::SopRun {
+    ) -> kinetic_runtime::sop::types::SopRun {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 {
@@ -16797,7 +16778,7 @@ mod tests {
         // the resolved agent and SUCCEED, not merely stop being stranded.
         assert_eq!(
             run.status,
-            zeroclaw_runtime::sop::types::SopRunStatus::Completed,
+            kinetic_runtime::sop::types::SopRunStatus::Completed,
             "cron-started run should reach Completed, got {:?} ({:?})",
             run.status,
             run.step_results
@@ -16808,7 +16789,7 @@ mod tests {
             .expect("the driven step should be recorded on the run");
         assert_eq!(
             step.status,
-            zeroclaw_runtime::sop::types::SopStepStatus::Completed
+            kinetic_runtime::sop::types::SopStepStatus::Completed
         );
         assert_eq!(
             step.effective_agent.as_deref(),
@@ -16870,7 +16851,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[cfg(feature = "agent-runtime")]
     async fn filesystem_adapter_drives_a_run_with_maintenance_disabled() {
-        use zeroclaw_runtime::sop::{
+        use kinetic_runtime::sop::{
             Sop, SopExecutionMode, SopPriority, SopStep, SopStepKind, SopTrigger,
         };
 
@@ -16910,7 +16891,7 @@ mod tests {
                 max_concurrent: 2,
                 location: None,
                 deterministic: false,
-                admission_policy: zeroclaw_runtime::sop::types::SopAdmissionPolicy::Parallel,
+                admission_policy: kinetic_runtime::sop::types::SopAdmissionPolicy::Parallel,
                 max_pending_approvals: 0,
                 agent: Some(CRON_SOP_AGENT.to_string()),
                 decision: None,
@@ -16919,16 +16900,16 @@ mod tests {
 
         // No maintenance tick exists anywhere in this test: the supervisor's
         // set stands alone, exactly as when `maintenance_interval_secs == 0`.
-        let supervisor_set = zeroclaw_runtime::sop::SopDriverHandles::default();
-        let sink = zeroclaw_runtime::sop::SopDriverSink::new(
+        let supervisor_set = kinetic_runtime::sop::SopDriverHandles::default();
+        let sink = kinetic_runtime::sop::SopDriverSink::new(
             harness.config.clone(),
             std::sync::Arc::clone(&harness.engine),
             Some(std::sync::Arc::clone(&harness.audit)),
             supervisor_set.clone(),
         );
-        let channel = zeroclaw_channels::filesystem::FilesystemChannel::new(
-            zeroclaw_channels::filesystem::FilesystemChannelConfig {
-                config: zeroclaw_config::schema::FilesystemConfig {
+        let channel = kinetic_channels::filesystem::FilesystemChannel::new(
+            kinetic_channels::filesystem::FilesystemChannelConfig {
+                config: kinetic_config::schema::FilesystemConfig {
                     enabled: true,
                     paths: vec![watch_dir.to_string_lossy().into_owned()],
                     events: vec!["created".into(), "modified".into()],
@@ -16942,8 +16923,8 @@ mod tests {
             },
         );
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        let listener = ::zeroclaw_spawn::spawn!(async move {
-            use zeroclaw_api::channel::Channel;
+        let listener = ::kinetic_spawn::spawn!(async move {
+            use kinetic_api::channel::Channel;
             let _ = channel.listen(tx).await;
         });
         // Give the watcher a beat to arm before the event lands.
@@ -16965,7 +16946,7 @@ mod tests {
         .expect("a file event must start and finish a run with no maintenance tick");
         assert_eq!(
             run.status,
-            zeroclaw_runtime::sop::types::SopRunStatus::Completed,
+            kinetic_runtime::sop::types::SopRunStatus::Completed,
             "{:?}",
             run.step_results
         );
@@ -16985,7 +16966,7 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "agent-runtime")]
     async fn channel_ingress_drives_started_run_to_terminal() {
-        use zeroclaw_runtime::sop::{
+        use kinetic_runtime::sop::{
             Sop, SopExecutionMode, SopPriority, SopStep, SopStepKind, SopTrigger,
         };
 
@@ -17020,25 +17001,25 @@ mod tests {
                 max_concurrent: 2,
                 location: None,
                 deterministic: false,
-                admission_policy: zeroclaw_runtime::sop::types::SopAdmissionPolicy::Parallel,
+                admission_policy: kinetic_runtime::sop::types::SopAdmissionPolicy::Parallel,
                 max_pending_approvals: 0,
                 agent: Some(CRON_SOP_AGENT.to_string()),
                 decision: None,
             }]);
         }
 
-        let sink = zeroclaw_runtime::sop::SopDriverSink::new(
+        let sink = kinetic_runtime::sop::SopDriverSink::new(
             harness.config.clone(),
             std::sync::Arc::clone(&harness.engine),
             Some(std::sync::Arc::clone(&harness.audit)),
             harness.drivers.clone(),
         );
 
-        let results = zeroclaw_runtime::sop::dispatch::dispatch_untrusted_fan_in_driven(
+        let results = kinetic_runtime::sop::dispatch::dispatch_untrusted_fan_in_driven(
             &harness.engine,
             &harness.audit,
             Some(&sink),
-            zeroclaw_runtime::sop::types::SopTriggerSource::Channel,
+            kinetic_runtime::sop::types::SopTriggerSource::Channel,
             Some("telegram.main:message"),
             Some("review please"),
             None,
@@ -17053,7 +17034,7 @@ mod tests {
         assert!(
             matches!(
                 &results[0],
-                zeroclaw_runtime::sop::dispatch::DispatchResult::Started { .. }
+                kinetic_runtime::sop::dispatch::DispatchResult::Started { .. }
             ),
             "the channel event should start the SOP, got {:?}",
             results[0]
@@ -17082,7 +17063,7 @@ mod tests {
 
         assert_eq!(
             run.status,
-            zeroclaw_runtime::sop::types::SopRunStatus::Completed,
+            kinetic_runtime::sop::types::SopRunStatus::Completed,
             "channel-started run should reach Completed, got {:?} ({:?})",
             run.status,
             run.step_results
@@ -17093,7 +17074,7 @@ mod tests {
             .expect("the driven step should be recorded on the run");
         assert_eq!(
             step.status,
-            zeroclaw_runtime::sop::types::SopStepStatus::Completed
+            kinetic_runtime::sop::types::SopStepStatus::Completed
         );
         assert_eq!(
             step.effective_agent.as_deref(),
@@ -17132,7 +17113,7 @@ mod tests {
         let run = await_terminal_cron_run(&harness).await;
         assert_eq!(
             run.status,
-            zeroclaw_runtime::sop::types::SopRunStatus::Failed,
+            kinetic_runtime::sop::types::SopRunStatus::Failed,
             "an unowned headless SOP must fail, not borrow another agent"
         );
         let step = run
@@ -17186,7 +17167,7 @@ mod tests {
         let run = await_terminal_cron_run(&harness).await;
         assert_eq!(
             run.status,
-            zeroclaw_runtime::sop::types::SopRunStatus::Failed,
+            kinetic_runtime::sop::types::SopRunStatus::Failed,
             "a SOP owned by a disabled agent must fail closed"
         );
         let step = run
@@ -17231,8 +17212,8 @@ mod tests {
         let driver_flag = std::sync::Arc::clone(&stopped);
         let drivers = SopDriverSet::default();
         // Outlasts the drain deadline: shutdown has to abort it.
-        assert!(zeroclaw_runtime::sop::admit_sop_driver(&drivers, || {
-            ::zeroclaw_spawn::spawn!(async move {
+        assert!(kinetic_runtime::sop::admit_sop_driver(&drivers, || {
+            ::kinetic_spawn::spawn!(async move {
                 let _flag = StoppedFlag(driver_flag);
                 tokio::time::sleep(std::time::Duration::from_hours(24)).await;
             })
@@ -17275,7 +17256,7 @@ mod tests {
         let flag = std::sync::Arc::clone(&finished);
         // Blocking, so `abort` cannot stop it once it is polled: exactly the
         // driver whose handle must not be dropped.
-        let driver = ::zeroclaw_spawn::spawn!(async move {
+        let driver = ::kinetic_spawn::spawn!(async move {
             start_flag.store(true, Ordering::SeqCst);
             std::thread::sleep(std::time::Duration::from_millis(200));
             flag.store(true, Ordering::SeqCst);
@@ -17309,7 +17290,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[cfg(feature = "agent-runtime")]
     async fn finished_drivers_need_no_reaper() {
-        let driver = ::zeroclaw_spawn::spawn!(async {});
+        let driver = ::kinetic_spawn::spawn!(async {});
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while !driver.is_finished() {
                 tokio::task::yield_now().await;
@@ -17339,13 +17320,13 @@ mod tests {
         // finished handles, so a zero-await task would be pruned by the next
         // admission and this test would lose the mixed batch it exists for.
         let drivers = SopDriverSet::default();
-        assert!(zeroclaw_runtime::sop::admit_sop_driver(&drivers, || {
-            ::zeroclaw_spawn::spawn!(async {
+        assert!(kinetic_runtime::sop::admit_sop_driver(&drivers, || {
+            ::kinetic_spawn::spawn!(async {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             })
         }));
-        assert!(zeroclaw_runtime::sop::admit_sop_driver(&drivers, || {
-            ::zeroclaw_spawn::spawn!(async {
+        assert!(kinetic_runtime::sop::admit_sop_driver(&drivers, || {
+            ::kinetic_spawn::spawn!(async {
                 std::thread::sleep(std::time::Duration::from_secs(2));
             })
         }));
@@ -17378,8 +17359,8 @@ mod tests {
         let drivers = SopDriverSet::default();
         // Blocking, not `tokio::time::sleep`: abort lands at the next await
         // point, and this task deliberately reaches none while the grace runs.
-        assert!(zeroclaw_runtime::sop::admit_sop_driver(&drivers, || {
-            ::zeroclaw_spawn::spawn!(async {
+        assert!(kinetic_runtime::sop::admit_sop_driver(&drivers, || {
+            ::kinetic_spawn::spawn!(async {
                 std::thread::sleep(std::time::Duration::from_secs(2));
             })
         }));
@@ -17472,9 +17453,9 @@ mod tests {
         let spawned_flag = std::sync::Arc::clone(&spawned);
         let body_flag = std::sync::Arc::clone(&body_ran);
 
-        let admitted = zeroclaw_runtime::sop::admit_sop_driver(&drivers, || {
+        let admitted = kinetic_runtime::sop::admit_sop_driver(&drivers, || {
             spawned_flag.store(true, Ordering::SeqCst);
-            ::zeroclaw_spawn::spawn!(async move {
+            ::kinetic_spawn::spawn!(async move {
                 body_flag.store(true, Ordering::SeqCst);
                 tokio::time::sleep(std::time::Duration::from_hours(24)).await;
             })
@@ -17521,8 +17502,8 @@ mod tests {
         let body_ran = std::sync::Arc::new(AtomicBool::new(false));
         let body_flag = std::sync::Arc::clone(&body_ran);
 
-        let admitted = zeroclaw_runtime::sop::admit_sop_driver(&drivers, || {
-            ::zeroclaw_spawn::spawn!(async move {
+        let admitted = kinetic_runtime::sop::admit_sop_driver(&drivers, || {
+            ::kinetic_spawn::spawn!(async move {
                 body_flag.store(true, Ordering::SeqCst);
             })
         });
@@ -17707,20 +17688,18 @@ mod tests {
     #[cfg(feature = "plugins-wasm-cranelift")]
     mod plugin_load_check {
         use super::*;
+        use kinetic::plugins::host::PluginHost;
         use std::path::{Path, PathBuf};
         use std::process::Command;
         use std::sync::OnceLock;
-        use zeroclaw::plugins::host::PluginHost;
 
         /// The wasmtime-independent part of a compile failure's cause chain.
         /// Asserting on this rather than on translated prose keeps the test
         /// honest under any locale the process happens to detect.
         const LOAD_FAILURE_CAUSE: &str = "failed to load WASM component";
 
-        fn verifier_limits() -> zeroclaw::plugins::component::PluginLimits {
-            zeroclaw_runtime::plugin_runtime::plugin_limits(
-                &crate::config::schema::Config::default(),
-            )
+        fn verifier_limits() -> kinetic::plugins::component::PluginLimits {
+            kinetic_runtime::plugin_runtime::plugin_limits(&crate::config::schema::Config::default())
         }
 
         /// The fixture package's manifest, mirroring the one the plugins
@@ -17759,7 +17738,7 @@ type = "string"
             FIXTURE
                 .get_or_init(|| {
                     let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("crates/zeroclaw-plugins/tests/fixtures/tool-fixture");
+                        .join("crates/kinetic-plugins/tests/fixtures/tool-fixture");
                     // Its own target directory, so the nested Cargo invocation
                     // cannot contend with this test process's build lock.
                     let target_dir = cargo_target_dir().join("tmp/plugin-load-check-fixture");
@@ -17770,7 +17749,7 @@ type = "string"
                             "--locked",
                             "--quiet",
                             "--package",
-                            "zeroclaw-tool-plugin-fixture",
+                            "kinetic-tool-plugin-fixture",
                             "--target",
                             "wasm32-wasip2",
                             "--target-dir",
@@ -17784,7 +17763,7 @@ type = "string"
                     );
 
                     let wasm =
-                        target_dir.join("wasm32-wasip2/debug/zeroclaw_tool_plugin_fixture.wasm");
+                        target_dir.join("wasm32-wasip2/debug/kinetic_tool_plugin_fixture.wasm");
                     assert!(wasm.is_file(), "tool fixture WASM was not produced");
                     wasm
                 })
@@ -17793,7 +17772,7 @@ type = "string"
 
         /// Seed a throwaway config directory and install the fixture into it
         /// through the real `PluginHost::install`, so the package under test is
-        /// laid out exactly as `zeroclaw plugin install` leaves one.
+        /// laid out exactly as `kinetic plugin install` leaves one.
         fn install_fixture(workspace: &Path) -> PluginHost {
             let source = workspace.join("source/tool-fixture");
             std::fs::create_dir_all(&source).unwrap();
@@ -17858,7 +17837,7 @@ type = "string"
             let constrained_status = installed_plugin_load_status(
                 &host,
                 &info,
-                zeroclaw_runtime::plugin_runtime::plugin_limits(&constrained),
+                kinetic_runtime::plugin_runtime::plugin_limits(&constrained),
             )
             .await
             .expect("the load verdict is reported, not raised");
@@ -17955,11 +17934,11 @@ type = "string"
             // A package with no component is not a failure: there is nothing to
             // instantiate, and reporting one as broken would train operators to
             // ignore the column.
-            let info = zeroclaw::plugins::PluginInfo {
+            let info = kinetic::plugins::PluginInfo {
                 name: "skills-only".to_string(),
                 version: "1.0.0".to_string(),
                 description: Some("markdown bundle".to_string()),
-                capabilities: vec![zeroclaw::plugins::PluginCapability::Skill],
+                capabilities: vec![kinetic::plugins::PluginCapability::Skill],
                 permissions: Vec::new(),
                 wasm_path: None,
                 loaded: true,
@@ -18043,11 +18022,11 @@ type = "string"
 
         #[test]
         fn plugin_list_without_verify_renders_no_verdict() {
-            let info = zeroclaw::plugins::PluginInfo {
+            let info = kinetic::plugins::PluginInfo {
                 name: "some-plugin".to_string(),
                 version: "0.2.0".to_string(),
                 description: None,
-                capabilities: vec![zeroclaw::plugins::PluginCapability::Tool],
+                capabilities: vec![kinetic::plugins::PluginCapability::Tool],
                 permissions: Vec::new(),
                 wasm_path: Some(PathBuf::from("/nonexistent/some-plugin.wasm")),
                 loaded: false,
@@ -18083,7 +18062,7 @@ type = "string"
     /// Build an admitted-shape manifest from TOML, the way a real plugin ships
     /// one, so the instance key derives from the same fields production reads.
     #[cfg(feature = "plugins-wasm")]
-    fn manifest_from_toml(src: &str) -> zeroclaw::plugins::PluginManifest {
+    fn manifest_from_toml(src: &str) -> kinetic::plugins::PluginManifest {
         toml::from_str(src).expect("test manifest must parse")
     }
 
@@ -18095,7 +18074,7 @@ type = "string"
         hosts: &[&str],
         permissions: &[&str],
         with_config_schema: bool,
-    ) -> zeroclaw::plugins::PluginManifest {
+    ) -> kinetic::plugins::PluginManifest {
         let quote = |xs: &[&str]| -> String {
             xs.iter()
                 .map(|x| format!("\"{x}\""))
@@ -18127,16 +18106,16 @@ type = "string"
         name: &str,
         hosts: &[&str],
         with_config_schema: bool,
-    ) -> zeroclaw::plugins::PluginManifest {
+    ) -> kinetic::plugins::PluginManifest {
         tool_manifest_with(name, hosts, &["http_client"], with_config_schema)
     }
 
     /// The `zpi1_` key production derives for a package's default tool binding.
     #[cfg(feature = "plugins-wasm")]
-    fn expected_instance_key(manifest: &zeroclaw::plugins::PluginManifest) -> String {
-        zeroclaw::plugins::instance::PluginInstanceScope::for_package_binding(
+    fn expected_instance_key(manifest: &kinetic::plugins::PluginManifest) -> String {
+        kinetic::plugins::instance::PluginInstanceScope::for_package_binding(
             manifest,
-            zeroclaw::plugins::PluginCapability::Tool,
+            kinetic::plugins::PluginCapability::Tool,
             std::iter::empty(),
         )
         .expect("scope must derive")
@@ -18299,7 +18278,7 @@ type = "string"
             entry.config
         );
 
-        // Now add a genuine secret through the same call the CLI's `zeroclaw
+        // Now add a genuine secret through the same call the CLI's `kinetic
         // config set` makes, so the file carries both kinds of value and the
         // save path can be shown to treat them differently.
         config
@@ -18436,7 +18415,7 @@ type = "string"
     /// config row (installed before this ceremony, or its row removed by hand)
     /// gets a gap line whose command is a `config patch`, since `config set`
     /// cannot create a row. That command is run through a real `sh`, with
-    /// `zeroclaw` replaced by a function that records its arguments and input;
+    /// `kinetic` replaced by a function that records its arguments and input;
     /// the recorded patch is then applied the way the `config patch` handler
     /// applies one (create the map key, convert the value, set it, save). The
     /// row and its grant exist on disk afterwards, and the gap is gone.
@@ -18468,7 +18447,7 @@ type = "string"
         let args_file = tmp.path().join("captured-args");
         let stdin_file = tmp.path().join("captured-stdin");
         let script = format!(
-            "zeroclaw() {{ printf '%s\\n' \"$@\" > '{}'; cat > '{}'; }}\n{command}\n",
+            "kinetic() {{ printf '%s\\n' \"$@\" > '{}'; cat > '{}'; }}\n{command}\n",
             args_file.display(),
             stdin_file.display()
         );
@@ -18697,7 +18676,7 @@ type = "string"
 
         // Follow the printed instructions verbatim: (1) rename the legacy row to
         // the canonical instance key, then (2) apply the grant command's value
-        // through the real config setter — the same path `zeroclaw config set`
+        // through the real config setter — the same path `kinetic config set`
         // takes. `config set` REPLACES the list, so the row's grant after this is
         // exactly the command's value.
         config.plugins.entries[0].name = instance_key.clone();
@@ -18723,7 +18702,7 @@ type = "string"
         );
     }
 
-    /// The quoted value of the `zeroclaw config set` command printed on `line`.
+    /// The quoted value of the `kinetic config set` command printed on `line`.
     /// A verdict line also carries the runtime's reason, which quotes the
     /// offending entry, so the value is read after the command, not from the
     /// first quote on the line.
@@ -18783,7 +18762,7 @@ type = "string"
     #[cfg(all(feature = "plugins-wasm", feature = "agent-runtime"))]
     fn runtime_accepts_row(config: &crate::config::schema::Config, instance_key: &str) -> bool {
         let (hosts, allow_private) = config.plugins.entry_egress(instance_key);
-        zeroclaw::plugins::egress::EgressPolicy::new(
+        kinetic::plugins::egress::EgressPolicy::new(
             &hosts,
             &allow_private,
             &config.security.nat64_prefixes,
@@ -19321,7 +19300,7 @@ type = "string"
     /// otherwise the operator has nowhere to author the grant.
     ///
     /// The second half pins *why* the row is required: without one, the dotted
-    /// path does not resolve, so `zeroclaw config set
+    /// path does not resolve, so `kinetic config set
     /// plugins.entries.<key>.egress_hosts` cannot create the grant either.
     #[tokio::test]
     #[cfg(feature = "plugins-wasm")]
@@ -19389,7 +19368,7 @@ type = "string"
     #[tokio::test]
     #[cfg(feature = "plugins-wasm")]
     async fn a_transportless_declaration_does_not_become_reach_when_a_later_version_adds_http() {
-        use zeroclaw::plugins::host::PluginHost;
+        use kinetic::plugins::host::PluginHost;
 
         let write_source = |permissions: &str| {
             let manifest_toml = format!(
@@ -19475,7 +19454,7 @@ type = "string"
     #[tokio::test]
     #[cfg(feature = "plugins-wasm")]
     async fn a_failed_seed_rolls_the_published_package_back_so_retry_is_a_fresh_install() {
-        use zeroclaw::plugins::host::PluginHost;
+        use kinetic::plugins::host::PluginHost;
 
         // A real installable package: a manifest that owns host state (a
         // declared destination plus a network permission) so seeding creates a
@@ -19578,7 +19557,7 @@ type = "string"
     #[tokio::test]
     #[cfg(all(feature = "plugins-wasm", feature = "agent-runtime"))]
     async fn reinstall_refuses_a_legacy_row_without_creating_or_mutating_config() {
-        use zeroclaw::plugins::host::PluginHost;
+        use kinetic::plugins::host::PluginHost;
 
         let manifest_toml = r#"name = "weather-tool"
 version = "1.0.0"
@@ -19637,7 +19616,7 @@ hosts = ["api.example.com", "api2.example.com"]
             "a refused install must never announce success before rolling back"
         );
         assert!(
-            rendered.contains(&crate::plugins::egress_ceremony::zeroclaw_invocation_for(
+            rendered.contains(&crate::plugins::egress_ceremony::kinetic_invocation_for(
                 crate::plugins::egress_ceremony::ShellDialect::host(),
                 config_dir.path()
             )),
@@ -19730,7 +19709,7 @@ hosts = ["api.example.com", "api2.example.com"]
     #[cfg(all(feature = "plugins-wasm", feature = "agent-runtime"))]
     async fn reinstall_under_a_deployment_wide_refusal_reports_the_deployment_once_without_row_steps()
      {
-        use zeroclaw::plugins::host::PluginHost;
+        use kinetic::plugins::host::PluginHost;
 
         let manifest_toml = r#"name = "weather-tool"
 version = "1.0.0"
@@ -19836,7 +19815,7 @@ hosts = ["api.example.com", "api2.example.com"]
         let rendered = format!("{err:#}");
         let rename_at = rendered.find("rename").expect("the rename step returns");
         let grant_at = rendered
-            .find("zeroclaw --config-dir")
+            .find("kinetic --config-dir")
             .expect("the grant step returns, addressing this configuration");
         assert!(
             rename_at < grant_at,
@@ -19896,9 +19875,9 @@ hosts = ["api.example.com", "api2.example.com"]
         );
         let list_lines =
             egress_grant_gap_lines(&profile_a, &manifest).expect("gap lines must build");
-        use crate::plugins::egress_ceremony::{ShellDialect, zeroclaw_invocation_for};
-        let invocation_a = zeroclaw_invocation_for(ShellDialect::host(), dir_a.path());
-        let invocation_b = zeroclaw_invocation_for(ShellDialect::host(), dir_b.path());
+        use crate::plugins::egress_ceremony::{ShellDialect, kinetic_invocation_for};
+        let invocation_a = kinetic_invocation_for(ShellDialect::host(), dir_a.path());
+        let invocation_b = kinetic_invocation_for(ShellDialect::host(), dir_b.path());
         for (surface, lines) in [("install", &install_lines), ("list", &list_lines)] {
             let command = lines
                 .iter()

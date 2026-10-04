@@ -1,19 +1,19 @@
-//! `zeroclaw relay claim` — bind this daemon to a ZeroRelay account (self-serve).
+//! `kinetic relay claim` — bind this daemon to a ZeroRelay account (self-serve).
 //!
 //! Derives the daemon's relay-registration identity, proves control of it with an
 //! Ed25519 signature, POSTs the proof to the control plane's `/v1/claim` endpoint,
 //! and on success writes the `[relay]` config so the daemon registers against the
 //! now-allowlisted relay on its next start. The CLI owns proof construction and
-//! loads the canonical registration key through `zeroclaw_runtime::relay::ensure_signing_key`.
+//! loads the canonical registration key through `kinetic_runtime::relay::ensure_signing_key`.
 
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
+use kinetic_config::schema::Config;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use sha2::{Digest, Sha256};
-use zeroclaw_config::schema::Config;
 
 /// Domain-separation tag for the self-serve claim signature (18 bytes). Disjoint
 /// from the relay registration handshake, which signs a bare 32-byte nonce, so a
@@ -57,7 +57,7 @@ struct ClaimProof {
 }
 
 /// Derive and sign the claim proof from the daemon's PKCS#8 registration key (as
-/// returned by [`zeroclaw_runtime::relay::ensure_signing_key`]). Loads the key with the same
+/// returned by [`kinetic_runtime::relay::ensure_signing_key`]). Loads the key with the same
 /// `ring` API the registration path uses, so the presented fingerprint equals the
 /// one the daemon registers under.
 fn build_claim_proof(signing_key_pkcs8: &[u8], claim_token: &str) -> Result<ClaimProof> {
@@ -84,7 +84,7 @@ const MAX_CLAIM_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_RELAY_ADDR_LEN: usize = 255;
 
 /// Upper bound on the claimed node-id: the relay's own registration bound.
-const MAX_NODE_ID_LEN: usize = zeroclaw_runtime::relay::MAX_NODE_ID_LEN;
+const MAX_NODE_ID_LEN: usize = kinetic_runtime::relay::MAX_NODE_ID_LEN;
 
 /// A successful `/v1/claim` result: the relay to register against and the node-id
 /// bound to this daemon. Field names mirror the control plane's response body.
@@ -156,7 +156,7 @@ fn validate_relay_addr(addr: &str) -> Result<()> {
     // Check the host with the same parser the daemon uses when it connects, so
     // a host the relay path cannot use (such as `relay/evil`) is refused here
     // rather than saved and then rejected at registration.
-    if zeroclaw_runtime::relay::relay_server_name(host).is_err() {
+    if kinetic_runtime::relay::relay_server_name(host).is_err() {
         anyhow::bail!(
             "the control plane returned a `relay_addr` whose host ({host}) is not a valid relay \
              hostname or IPv4 address; no config was written"
@@ -188,7 +188,7 @@ fn validate_node_id(node_id: &str) -> Result<()> {
     }
     // The relay registers only printable-ASCII node-ids. Anything else would be
     // saved here and then refused at every registration.
-    if !zeroclaw_runtime::relay::is_valid_node_id(node_id) {
+    if !kinetic_runtime::relay::is_valid_node_id(node_id) {
         anyhow::bail!(
             "the control plane returned a `node_id` the relay will not register (it must be \
              printable ASCII); no config was written"
@@ -256,7 +256,7 @@ async fn write_claim_config(config: &mut Config, claimed: &Claimed) -> Result<()
         ("relay.relay-host", relay_host),
     ];
     for (path, value) in updates {
-        let resolved = zeroclaw_config::helpers::resolve_field_path(&known, path);
+        let resolved = kinetic_config::helpers::resolve_field_path(&known, path);
         config.set_prop_persistent(&resolved, value)?;
     }
     // Box the large `Config` save future to stay under the clippy future-size cap.
@@ -334,7 +334,7 @@ fn ensure_control_is_secure(control: &str) -> Result<String> {
     }
 }
 
-/// Handle `zeroclaw relay claim <TOKEN> --control <URL>`.
+/// Handle `kinetic relay claim <TOKEN> --control <URL>`.
 ///
 /// Fails closed: a bad token, a non-https control URL, an unreachable control
 /// plane, a non-success response, or an unwritable config each abort with an
@@ -344,7 +344,7 @@ fn ensure_control_is_secure(control: &str) -> Result<String> {
 /// `config.data_dir` — the exact key the daemon loads and registers with on its
 /// next start. There is deliberately no independent data-dir override: proving a
 /// key under a different directory would allowlist a fingerprint the daemon then
-/// never presents. (`config.data_dir` still honors `ZEROCLAW_DATA_DIR` /
+/// never presents. (`config.data_dir` still honors `KINETIC_DATA_DIR` /
 /// `--config-dir`, which move the CLI and the daemon together.)
 /// The config paths `relay claim` persists. An env override on any of them
 /// would be silently discarded at save time, so the claim must not proceed.
@@ -367,9 +367,9 @@ fn refuse_claim_field_env_overrides(config: &Config) -> Result<()> {
     }
     let vars: Vec<String> = overridden
         .iter()
-        // The loader only reads `ZEROCLAW_<lowercase path>`, so name the exact
+        // The loader only reads `KINETIC_<lowercase path>`, so name the exact
         // variable; an upper-cased name is one the loader ignores.
-        .map(|p| format!("ZEROCLAW_{}", p.replace('.', "__")))
+        .map(|p| format!("KINETIC_{}", p.replace('.', "__")))
         .collect();
     anyhow::bail!(
         "these claim-managed settings are currently set by environment overrides: {}. \
@@ -386,7 +386,7 @@ pub async fn handle_claim(config: &mut Config, claim_token: &str, control: &str)
     if token.is_empty() {
         anyhow::bail!(
             "a claim token is required. Get one from your ZeroRelay account, then run: \
-             zeroclaw relay claim <TOKEN> --control <URL>"
+             kinetic relay claim <TOKEN> --control <URL>"
         );
     }
     let control = control.trim().trim_end_matches('/');
@@ -413,7 +413,7 @@ pub async fn handle_claim(config: &mut Config, claim_token: &str, control: &str)
     // `config.data_dir`. Using any other directory would prove a fingerprint the
     // daemon never presents at registration.
     let data_dir = config.data_dir.clone();
-    let signing_key_pkcs8 = zeroclaw_runtime::relay::ensure_signing_key(&data_dir)
+    let signing_key_pkcs8 = kinetic_runtime::relay::ensure_signing_key(&data_dir)
         .context("loading the daemon relay registration key")?;
     let proof = build_claim_proof(&signing_key_pkcs8, token)?;
     let body = claim_request_body(&proof, token);
@@ -424,9 +424,9 @@ pub async fn handle_claim(config: &mut Config, claim_token: &str, control: &str)
     // `Location` names) and refuse to route through an operator proxy
     // (`HTTP(S)_PROXY`/`ALL_PROXY`) — either would leak the token off the
     // validated destination. Mirrors the sensitive-client pattern in
-    // `zeroclaw_runtime::tools::skill_http`.
+    // `kinetic_runtime::tools::skill_http`.
     let client = reqwest::Client::builder()
-        .user_agent(format!("zeroclaw/{}", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("kinetic/{}", env!("CARGO_PKG_VERSION")))
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
@@ -449,7 +449,7 @@ pub async fn handle_claim(config: &mut Config, claim_token: &str, control: &str)
     // body would be reported as a JSON parse error, hiding the real cause (a
     // dropped connection mid-response, a TLS error) behind a misleading message.
     let (text, overflowed) =
-        zeroclaw_tools::helpers::read_response_text(response, Some(MAX_CLAIM_RESPONSE_BYTES))
+        kinetic_tools::helpers::read_response_text(response, Some(MAX_CLAIM_RESPONSE_BYTES))
             .await
             .context(
                 "could not read the ZeroRelay control plane's response body; no config was written",
@@ -598,7 +598,7 @@ mod tests {
         // Mint a real registration key the same way the daemon does, so the proof
         // is derived from the canonical registration key source.
         let tmp = tempfile::TempDir::new().unwrap();
-        let pkcs8 = zeroclaw_runtime::relay::ensure_signing_key(tmp.path()).unwrap();
+        let pkcs8 = kinetic_runtime::relay::ensure_signing_key(tmp.path()).unwrap();
         build_claim_proof(&pkcs8, "tok-xyz").unwrap()
     }
 
@@ -1106,7 +1106,7 @@ mod tests {
                 msg.contains("No request was sent"),
                 "the refusal must state that nothing was sent: {msg}"
             );
-            let var = format!("ZEROCLAW_{}", overridden.replace('.', "__"));
+            let var = format!("KINETIC_{}", overridden.replace('.', "__"));
             assert!(
                 msg.contains(&var),
                 "the refusal must name the variable the loader reads ({var}): {msg}"
@@ -1283,7 +1283,7 @@ mod tests {
         // from `config.data_dir` on start. `ensure_signing_key` is idempotent, so
         // this reads back the very key the claim signed with. The fingerprint is
         // sha256(pubkey) and independent of the token, so any token serves here.
-        let daemon_key = zeroclaw_runtime::relay::ensure_signing_key(&config.data_dir).unwrap();
+        let daemon_key = kinetic_runtime::relay::ensure_signing_key(&config.data_dir).unwrap();
         let daemon_fpr = build_claim_proof(&daemon_key, "any").unwrap().fingerprint;
         assert_eq!(
             proven_fpr, daemon_fpr,
@@ -1294,7 +1294,7 @@ mod tests {
         // fingerprint the removed `--data-dir` override could have proved — yields
         // a different fingerprint, so this assertion is not vacuous.
         let other = tempfile::TempDir::new().unwrap();
-        let other_key = zeroclaw_runtime::relay::ensure_signing_key(other.path()).unwrap();
+        let other_key = kinetic_runtime::relay::ensure_signing_key(other.path()).unwrap();
         let other_fpr = build_claim_proof(&other_key, "any").unwrap().fingerprint;
         assert_ne!(
             proven_fpr, other_fpr,

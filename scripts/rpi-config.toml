@@ -1,9 +1,9 @@
-# ZeroClaw — Raspberry Pi production configuration
+# KineticVM — Raspberry Pi production configuration
 #
-# Copy this to ~/.zeroclaw/config.toml on the Pi.
+# Copy this to ~/.kinetic/config.toml on the Pi.
 # deploy-rpi.sh does this automatically.
 #
-# API key is loaded from ~/.zeroclaw/.env (EnvironmentFile in systemd).
+# API key is loaded from ~/.kinetic/.env (EnvironmentFile in systemd).
 # Set it there as: ANTHROPIC_API_KEY=your-key-here
 # Or set api_key directly below (not recommended for version control).
 
@@ -141,7 +141,7 @@ challenge_max_attempts = 3
 
 [security.estop]
 enabled = false
-state_file = "~/.zeroclaw/estop-state.json"
+state_file = "~/.kinetic/estop-state.json"
 require_otp_to_resume = true
 
 [security.syscall_anomaly]
@@ -399,7 +399,7 @@ auto_hydrate = true
 sqlite_journal_mode = "wal"
 
 [memory.qdrant]
-collection = "zeroclaw_memories"
+collection = "kinetic_memories"
 
 [storage.provider.config]
 provider = ""
@@ -437,7 +437,7 @@ enabled = false
 allowed_domains = []
 max_response_size = 1000000
 timeout_secs = 30
-user_agent = "ZeroClaw/1.0"
+user_agent = "KineticVM/1.0"
 
 [http_request.credential_profiles]
 
@@ -453,7 +453,7 @@ allowed_domains = ["*"]
 blocked_domains = []
 max_response_size = 500000
 timeout_secs = 30
-user_agent = "ZeroClaw/1.0"
+user_agent = "KineticVM/1.0"
 
 [web_search]
 enabled = false
@@ -464,7 +464,7 @@ timeout_secs = 15
 [proxy]
 enabled = false
 no_proxy = []
-scope = "zeroclaw"
+scope = "kinetic"
 services = []
 
 [identity]
@@ -572,7 +572,7 @@ max_duration_secs = 120
 
 [agents_ipc]
 enabled = false
-db_path = "~/.zeroclaw/agents.db"
+db_path = "~/.kinetic/agents.db"
 staleness_secs = 300
 
 [mcp]

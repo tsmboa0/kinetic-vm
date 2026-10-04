@@ -1,4 +1,4 @@
-//! Regression coverage for direct `zeroclaw agent` terminal-failure delivery.
+//! Regression coverage for direct `kinetic agent` terminal-failure delivery.
 //!
 //! This launches the production binary against a local OpenAI-compatible mock.
 //! It proves the single-shot CLI boundary renders the Fluent message instead of
@@ -54,7 +54,7 @@ runtime_profile = "default"
 
     let config_dir_arg = config_dir.path().to_path_buf();
     let output = std::thread::spawn(move || {
-        Command::new(env!("CARGO_BIN_EXE_zeroclaw"))
+        Command::new(env!("CARGO_BIN_EXE_kinetic"))
             .env("RUST_LOG", "off")
             .args([
                 "--config-dir",
@@ -66,13 +66,13 @@ runtime_profile = "default"
                 "test prompt",
             ])
             .output()
-            .expect("run zeroclaw agent")
+            .expect("run kinetic agent")
     })
     .join()
-    .expect("zeroclaw agent process must not panic");
+    .expect("kinetic agent process must not panic");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let expected = zeroclaw_runtime::agent::semantic_empty_terminal_completion_message(None);
+    let expected = kinetic_runtime::agent::semantic_empty_terminal_completion_message(None);
     assert!(
         !output.status.success(),
         "semantic-empty terminal completion must fail\nstdout:\n{}\nstderr:\n{stderr}",
@@ -140,7 +140,7 @@ runtime_profile = "default"
 
     let config_dir_arg = config_dir.path().to_path_buf();
     let output = std::thread::spawn(move || {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_zeroclaw"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_kinetic"))
             .env("RUST_LOG", "off")
             .args([
                 "--config-dir",
@@ -153,7 +153,7 @@ runtime_profile = "default"
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("start interactive zeroclaw agent");
+            .expect("start interactive kinetic agent");
         child
             .stdin
             .as_mut()
@@ -162,13 +162,13 @@ runtime_profile = "default"
             .expect("send interactive prompt and quit");
         child
             .wait_with_output()
-            .expect("wait for interactive zeroclaw agent")
+            .expect("wait for interactive kinetic agent")
     })
     .join()
-    .expect("interactive zeroclaw agent process must not panic");
+    .expect("interactive kinetic agent process must not panic");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let expected = zeroclaw_runtime::agent::semantic_empty_terminal_completion_message(None);
+    let expected = kinetic_runtime::agent::semantic_empty_terminal_completion_message(None);
     assert!(
         output.status.success(),
         "interactive CLI handles the terminal error then exits on /quit\nstdout:\n{}\nstderr:\n{stderr}",

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# deploy-rpi.sh — cross-compile ZeroClaw for Raspberry Pi and deploy via SSH.
+# deploy-rpi.sh — cross-compile KineticVM for Raspberry Pi and deploy via SSH.
 #
 # Cross-compilation (pick ONE — the script auto-detects):
 #
@@ -18,7 +18,7 @@
 #   RPI_HOST        — hostname or IP of the Pi        (default: raspberrypi.local)
 #   RPI_USER        — SSH user on the Pi              (default: pi)
 #   RPI_PORT        — SSH port                        (default: 22)
-#   RPI_DIR         — remote deployment dir           (default: /home/$RPI_USER/zeroclaw)
+#   RPI_DIR         — remote deployment dir           (default: /home/$RPI_USER/kinetic)
 #   RPI_PASS        — SSH password (uses sshpass)     (default: prompt interactively)
 #   CROSS_TOOL      — force "zigbuild" or "cross"     (default: auto-detect)
 
@@ -27,10 +27,10 @@ set -euo pipefail
 RPI_HOST="${RPI_HOST:-raspberrypi.local}"
 RPI_USER="${RPI_USER:-pi}"
 RPI_PORT="${RPI_PORT:-22}"
-RPI_DIR="${RPI_DIR:-/home/${RPI_USER}/zeroclaw}"
+RPI_DIR="${RPI_DIR:-/home/${RPI_USER}/kinetic}"
 TARGET="aarch64-unknown-linux-gnu"
 FEATURES="hardware,peripheral-rpi"
-BINARY="target/${TARGET}/release/zeroclaw"
+BINARY="target/${TARGET}/release/kinetic"
 SSH_OPTS="-p ${RPI_PORT} -o StrictHostKeyChecking=no -o ConnectTimeout=10"
 # scp uses -P (uppercase) for port; ssh uses -p (lowercase)
 SCP_OPTS="-P ${RPI_PORT} -o StrictHostKeyChecking=no -o ConnectTimeout=10"
@@ -48,7 +48,7 @@ if [[ -n "${RPI_PASS:-}" ]]; then
   SCP_CMD="sshpass -p ${RPI_PASS} scp"
 fi
 
-echo "==> Building ZeroClaw for Raspberry Pi (${TARGET})"
+echo "==> Building KineticVM for Raspberry Pi (${TARGET})"
 echo "    Features: ${FEATURES}"
 echo "    Target host: ${RPI_USER}@${RPI_HOST}:${RPI_PORT}"
 echo ""
@@ -125,10 +125,10 @@ ls -lh "${BINARY}"
 
 # ── 2. Stop running service (if any) so binary can be overwritten ─────────────
 echo ""
-echo "==> Stopping zeroclaw service (if running)"
+echo "==> Stopping kinetic service (if running)"
 # shellcheck disable=SC2029
 ${SSH_CMD} ${SSH_OPTS} "${RPI_USER}@${RPI_HOST}" \
-  "sudo systemctl stop zeroclaw 2>/dev/null || true"
+  "sudo systemctl stop kinetic 2>/dev/null || true"
 
 # ── 3. Create remote directory ────────────────────────────────────────────────
 echo ""
@@ -138,8 +138,8 @@ ${SSH_CMD} ${SSH_OPTS} "${RPI_USER}@${RPI_HOST}" "mkdir -p ${RPI_DIR}"
 
 # ── 4. Deploy binary ──────────────────────────────────────────────────────────
 echo ""
-echo "==> Deploying binary to ${RPI_USER}@${RPI_HOST}:${RPI_DIR}/zeroclaw"
-${SCP_CMD} ${SCP_OPTS} "${BINARY}" "${RPI_USER}@${RPI_HOST}:${RPI_DIR}/zeroclaw"
+echo "==> Deploying binary to ${RPI_USER}@${RPI_HOST}:${RPI_DIR}/kinetic"
+${SCP_CMD} ${SCP_OPTS} "${BINARY}" "${RPI_USER}@${RPI_HOST}:${RPI_DIR}/kinetic"
 
 # ── 4. Create .env skeleton (if it doesn't exist) ────────────────────────────
 ENV_DEST="${RPI_DIR}/.env"
@@ -159,11 +159,11 @@ else
 fi
 
 # ── 5. Deploy config ─────────────────────────────────────────────────────────
-CONFIG_DEST="/home/${RPI_USER}/.zeroclaw/config.toml"
+CONFIG_DEST="/home/${RPI_USER}/.kinetic/config.toml"
 echo ""
 echo "==> Deploying config to ${CONFIG_DEST}"
 # shellcheck disable=SC2029
-${SSH_CMD} ${SSH_OPTS} "${RPI_USER}@${RPI_HOST}" "mkdir -p /home/${RPI_USER}/.zeroclaw"
+${SSH_CMD} ${SSH_OPTS} "${RPI_USER}@${RPI_HOST}" "mkdir -p /home/${RPI_USER}/.kinetic"
 # Preserve existing api_key from the remote config if present.
 # shellcheck disable=SC2029
 EXISTING_API_KEY=$(${SSH_CMD} ${SSH_OPTS} "${RPI_USER}@${RPI_HOST}" \
@@ -177,20 +177,20 @@ if [[ -n "${EXISTING_API_KEY}" ]]; then
 fi
 
 # ── 6. Deploy and enable systemd service ─────────────────────────────────────
-SERVICE_DEST="/etc/systemd/system/zeroclaw.service"
+SERVICE_DEST="/etc/systemd/system/kinetic.service"
 echo ""
 echo "==> Installing systemd service (requires sudo on the Pi)"
 _RENDERED_SERVICE=$(mktemp)
-sed "s|@@RPI_USER@@|${RPI_USER}|g" scripts/zeroclaw.service > "${_RENDERED_SERVICE}"
-${SCP_CMD} ${SCP_OPTS} "${_RENDERED_SERVICE}" "${RPI_USER}@${RPI_HOST}:/tmp/zeroclaw.service"
+sed "s|@@RPI_USER@@|${RPI_USER}|g" scripts/kinetic.service > "${_RENDERED_SERVICE}"
+${SCP_CMD} ${SCP_OPTS} "${_RENDERED_SERVICE}" "${RPI_USER}@${RPI_HOST}:/tmp/kinetic.service"
 rm -f "${_RENDERED_SERVICE}"
 # shellcheck disable=SC2029
 ${SSH_CMD} ${SSH_OPTS} "${RPI_USER}@${RPI_HOST}" \
-  "sudo mv /tmp/zeroclaw.service ${SERVICE_DEST} && \
+  "sudo mv /tmp/kinetic.service ${SERVICE_DEST} && \
    sudo systemctl daemon-reload && \
-   sudo systemctl enable zeroclaw && \
-   sudo systemctl restart zeroclaw && \
-   sudo systemctl status zeroclaw --no-pager || true"
+   sudo systemctl enable kinetic && \
+   sudo systemctl restart kinetic && \
+   sudo systemctl status kinetic --no-pager || true"
 
 # ── 7. Runtime permissions ───────────────────────────────────────────────────
 echo ""
@@ -199,7 +199,7 @@ echo "==> Granting ${RPI_USER} access to GPIO group"
 ${SSH_CMD} ${SSH_OPTS} "${RPI_USER}@${RPI_HOST}" \
   "sudo usermod -aG gpio ${RPI_USER} || true"
 
-# ── 8. Reset ACT LED trigger so ZeroClaw can control it ──────────────────────
+# ── 8. Reset ACT LED trigger so KineticVM can control it ──────────────────────
 echo ""
 echo "==> Installing udev rule for ACT LED sysfs access by gpio group"
 ${SCP_CMD} ${SCP_OPTS} "scripts/99-act-led.rules" "${RPI_USER}@${RPI_HOST}:/tmp/99-act-led.rules"
@@ -219,8 +219,8 @@ ${SSH_CMD} ${SSH_OPTS} "${RPI_USER}@${RPI_HOST}" \
 echo ""
 echo "==> Deployment complete!"
 echo ""
-echo "    ZeroClaw is running at http://${RPI_HOST}:8080"
+echo "    KineticVM is running at http://${RPI_HOST}:8080"
 echo "    POST /api/chat  — chat with the agent"
 echo "    GET  /health    — health check"
 echo ""
-echo "    To check logs: ssh ${RPI_USER}@${RPI_HOST} 'journalctl -u zeroclaw -f'"
+echo "    To check logs: ssh ${RPI_USER}@${RPI_HOST} 'journalctl -u kinetic -f'"

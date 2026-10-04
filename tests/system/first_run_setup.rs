@@ -14,18 +14,18 @@
 //! # What is and is not covered
 //!
 //! **Covered.** The shared Quickstart apply core
-//! (`zeroclaw_runtime::quickstart::apply_with_surface`) driven with a
+//! (`kinetic_runtime::quickstart::apply_with_surface`) driven with a
 //! hand-built [`BuilderSubmission`] into a hermetic temp install root; the
 //! persisted `config.toml`; and — in
 //! [`first_run_config_loads_through_the_real_binary`] — the real
-//! `Config::load_or_init()` loader, reached by spawning the actual `zeroclaw`
+//! `Config::load_or_init()` loader, reached by spawning the actual `kinetic`
 //! binary as a child process against that install root.
 //!
 //! **Not covered.** The adapters that *build* a submission are each their own
 //! surface and none of them run here: the zerocode TUI form
 //! (`apps/zerocode/src/quickstart_pane.rs::to_submission`), the interactive CLI
 //! quickstart (`src/main.rs`), and the gateway HTTP handler
-//! (`crates/zeroclaw-gateway/src/api_quickstart.rs`). A bug that lives purely
+//! (`crates/kinetic-gateway/src/api_quickstart.rs`). A bug that lives purely
 //! in one of those adapters — a field the form never collects, a key the HTTP
 //! layer renames — is invisible to this file. Those are follow-up matrix rows,
 //! not something to fake here with a hand-built submission that would only
@@ -56,7 +56,7 @@
 //!    and [`FirstRun::assert_submitted_channel_fields_persisted`]. Add
 //!    scenario-specific typed assertions on `run.reloaded()` afterwards.
 //! 4. To assert against the real loader instead of the in-process parse, call
-//!    [`run_zeroclaw`] with a read-only subcommand and check its output.
+//!    [`run_kinetic`] with a read-only subcommand and check its output.
 //! 5. Any new harness check needs a matching guard test proving it fails on the
 //!    shape it claims to catch — see the guard section at the bottom.
 //!
@@ -66,14 +66,14 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use tempfile::TempDir;
-use zeroclaw_config::presets::{
+use kinetic_config::presets::{
     AgentIdentity, BuilderSubmission, ChannelQuickStart, MemoryChoice, ModelProviderChoice,
     SelectorChoice,
 };
-use zeroclaw_config::schema::{Config, DEFAULT_WEBHOOK_CHANNEL_PORT};
-use zeroclaw_config::secrets::SecretStore;
-use zeroclaw_runtime::quickstart::{self, FieldSection, Surface};
+use kinetic_config::schema::{Config, DEFAULT_WEBHOOK_CHANNEL_PORT};
+use kinetic_config::secrets::SecretStore;
+use kinetic_runtime::quickstart::{self, FieldSection, Surface};
+use tempfile::TempDir;
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Harness
@@ -115,7 +115,7 @@ impl FirstRun {
         // The daemon's loader (`Config::load_or_init`) parses through the
         // migration chain rather than plain serde; use the same entry point so
         // this test sees what a real second launch would see.
-        let reloaded = zeroclaw_config::migration::migrate_to_current(&raw_text)
+        let reloaded = kinetic_config::migration::migrate_to_current(&raw_text)
             .expect("persisted config must load through the normal loader");
         let raw: toml::Value = toml::from_str(&raw_text).expect("persisted config must be TOML");
 
@@ -170,7 +170,7 @@ impl FirstRun {
         let raw_text = toml::to_string(&doc).expect("corrupted config must re-serialize");
         std::fs::write(self.dir.path().join("config.toml"), &raw_text)
             .expect("corrupted config must be writable");
-        self.reloaded = zeroclaw_config::migration::migrate_to_current(&raw_text)
+        self.reloaded = kinetic_config::migration::migrate_to_current(&raw_text)
             .expect("corrupted config must still parse");
         self.raw = toml::Value::Table(doc);
         self
@@ -299,7 +299,7 @@ impl FirstRun {
         }
     }
 
-    /// (4a) `zeroclaw agents list` through the real loader reports exactly
+    /// (4a) `kinetic agents list` through the real loader reports exactly
     /// these aliases, in order.
     ///
     /// Compared as a whole list rather than by substring: `contains("bot")` is
@@ -307,7 +307,7 @@ impl FirstRun {
     /// the assertion would stop distinguishing the config it claims to check.
     fn assert_loader_lists_agents(&self, expected: &[&str]) {
         let stdout = stdout_of(
-            &run_zeroclaw(self.install_root(), &["agents", "list"]),
+            &run_kinetic(self.install_root(), &["agents", "list"]),
             "agents list",
         );
         let listed: Vec<&str> = stdout
@@ -321,7 +321,7 @@ impl FirstRun {
         );
     }
 
-    /// (4b) `zeroclaw config get <agent>.channels` through the real loader
+    /// (4b) `kinetic config get <agent>.channels` through the real loader
     /// reports exactly these channel refs, in order.
     ///
     /// The CLI renders a `StringArray` prop as a TOML array literal inside the
@@ -331,7 +331,7 @@ impl FirstRun {
     fn assert_loader_reports_agent_channels(&self, agent: &str, expected: &[&str]) {
         let path = format!("agents.{agent}.channels");
         let stdout = stdout_of(
-            &run_zeroclaw(self.install_root(), &["config", "get", &path, "--json"]),
+            &run_kinetic(self.install_root(), &["config", "get", &path, "--json"]),
             &format!("config get {path}"),
         );
         let envelope: serde_json::Value =
@@ -411,33 +411,33 @@ fn submission(agent: &str, channels: Vec<SelectorChoice<ChannelQuickStart>>) -> 
     }
 }
 
-/// Run the real `zeroclaw` binary against a first-run install root.
+/// Run the real `kinetic` binary against a first-run install root.
 ///
-/// Every `ZEROCLAW_*` variable inherited from the developer's shell is stripped
-/// from the child before `ZEROCLAW_CONFIG_DIR` is set, so an operator env var
-/// (the `ZEROCLAW_*` config-override grammar included) cannot leak into the
+/// Every `KINETIC_*` variable inherited from the developer's shell is stripped
+/// from the child before `KINETIC_CONFIG_DIR` is set, so an operator env var
+/// (the `KINETIC_*` config-override grammar included) cannot leak into the
 /// result. The parent's environment is only read, never mutated, so this stays
 /// safe under parallel test execution — which is exactly why the loader is
 /// exercised in a child process rather than in-process.
-fn run_zeroclaw(install_root: &Path, args: &[&str]) -> std::process::Output {
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_zeroclaw"));
+fn run_kinetic(install_root: &Path, args: &[&str]) -> std::process::Output {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_kinetic"));
     for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("ZEROCLAW_") {
+        if key.to_string_lossy().starts_with("KINETIC_") {
             command.env_remove(&key);
         }
     }
     command
         .args(args)
-        .env("ZEROCLAW_CONFIG_DIR", install_root)
+        .env("KINETIC_CONFIG_DIR", install_root)
         .output()
-        .expect("failed to spawn the zeroclaw binary")
+        .expect("failed to spawn the kinetic binary")
 }
 
 /// Assert the child exited cleanly and return its stdout.
 fn stdout_of(output: &std::process::Output, what: &str) -> String {
     assert!(
         output.status.success(),
-        "`zeroclaw {what}` exited with {:?} against a first-run config\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        "`kinetic {what}` exited with {:?} against a first-run config\n--- stdout ---\n{}\n--- stderr ---\n{}",
         output.status.code(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
@@ -637,7 +637,7 @@ async fn first_run_without_channels_validates_and_binds_nothing() {
 
 /// **The real loader.** Everything above reloads in-process through
 /// `migrate_to_current`, which is the parse but not the whole of
-/// `Config::load_or_init()`. Here the actual `zeroclaw` binary is spawned
+/// `Config::load_or_init()`. Here the actual `kinetic` binary is spawned
 /// against the first-run install root, so the production loader runs in full —
 /// directory resolution, filesystem migration checks, salvage bookkeeping,
 /// runtime path stamping, secret-store wiring — and the surfaces a user reads
@@ -660,7 +660,7 @@ async fn first_run_config_loads_through_the_real_binary() {
 
     // `channel list` is the surface that disagreed in the motivating failure:
     // it must mark Telegram configured, not just count something.
-    let listing = stdout_of(&run_zeroclaw(root, &["channel", "list"]), "channel list");
+    let listing = stdout_of(&run_kinetic(root, &["channel", "list"]), "channel list");
     assert!(
         listing.contains("✅ Telegram"),
         "the real loader must see the channel the first run configured; got:\n{listing}"
@@ -675,7 +675,7 @@ async fn first_run_config_loads_through_the_real_binary() {
     // The secret reached the loader's secret store as a populated value — the
     // in-process reload cannot prove this, because it never builds one.
     let token = stdout_of(
-        &run_zeroclaw(
+        &run_kinetic(
             root,
             &["config", "get", "channels.telegram.ops.bot_token", "--json"],
         ),
@@ -691,7 +691,7 @@ async fn first_run_config_loads_through_the_real_binary() {
 }
 
 /// The surfaces a user actually reads must agree with the config that was
-/// written: `zeroclaw doctor` must see the channel as configured and must not
+/// written: `kinetic doctor` must see the channel as configured and must not
 /// report it as credential-less. The motivating failure had these disagree —
 /// doctor counted a channel while the channel runtime had nothing usable.
 ///
@@ -714,7 +714,7 @@ async fn first_run_doctor_agrees_the_channel_is_configured() {
     ))
     .await;
 
-    let report = zeroclaw_runtime::doctor::diagnose(&run.reloaded_with_paths());
+    let report = kinetic_runtime::doctor::diagnose(&run.reloaded_with_paths());
     let config_items: Vec<&str> = report
         .iter()
         .filter(|item| item.category == "config")
@@ -904,7 +904,7 @@ async fn guard_real_binary_reports_a_channel_that_is_no_longer_configured() {
     });
 
     let listing = stdout_of(
-        &run_zeroclaw(run.install_root(), &["channel", "list"]),
+        &run_kinetic(run.install_root(), &["channel", "list"]),
         "channel list",
     );
     assert!(
@@ -1045,7 +1045,7 @@ async fn guard_doctor_reports_an_enabled_channel_with_no_credential() {
             .insert("bot_token".into(), toml::Value::String(String::new()));
     });
 
-    let report = zeroclaw_runtime::doctor::diagnose(&run.reloaded_with_paths());
+    let report = kinetic_runtime::doctor::diagnose(&run.reloaded_with_paths());
     let config_items: Vec<&str> = report
         .iter()
         .filter(|item| item.category == "config")

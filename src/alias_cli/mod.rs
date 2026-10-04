@@ -1,12 +1,12 @@
-//! CLI for alias CRUD: `zeroclaw {agents,providers,channels}
+//! CLI for alias CRUD: `kinetic {agents,providers,channels}
 //! {create,list,rename,delete}`.
 
 use anyhow::{Context, Result, bail};
-use zeroclaw::{AgentsCommands, ChannelsCommands, ProvidersCommands};
-use zeroclaw_config::alias_refs::{
+use kinetic::{AgentsCommands, ChannelsCommands, ProvidersCommands};
+use kinetic_config::alias_refs::{
     self, AliasKind, CascadeError, CascadePolicy, ProviderCategory, RenameError,
 };
-use zeroclaw_config::schema::Config;
+use kinetic_config::schema::Config;
 
 mod export;
 
@@ -17,7 +17,7 @@ mod export;
 fn mt(key: &str, fallback: &str) -> String {
     #[cfg(feature = "agent-runtime")]
     {
-        zeroclaw_runtime::i18n::get_required_cli_string(key)
+        kinetic_runtime::i18n::get_required_cli_string(key)
     }
     #[cfg(not(feature = "agent-runtime"))]
     {
@@ -30,7 +30,7 @@ fn mt(key: &str, fallback: &str) -> String {
 fn mta(key: &str, args: &[(&str, &str)], fallback: &str) -> String {
     #[cfg(feature = "agent-runtime")]
     {
-        zeroclaw_runtime::i18n::get_required_cli_string_with_args(key, args)
+        kinetic_runtime::i18n::get_required_cli_string_with_args(key, args)
     }
     #[cfg(not(feature = "agent-runtime"))]
     {
@@ -358,7 +358,7 @@ async fn save(config: &mut Config) -> Result<()> {
 #[cfg(feature = "agent-runtime")]
 pub(crate) enum AgentMutationRoute {
     Daemon(serde_json::Value),
-    Offline(zeroclaw_runtime::live_config_authority::ConfigOwnershipGuard),
+    Offline(kinetic_runtime::live_config_authority::ConfigOwnershipGuard),
 }
 
 #[cfg(feature = "agent-runtime")]
@@ -367,16 +367,16 @@ pub(crate) async fn route_agent_mutation(
     method: &str,
     params: serde_json::Value,
 ) -> Result<AgentMutationRoute> {
-    match zeroclaw_runtime::rpc::local::call_local(config, method, params).await {
+    match kinetic_runtime::rpc::local::call_local(config, method, params).await {
         Ok(result) => Ok(AgentMutationRoute::Daemon(result)),
-        Err(zeroclaw_runtime::rpc::local::LocalRpcCallError::Unavailable { path, source })
+        Err(kinetic_runtime::rpc::local::LocalRpcCallError::Unavailable { path, source })
             if matches!(
                 source.kind(),
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
             ) =>
         {
             let ownership =
-                zeroclaw_runtime::live_config_authority::ConfigOwnershipGuard::acquire(
+                kinetic_runtime::live_config_authority::ConfigOwnershipGuard::acquire(
                     &config.data_dir,
                 )
                 .map_err(|error| {
@@ -406,7 +406,7 @@ pub(crate) async fn route_agent_mutation(
 
 #[cfg(feature = "agent-runtime")]
 fn print_daemon_create(value: serde_json::Value) -> Result<()> {
-    let result: zeroclaw_runtime::rpc::types::ConfigMapKeyCreateResult =
+    let result: kinetic_runtime::rpc::types::ConfigMapKeyCreateResult =
         serde_json::from_value(value).context("decode daemon agent-create response")?;
     if result.created {
         println!(
@@ -438,7 +438,7 @@ fn print_daemon_create(value: serde_json::Value) -> Result<()> {
 
 #[cfg(feature = "agent-runtime")]
 fn print_daemon_rename(value: serde_json::Value) -> Result<()> {
-    let result: zeroclaw_runtime::rpc::types::ConfigMapKeyRenameResult =
+    let result: kinetic_runtime::rpc::types::ConfigMapKeyRenameResult =
         serde_json::from_value(value).context("decode daemon agent-rename response")?;
     let count = result.rewritten.to_string();
     println!(
@@ -469,7 +469,7 @@ fn print_daemon_rename(value: serde_json::Value) -> Result<()> {
 
 #[cfg(feature = "agent-runtime")]
 fn print_daemon_delete_preview(value: serde_json::Value) -> Result<()> {
-    let result: zeroclaw_runtime::rpc::types::AgentDeletePreviewResult =
+    let result: kinetic_runtime::rpc::types::AgentDeletePreviewResult =
         serde_json::from_value(value).context("decode daemon agent-delete preview")?;
     if result.allowed {
         let count = result.scrubs.len().to_string();
@@ -525,7 +525,7 @@ fn print_daemon_delete_preview(value: serde_json::Value) -> Result<()> {
 
 #[cfg(feature = "agent-runtime")]
 fn print_daemon_delete(value: serde_json::Value) -> Result<()> {
-    let result: zeroclaw_runtime::rpc::types::AgentDeleteResult =
+    let result: kinetic_runtime::rpc::types::AgentDeleteResult =
         serde_json::from_value(value).context("decode daemon agent-delete response")?;
     if !result.deleted {
         bail!(
@@ -685,8 +685,8 @@ pub async fn handle_agents(cmd: AgentsCommands, config: &mut Config) -> Result<(
 /// owned-state cascade.
 #[cfg(all(feature = "gateway", feature = "agent-runtime"))]
 type OwnedStateHandles = (
-    std::sync::Arc<dyn zeroclaw_memory::Memory>,
-    Option<std::sync::Arc<dyn zeroclaw_infra::session_backend::SessionBackend>>,
+    std::sync::Arc<dyn kinetic_memory::Memory>,
+    Option<std::sync::Arc<dyn kinetic_infra::session_backend::SessionBackend>>,
 );
 
 #[cfg(not(all(feature = "gateway", feature = "agent-runtime")))]
@@ -695,21 +695,18 @@ type OwnedStateHandles = ();
 #[cfg(all(feature = "gateway", feature = "agent-runtime"))]
 fn build_owned_state_handles(config: &Config) -> Result<OwnedStateHandles> {
     use std::sync::Arc;
-    let mem: Arc<dyn zeroclaw_memory::Memory> = if config.agents.is_empty() {
-        Arc::new(zeroclaw_memory::NoneMemory::new("none"))
+    let mem: Arc<dyn kinetic_memory::Memory> = if config.agents.is_empty() {
+        Arc::new(kinetic_memory::NoneMemory::new("none"))
     } else {
         Arc::from(
-            zeroclaw_memory::create_memory_from_config(config, None)
+            kinetic_memory::create_memory_from_config(config, None)
                 .context("open memory backend for the owned-state cascade")?,
         )
     };
     let session_backend = if config.gateway.session_persistence {
         Some(
-            zeroclaw_infra::make_session_backend(
-                &config.data_dir,
-                &config.channels.session_backend,
-            )
-            .context("open session backend for the owned-state cascade")?,
+            kinetic_infra::make_session_backend(&config.data_dir, &config.channels.session_backend)
+                .context("open session backend for the owned-state cascade")?,
         )
     } else {
         None
@@ -755,7 +752,7 @@ async fn agent_delete_owned_state(
     (mem, session_backend): OwnedStateHandles,
 ) -> Result<()> {
     let archive =
-        zeroclaw_runtime::agent_lifecycle::archive_agent_workspace(config, alias, workspace).await;
+        kinetic_runtime::agent_lifecycle::archive_agent_workspace(config, alias, workspace).await;
     for warning in archive.warnings {
         eprintln!(
             "{}",
@@ -999,7 +996,7 @@ pub async fn handle_channels(cmd: ChannelsCommands, config: &mut Config) -> Resu
             // no filter we walk the canonical channel-type list.
             let types: Vec<String> = match channel_type {
                 Some(t) => vec![t],
-                None => zeroclaw_config::schema::v2::V3_CHANNEL_TYPES
+                None => kinetic_config::schema::v2::V3_CHANNEL_TYPES
                     .iter()
                     .map(|s| (*s).to_string())
                     .collect(),
@@ -1102,7 +1099,7 @@ mod tests {
             data_dir: temp.path().join("data"),
             ..Config::default()
         };
-        let _owner = zeroclaw_runtime::LiveConfigAuthority::new_owned(config.clone()).unwrap();
+        let _owner = kinetic_runtime::LiveConfigAuthority::new_owned(config.clone()).unwrap();
 
         let error = route_agent_mutation(
             &mut config,
@@ -1124,8 +1121,8 @@ mod tests {
     #[cfg(all(feature = "gateway", feature = "agent-runtime"))]
     #[tokio::test]
     async fn final_agent_delete_retains_the_predelete_memory_backend_for_cleanup() {
+        use kinetic_api::memory_traits::{Memory, MemoryCategory};
         use std::sync::Arc;
-        use zeroclaw_api::memory_traits::{Memory, MemoryCategory};
 
         let temp = tempfile::TempDir::new().unwrap();
         let mut config = Config {
@@ -1136,7 +1133,7 @@ mod tests {
         config.memory.backend = "sqlite".to_string();
         config.agents.insert(
             "victim".to_string(),
-            zeroclaw_config::schema::AliasedAgentConfig::default(),
+            kinetic_config::schema::AliasedAgentConfig::default(),
         );
 
         let workspace = config.agent_workspace_dir("victim");

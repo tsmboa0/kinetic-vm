@@ -2,8 +2,8 @@
 //! All tests in this module require real external API credentials and are
 //! marked with `#[ignore]`. Run with: `cargo test --test live -- --ignored`
 
-use zeroclaw::providers::ModelProviderRuntimeOptions;
-use zeroclaw::providers::traits::{ChatMessage, ModelProvider};
+use kinetic::providers::ModelProviderRuntimeOptions;
+use kinetic::providers::traits::{ChatMessage, ModelProvider};
 
 /// Zero = greedy sampling; the multi-turn recall test asserts the exact
 /// secret word ("zephyr") appears in the reply, so deterministic output is
@@ -13,7 +13,7 @@ const RECALL_TEMPERATURE: f64 = 0.0;
 #[tokio::test]
 #[ignore = "requires live OpenAI Codex OAuth credentials"]
 async fn e2e_live_openai_codex_multi_turn() {
-    use zeroclaw::providers::openai_codex::OpenAiCodexModelProvider;
+    use kinetic::providers::openai_codex::OpenAiCodexModelProvider;
 
     let model_provider =
         OpenAiCodexModelProvider::new("test", &ModelProviderRuntimeOptions::default(), None)

@@ -1,1 +1,1 @@
-pub use zeroclaw_tools::hardware_memory_map::*;
+pub use kinetic_tools::hardware_memory_map::*;

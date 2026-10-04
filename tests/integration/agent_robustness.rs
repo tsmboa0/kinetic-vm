@@ -2,7 +2,7 @@
 
 use crate::support::helpers::{build_agent, text_response, tool_response};
 use crate::support::{CountingTool, EchoTool, FailingTool, MockModelProvider};
-use zeroclaw::providers::{ChatResponse, ToolCall};
+use kinetic::providers::{ChatResponse, ToolCall};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // TG4.1: Malformed tool call recovery

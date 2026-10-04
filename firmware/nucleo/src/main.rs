@@ -1,4 +1,4 @@
-//! ZeroClaw Nucleo-F401RE firmware — JSON-over-serial peripheral.
+//! KineticVM Nucleo-F401RE firmware — JSON-over-serial peripheral.
 
 #![no_std]
 #![no_main]
@@ -9,7 +9,7 @@ use embassy_executor::Spawner;
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::usart::{Config, Uart};
 use heapless::String;
-use zeroclaw_fw_protocol::{copy_id, write_err, write_ok, Command};
+use kinetic_fw_protocol::{copy_id, write_err, write_ok, Command};
 use {defmt_rtt as _, panic_probe as _};
 
 /// Arduino-style pin 13 = PA5 (User LED LD2 on Nucleo-F401RE)
@@ -28,7 +28,7 @@ async fn main(_spawner: Spawner) {
     };
     let mut led = Output::new(p.PA5, Level::Low, Speed::Low);
 
-    info!("ZeroClaw Nucleo firmware ready on USART2 (115200)");
+    info!("KineticVM Nucleo firmware ready on USART2 (115200)");
 
     let mut line_buf: heapless::Vec<u8, 256> = heapless::Vec::new();
     let mut id_buf = [0u8; 16];

@@ -1,4 +1,4 @@
-//! `zeroclaw oidc token <alias>` through the real command entry point: stdout
+//! `kinetic oidc token <alias>` through the real command entry point: stdout
 //! carries exactly the access token on success and nothing on failure, with
 //! the OTP prelude enabled and no seed on disk (the case where startup would
 //! otherwise print a freshly minted OTP enrollment URI to stdout).
@@ -34,7 +34,7 @@ grants = {{ sessions = ["read"] }}
 
 [oidc.corp]
 issuer = "{issuer}"
-audience = "zeroclaw"
+audience = "kinetic"
 client_id = "svc"
 client_secret = "s3cr3t"
 service_profile_map = {{ "svc" = "service" }}
@@ -45,15 +45,15 @@ service_profile_map = {{ "svc" = "service" }}
 }
 
 fn run_enrollment(config_dir: &std::path::Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_zeroclaw"))
-        .env("ZEROCLAW_CONFIG_DIR", config_dir)
+    Command::new(env!("CARGO_BIN_EXE_kinetic"))
+        .env("KINETIC_CONFIG_DIR", config_dir)
         .env("RUST_LOG", "off")
         .args(["oidc", "token", "corp"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("run zeroclaw oidc token")
+        .expect("run kinetic oidc token")
 }
 
 async fn idp(token_response: ResponseTemplate) -> MockServer {

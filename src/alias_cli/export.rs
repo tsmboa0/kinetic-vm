@@ -1,7 +1,7 @@
-//! `zeroclaw agents export` — write an agent bundle to disk.
+//! `kinetic agents export` — write an agent bundle to disk.
 //!
 //! The closure computation, credential scrubbing, and risk analysis all live
-//! in [`zeroclaw_config::agent_bundle`]. This module is the I/O half: it
+//! in [`kinetic_config::agent_bundle`]. This module is the I/O half: it
 //! materializes a plan into a directory and reports to the operator what the
 //! bundle carries, what it left behind, and what a receiving install would be
 //! asked to grant.
@@ -27,23 +27,23 @@ use anyhow::{Context, Result, bail};
 use cap_fs_ext::{DirEntryExt, DirExt, FollowSymlinks, MetadataExt, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
-use zeroclaw_config::agent_bundle::{
+use kinetic_config::agent_bundle::{
     self, CONFIG_FILE, ExportPlan, MANIFEST_FILE, Provenance, SKILLS_DIR, SkillBundleSource,
     WORKSPACE_DIR,
 };
-use zeroclaw_config::schema::Config;
+use kinetic_config::schema::Config;
 
 use super::{mt, mta};
 
 /// Staging directory prefix. Staging lives beside the destination so the
 /// publishing rename stays within one filesystem.
-const STAGING_PREFIX: &str = ".zeroclaw-export-";
+const STAGING_PREFIX: &str = ".kinetic-export-";
 
 /// Prefix for the previous bundle while the new one is being moved into place.
-const RETIRED_PREFIX: &str = ".zeroclaw-export-old-";
+const RETIRED_PREFIX: &str = ".kinetic-export-old-";
 
 /// Install subtree that owns skill-bundle content. Matches the directory
-/// contract `zeroclaw_config::skill_bundles::validate_directory` enforces.
+/// contract `kinetic_config::skill_bundles::validate_directory` enforces.
 const SKILLS_FAMILY: &str = "shared";
 
 /// Install subtree that owns default-location agent workspaces.
@@ -251,7 +251,7 @@ async fn write_bundle(plan: &mut ExportPlan, out: &Path, force: bool) -> Result<
     let manifest_toml = agent_bundle::render_manifest_toml(
         plan,
         &Provenance {
-            zeroclaw_version: env!("CARGO_PKG_VERSION").to_string(),
+            kinetic_version: env!("CARGO_PKG_VERSION").to_string(),
             exported_at: chrono::Utc::now().to_rfc3339(),
         },
     )
@@ -1588,7 +1588,7 @@ fn report(plan: &ExportPlan, out: &Path, copied: &BundleCopy) {
         "\n{}",
         mt(
             "cli-agent-export-review-hint",
-            "Review config.toml, zeroclaw-agent.toml, and the files the bundle carries before \
+            "Review config.toml, kinetic-agent.toml, and the files the bundle carries before \
              sharing it."
         )
     );
@@ -1666,7 +1666,7 @@ mod tests {
             // Tests point the workspace at a temporary directory, which is
             // the "operator chose this location" shape: no install to anchor
             // to. Skill fixtures re-anchor via `bound_skills_to`.
-            source_boundaries: zeroclaw_config::agent_bundle::SourceBoundaries {
+            source_boundaries: kinetic_config::agent_bundle::SourceBoundaries {
                 install_root: workspace.to_path_buf(),
                 workspace: None,
             },
@@ -1806,13 +1806,13 @@ mod tests {
     }
 
     /// The guide tells an operator to recover a crashed export by renaming
-    /// `.zeroclaw-export-old-<token>` back, and to recognise the pair by their
+    /// `.kinetic-export-old-<token>` back, and to recognise the pair by their
     /// shared token. That pairing is a promise, so it is pinned here.
     #[test]
     fn the_retired_name_pairs_with_the_staging_directory() {
         assert_eq!(
-            retired_name(OsStr::new(".zeroclaw-export-AbC123")),
-            ".zeroclaw-export-old-AbC123"
+            retired_name(OsStr::new(".kinetic-export-AbC123")),
+            ".kinetic-export-old-AbC123"
         );
     }
 
@@ -1873,7 +1873,7 @@ mod tests {
         // outside `memory/`, and is memory in another form.
         write(
             &source.path().join("MEMORY_SNAPSHOT.md"),
-            "# 🧠 ZeroClaw Memory Snapshot\n\n- user's home address\n",
+            "# 🧠 KineticVM Memory Snapshot\n\n- user's home address\n",
         );
 
         let parent = tempfile::tempdir().unwrap();
@@ -1949,7 +1949,7 @@ mod tests {
     #[test]
     fn missing_workspace_is_not_an_error() {
         let dest = tempfile::tempdir().unwrap();
-        let plan = plan_for(Path::new("/nonexistent/zeroclaw/workspace"));
+        let plan = plan_for(Path::new("/nonexistent/kinetic/workspace"));
         let copied = copy_workspace(&plan, dest.path(), &mut Vec::new()).unwrap();
         assert_eq!(copied, CopyTally::default());
     }
@@ -1982,8 +1982,8 @@ mod tests {
         bound_skills_to(&mut plan, dir);
         plan.skill_sources = vec![skill_source("research_tools", dir, exclude)];
         plan.risk_flags
-            .push(zeroclaw_config::agent_bundle::RiskFlag {
-                kind: zeroclaw_config::agent_bundle::RiskKind::CarriedSkills,
+            .push(kinetic_config::agent_bundle::RiskFlag {
+                kind: kinetic_config::agent_bundle::RiskKind::CarriedSkills,
                 path: "skill_bundles.research_tools".to_string(),
                 detail: "carries this skill bundle's content".to_string(),
             });
@@ -1996,7 +1996,7 @@ mod tests {
             alias: alias.to_string(),
             source: dir.to_path_buf(),
             relative: PathBuf::from("shared").join("skills").join(name),
-            filter: zeroclaw_config::schema::SkillBundleConfig {
+            filter: kinetic_config::schema::SkillBundleConfig {
                 directory: None,
                 include: Vec::new(),
                 exclude: exclude.iter().map(|s| (*s).to_string()).collect(),
@@ -2190,7 +2190,7 @@ mod tests {
             alias: "../../outside".to_string(),
             relative: skill_source("x", &skills, &[]).relative,
             source: skills.clone(),
-            filter: zeroclaw_config::schema::SkillBundleConfig::default(),
+            filter: kinetic_config::schema::SkillBundleConfig::default(),
         }];
 
         let result = write_bundle(&mut plan, &out, false).await;
@@ -3395,14 +3395,13 @@ mod tests {
 
         assert_eq!(copied.workspace.files, 1);
         // `leftover.toml` is gone: the bundle was replaced, not merged into.
-        assert_eq!(
-            entry_names(&out),
-            vec![
-                CONFIG_FILE.to_string(),
-                WORKSPACE_DIR.to_string(),
-                MANIFEST_FILE.to_string(),
-            ]
-        );
+        let mut expected = vec![
+            CONFIG_FILE.to_string(),
+            WORKSPACE_DIR.to_string(),
+            MANIFEST_FILE.to_string(),
+        ];
+        expected.sort();
+        assert_eq!(entry_names(&out), expected);
         assert!(!out.join(WORKSPACE_DIR).join("notes").exists());
         assert!(out.join(WORKSPACE_DIR).join("IDENTITY.md").is_file());
         assert!(

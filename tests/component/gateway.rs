@@ -1,6 +1,6 @@
 //! Gateway component tests.
 
-use zeroclaw::gateway::verify_whatsapp_signature;
+use kinetic::gateway::verify_whatsapp_signature;
 
 // ═════════════════════════════════════════════════════════════════════════════
 // WhatsApp webhook signature verification (public API)
@@ -118,7 +118,7 @@ fn gateway_whatsapp_different_secrets_differ() {
 #[test]
 fn gateway_body_limit_is_reasonable() {
     assert_eq!(
-        zeroclaw::gateway::MAX_BODY_SIZE,
+        kinetic::gateway::MAX_BODY_SIZE,
         65_536,
         "Max body size should be 64KB"
     );
@@ -127,7 +127,7 @@ fn gateway_body_limit_is_reasonable() {
 #[test]
 fn gateway_timeout_is_reasonable() {
     assert_eq!(
-        zeroclaw::gateway::REQUEST_TIMEOUT_SECS,
+        kinetic::gateway::REQUEST_TIMEOUT_SECS,
         30,
         "Request timeout should be 30 seconds"
     );
@@ -136,7 +136,7 @@ fn gateway_timeout_is_reasonable() {
 #[test]
 fn gateway_rate_limit_window_is_60s() {
     assert_eq!(
-        zeroclaw::gateway::RATE_LIMIT_WINDOW_SECS,
+        kinetic::gateway::RATE_LIMIT_WINDOW_SECS,
         60,
         "Rate limit window should be 60 seconds"
     );

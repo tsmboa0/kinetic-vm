@@ -22,7 +22,7 @@ fn legacy_install_upgrades_cleanly_with_backup() {
     std::fs::create_dir_all(&legacy_db).unwrap();
     std::fs::write(legacy_db.join("brain.db"), b"sqlite-bytes").unwrap();
 
-    let report = zeroclaw_config::schema::v2::migrate_v2_to_v3_install_filesystem(install_root)
+    let report = kinetic_config::schema::v2::migrate_v2_to_v3_install_filesystem(install_root)
         .expect("migration must succeed on populated legacy install");
     assert!(
         report.entries_relocated > 0 && report.backup_dir.is_some(),
@@ -84,7 +84,7 @@ fn legacy_install_upgrades_cleanly_with_backup() {
 
     // Idempotent re-run: legacy gone → no-op (no backup, nothing moved).
     let report_again =
-        zeroclaw_config::schema::v2::migrate_v2_to_v3_install_filesystem(install_root)
+        kinetic_config::schema::v2::migrate_v2_to_v3_install_filesystem(install_root)
             .expect("idempotent re-run must succeed");
     assert!(
         report_again.backup_dir.is_none() && report_again.entries_relocated == 0,
@@ -94,7 +94,7 @@ fn legacy_install_upgrades_cleanly_with_backup() {
 
 #[tokio::test]
 async fn two_sqlite_agents_on_one_install_have_isolated_memory() {
-    use zeroclaw_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
+    use kinetic_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
 
     let tmp = TempDir::new().unwrap();
     let install_root = tmp.path();
@@ -108,7 +108,7 @@ async fn two_sqlite_agents_on_one_install_have_isolated_memory() {
         .insert("default".into(), RiskProfileConfig::default());
     cfg.providers.models.openrouter.insert(
         "default".to_string(),
-        zeroclaw_config::schema::OpenRouterModelProviderConfig::default(),
+        kinetic_config::schema::OpenRouterModelProviderConfig::default(),
     );
     for alias in ["alpha", "beta"] {
         cfg.agents.insert(
@@ -121,10 +121,10 @@ async fn two_sqlite_agents_on_one_install_have_isolated_memory() {
         );
     }
 
-    let alpha_mem = zeroclaw_memory::create_memory_for_agent(&cfg, "alpha", None)
+    let alpha_mem = kinetic_memory::create_memory_for_agent(&cfg, "alpha", None)
         .await
         .expect("per-agent memory for alpha");
-    let beta_mem = zeroclaw_memory::create_memory_for_agent(&cfg, "beta", None)
+    let beta_mem = kinetic_memory::create_memory_for_agent(&cfg, "beta", None)
         .await
         .expect("per-agent memory for beta");
 
@@ -132,7 +132,7 @@ async fn two_sqlite_agents_on_one_install_have_isolated_memory() {
         .store(
             "alpha-key",
             "alpha owns this row",
-            zeroclaw_memory::MemoryCategory::Core,
+            kinetic_memory::MemoryCategory::Core,
             None,
         )
         .await
@@ -141,7 +141,7 @@ async fn two_sqlite_agents_on_one_install_have_isolated_memory() {
         .store(
             "beta-key",
             "beta owns this row",
-            zeroclaw_memory::MemoryCategory::Core,
+            kinetic_memory::MemoryCategory::Core,
             None,
         )
         .await
@@ -181,15 +181,15 @@ async fn two_sqlite_agents_on_one_install_have_isolated_memory() {
 
 #[tokio::test]
 async fn peer_group_routes_messages_only_within_resolved_peer_set() {
+    use kinetic_api::tool::Tool;
+    use kinetic_config::multi_agent::{AgentAlias, PeerGroupConfig, PeerUsername};
+    use kinetic_config::providers::ChannelRef;
+    use kinetic_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
+    use kinetic_runtime::control_plane::ControlPlaneHandle;
+    use kinetic_runtime::peers::resolve_peer_set;
+    use kinetic_runtime::tools::SendMessageToPeerTool;
     use serde_json::json;
     use std::sync::Arc;
-    use zeroclaw_api::tool::Tool;
-    use zeroclaw_config::multi_agent::{AgentAlias, PeerGroupConfig, PeerUsername};
-    use zeroclaw_config::providers::ChannelRef;
-    use zeroclaw_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
-    use zeroclaw_runtime::control_plane::ControlPlaneHandle;
-    use zeroclaw_runtime::peers::resolve_peer_set;
-    use zeroclaw_runtime::tools::SendMessageToPeerTool;
 
     let mut cfg = Config::default();
     cfg.risk_profiles
@@ -231,7 +231,7 @@ async fn peer_group_routes_messages_only_within_resolved_peer_set() {
     let gamma_peers = resolve_peer_set(&cfg, "gamma");
     assert_eq!(
         gamma_peers,
-        zeroclaw_runtime::peers::ResolvedPeers::default(),
+        kinetic_runtime::peers::ResolvedPeers::default(),
         "gamma is on no peer group; resolved set is empty"
     );
 
@@ -285,14 +285,14 @@ async fn peer_group_routes_messages_only_within_resolved_peer_set() {
 
 #[tokio::test]
 async fn standalone_peer_send_registers_before_acceptance_and_rejects_an_unopenable_store() {
+    use kinetic_api::tool::Tool;
+    use kinetic_config::multi_agent::{AgentAlias, PeerGroupConfig};
+    use kinetic_config::providers::ChannelRef;
+    use kinetic_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
+    use kinetic_runtime::control_plane::{ControlPlaneHandle, TaskKind};
+    use kinetic_runtime::tools::SendMessageToPeerTool;
     use serde_json::json;
     use std::sync::Arc;
-    use zeroclaw_api::tool::Tool;
-    use zeroclaw_config::multi_agent::{AgentAlias, PeerGroupConfig};
-    use zeroclaw_config::providers::ChannelRef;
-    use zeroclaw_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
-    use zeroclaw_runtime::control_plane::{ControlPlaneHandle, TaskKind};
-    use zeroclaw_runtime::tools::SendMessageToPeerTool;
 
     let data_dir = TempDir::new().unwrap();
     let mut cfg = Config {
@@ -362,15 +362,15 @@ async fn standalone_peer_send_registers_before_acceptance_and_rejects_an_unopena
 
 #[tokio::test]
 async fn peer_group_dotted_channel_refs_remain_alias_scoped_for_dispatch() {
+    use kinetic_api::tool::Tool;
+    use kinetic_config::multi_agent::{AgentAlias, PeerGroupConfig};
+    use kinetic_config::providers::ChannelRef;
+    use kinetic_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
+    use kinetic_runtime::control_plane::ControlPlaneHandle;
+    use kinetic_runtime::peers::resolve_peer_set;
+    use kinetic_runtime::tools::SendMessageToPeerTool;
     use serde_json::json;
     use std::sync::Arc;
-    use zeroclaw_api::tool::Tool;
-    use zeroclaw_config::multi_agent::{AgentAlias, PeerGroupConfig};
-    use zeroclaw_config::providers::ChannelRef;
-    use zeroclaw_config::schema::{AliasedAgentConfig, Config, RiskProfileConfig};
-    use zeroclaw_runtime::control_plane::ControlPlaneHandle;
-    use zeroclaw_runtime::peers::resolve_peer_set;
-    use zeroclaw_runtime::tools::SendMessageToPeerTool;
 
     let mut cfg = Config::default();
     cfg.risk_profiles

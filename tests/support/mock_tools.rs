@@ -2,11 +2,11 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use kinetic::tools::{Tool, ToolOutput, ToolResult};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
-use zeroclaw::tools::{Tool, ToolOutput, ToolResult};
 
-zeroclaw_api::mock_tool_attribution!(EchoTool, CountingTool, FailingTool, RecordingTool);
+kinetic_api::mock_tool_attribution!(EchoTool, CountingTool, FailingTool, RecordingTool);
 
 /// Simple tool that echoes its input argument.
 pub struct EchoTool;

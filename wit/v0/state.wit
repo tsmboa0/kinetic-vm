@@ -1,4 +1,4 @@
-package zeroclaw:plugin@0.1.0;
+package kinetic:plugin@0.1.0;
 
 /// Host-mediated encrypted durable state scoped to one admitted plugin
 /// package, capability, and binding.

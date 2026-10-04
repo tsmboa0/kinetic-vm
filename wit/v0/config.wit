@@ -1,4 +1,4 @@
-package zeroclaw:plugin@0.1.0;
+package kinetic:plugin@0.1.0;
 
 /// Host-mediated access to the schema-validated, non-secret portion of one
 /// admitted plugin instance's canonical configuration.

@@ -1,6 +1,6 @@
 //! Security component tests.
 
-use zeroclaw::config::{Config, RiskProfileConfig};
+use kinetic::config::{Config, RiskProfileConfig};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Autonomy configuration defaults and validation

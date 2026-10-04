@@ -38,8 +38,8 @@ fn root_schema_export_feature_graph_is_gated() {
     assert!(
         schema_export
             .iter()
-            .any(|value| value.as_str() == Some("zeroclaw-config/schema-export")),
-        "root features.schema-export must forward zeroclaw-config/schema-export; \
+            .any(|value| value.as_str() == Some("kinetic-config/schema-export")),
+        "root features.schema-export must forward kinetic-config/schema-export; \
          got {schema_export:?}"
     );
 
@@ -62,15 +62,15 @@ fn root_schema_export_feature_graph_is_gated() {
         .get("dependencies")
         .and_then(toml::Value::as_table)
         .expect("workspace must define a dependencies table");
-    let zeroclaw_config = workspace_dependencies
-        .get("zeroclaw-config")
+    let kinetic_config = workspace_dependencies
+        .get("kinetic-config")
         .and_then(toml::Value::as_table)
-        .expect("workspace.dependencies must define zeroclaw-config as a table");
+        .expect("workspace.dependencies must define kinetic-config as a table");
     assert_eq!(
-        zeroclaw_config
+        kinetic_config
             .get("default-features")
             .and_then(toml::Value::as_bool),
         Some(false),
-        "workspace.dependencies.zeroclaw-config must set default-features=false"
+        "workspace.dependencies.kinetic-config must set default-features=false"
     );
 }

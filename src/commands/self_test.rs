@@ -1,8 +1,8 @@
-//! `zeroclaw self-test` — quick and full diagnostic checks.
+//! `kinetic self-test` — quick and full diagnostic checks.
 
 use anyhow::Result;
+use kinetic_runtime::i18n::get_required_cli_string_with_args;
 use std::path::Path;
-use zeroclaw_runtime::i18n::get_required_cli_string_with_args;
 
 /// Result of a single diagnostic check.
 pub struct CheckResult {
@@ -217,9 +217,9 @@ fn check_tool_registry(config: &crate::config::Config) -> CheckResult {
 }
 
 fn check_channel_config(config: &crate::config::Config) -> CheckResult {
-    let channels = zeroclaw_channels::listing::compiled_channels(&config.channels);
+    let channels = kinetic_channels::listing::compiled_channels(&config.channels);
     let configured = channels.iter().filter(|e| e.configured).count();
-    let uncompiled = zeroclaw_channels::listing::configured_uncompiled_channels(&config.channels);
+    let uncompiled = kinetic_channels::listing::configured_uncompiled_channels(&config.channels);
     if !uncompiled.is_empty() {
         let names = uncompiled
             .iter()
@@ -289,7 +289,7 @@ fn check_security_policy(config: &crate::config::Config) -> CheckResult {
 }
 
 fn check_version() -> CheckResult {
-    let version = env!("ZEROCLAW_VERSION");
+    let version = env!("KINETIC_VERSION");
     CheckResult::pass("version", format!("v{version}"))
 }
 
@@ -298,23 +298,21 @@ fn check_web_dist_dir(config: &crate::config::Config) -> CheckResult {
     match config.gateway.web_dist_dir.as_deref() {
         None => CheckResult::pass(
             name,
-            zeroclaw_runtime::i18n::get_required_cli_string(
-                "cli-self-test-web-dist-dir-pass-unset",
-            ),
+            kinetic_runtime::i18n::get_required_cli_string("cli-self-test-web-dist-dir-pass-unset"),
         ),
         Some(value) => match web_dist_dir_expansion_reason_key(value) {
             None => CheckResult::pass(
                 name,
-                zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+                kinetic_runtime::i18n::get_required_cli_string_with_args(
                     "cli-self-test-web-dist-dir-pass-literal",
                     &[("path", value)],
                 ),
             ),
             Some(reason_key) => {
-                let reason = zeroclaw_runtime::i18n::get_required_cli_string(reason_key);
+                let reason = kinetic_runtime::i18n::get_required_cli_string(reason_key);
                 CheckResult::fail(
                     name,
-                    zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+                    kinetic_runtime::i18n::get_required_cli_string_with_args(
                         "cli-self-test-web-dist-dir-fail-expansion",
                         &[("path", value), ("reason", reason.as_str())],
                     ),
@@ -333,7 +331,7 @@ fn web_dist_dir_check_name() -> &'static str {
     static CACHED: OnceLock<&'static str> = OnceLock::new();
     CACHED.get_or_init(|| {
         let resolved =
-            zeroclaw_runtime::i18n::get_required_cli_string("cli-self-test-web-dist-dir-name");
+            kinetic_runtime::i18n::get_required_cli_string("cli-self-test-web-dist-dir-name");
         Box::leak(resolved.into_boxed_str())
     })
 }
@@ -445,7 +443,7 @@ async fn check_websocket_handshake(config: &crate::config::Config) -> CheckResul
             "websocket",
             format!(
                 "pairing required but no bearer token available for self-test \
-                 (set ZEROCLAW_GATEWAY_TOKEN or keep a plaintext zc_* entry in \
+                 (set KINETIC_GATEWAY_TOKEN or keep a plaintext zc_* entry in \
                  gateway.paired_tokens): {display_url}"
             ),
         );
@@ -507,11 +505,11 @@ fn build_websocket_probe_url(
 }
 
 /// Resolve a plaintext gateway bearer token for local diagnostics.
-/// Precedence: `ZEROCLAW_GATEWAY_TOKEN`, then `ZEROCLAW_ACP_BRIDGE_TOKEN`,
+/// Precedence: `KINETIC_GATEWAY_TOKEN`, then `KINETIC_ACP_BRIDGE_TOKEN`,
 /// then the first plaintext (`zc_*`) entry in `gateway.paired_tokens`.
 #[cfg(feature = "gateway")]
 fn resolve_gateway_bearer_token(config: &crate::config::Config) -> Option<String> {
-    for key in ["ZEROCLAW_GATEWAY_TOKEN", "ZEROCLAW_ACP_BRIDGE_TOKEN"] {
+    for key in ["KINETIC_GATEWAY_TOKEN", "KINETIC_ACP_BRIDGE_TOKEN"] {
         if let Ok(value) = std::env::var(key) {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
@@ -533,16 +531,16 @@ mod tests {
     #[cfg(feature = "gateway")]
     use super::{build_websocket_probe_url, resolve_gateway_bearer_token};
     use super::{format_probe_url, resolve_probe_host, web_dist_dir_expansion_reason_key};
+    #[cfg(any(feature = "gateway", unix))]
+    use kinetic_config::schema::Config;
+    #[cfg(unix)]
+    use kinetic_config::schema::LucidStorageConfig;
     #[cfg(unix)]
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     #[cfg(unix)]
     use tempfile::TempDir;
-    #[cfg(any(feature = "gateway", unix))]
-    use zeroclaw_config::schema::Config;
-    #[cfg(unix)]
-    use zeroclaw_config::schema::LucidStorageConfig;
 
     #[cfg(unix)]
     #[tokio::test]
@@ -615,7 +613,7 @@ fi
             Some("cli-web-dist-dir-reason-dollar")
         );
         // Absolute and relative literal paths must NOT be flagged.
-        assert!(web_dist_dir_expansion_reason_key("/srv/zeroclaw/web-dist").is_none());
+        assert!(web_dist_dir_expansion_reason_key("/srv/kinetic/web-dist").is_none());
         assert!(web_dist_dir_expansion_reason_key("./dist").is_none());
     }
 
@@ -631,29 +629,29 @@ fi
         assert!(!result.passed, "tilde path must fail the check");
 
         let expected_reason =
-            zeroclaw_runtime::i18n::get_required_cli_string("cli-web-dist-dir-reason-tilde");
-        let expected_detail = zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+            kinetic_runtime::i18n::get_required_cli_string("cli-web-dist-dir-reason-tilde");
+        let expected_detail = kinetic_runtime::i18n::get_required_cli_string_with_args(
             "cli-self-test-web-dist-dir-fail-expansion",
             &[("path", "~/web-dist"), ("reason", expected_reason.as_str())],
         );
         assert_eq!(result.detail, expected_detail);
 
         let expected_name =
-            zeroclaw_runtime::i18n::get_required_cli_string("cli-self-test-web-dist-dir-name");
+            kinetic_runtime::i18n::get_required_cli_string("cli-self-test-web-dist-dir-name");
         assert_eq!(result.name, expected_name.as_str());
     }
 
     #[test]
     fn check_web_dist_dir_emits_localized_pass_for_literal() {
         let mut config = crate::config::Config::default();
-        config.gateway.web_dist_dir = Some("/srv/zeroclaw/web-dist".to_string());
+        config.gateway.web_dist_dir = Some("/srv/kinetic/web-dist".to_string());
 
         let result = super::check_web_dist_dir(&config);
         assert!(result.passed);
 
-        let expected_detail = zeroclaw_runtime::i18n::get_required_cli_string_with_args(
+        let expected_detail = kinetic_runtime::i18n::get_required_cli_string_with_args(
             "cli-self-test-web-dist-dir-pass-literal",
-            &[("path", "/srv/zeroclaw/web-dist")],
+            &[("path", "/srv/kinetic/web-dist")],
         );
         assert_eq!(result.detail, expected_detail);
     }
@@ -664,9 +662,8 @@ fi
         let result = super::check_web_dist_dir(&config);
         assert!(result.passed);
 
-        let expected_detail = zeroclaw_runtime::i18n::get_required_cli_string(
-            "cli-self-test-web-dist-dir-pass-unset",
-        );
+        let expected_detail =
+            kinetic_runtime::i18n::get_required_cli_string("cli-self-test-web-dist-dir-pass-unset");
         assert_eq!(result.detail, expected_detail);
     }
 

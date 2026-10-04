@@ -1,7 +1,7 @@
 //! Live test for Z.AI JWT authentication.
 
-use zeroclaw::providers::create_model_provider;
-use zeroclaw::providers::traits::ChatMessage;
+use kinetic::providers::create_model_provider;
+use kinetic::providers::traits::ChatMessage;
 
 /// Near-zero temperature for the single-word sanity check; we ask for "one
 /// word" and just assert the response is non-empty, so a near-deterministic

@@ -598,7 +598,7 @@ dependencies = [
  "esp-idf-svc",
  "heapless 0.9.3",
  "log",
- "zeroclaw-fw-protocol",
+ "kinetic-fw-protocol",
 ]
 
 [[package]]
@@ -1798,7 +1798,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeroclaw-fw-protocol"
+name = "kinetic-fw-protocol"
 version = "0.1.0"
 dependencies = [
  "heapless 0.9.3",

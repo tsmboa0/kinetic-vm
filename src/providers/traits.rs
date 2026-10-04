@@ -1,4 +1,4 @@
-pub use zeroclaw_api::model_provider::*;
+pub use kinetic_api::model_provider::*;
 
 #[cfg(test)]
 mod tests {
@@ -6,7 +6,7 @@ mod tests {
     use async_trait::async_trait;
     use futures_util::StreamExt;
     use futures_util::stream::{self, BoxStream};
-    use zeroclaw_api::tool::ToolSpec;
+    use kinetic_api::tool::ToolSpec;
 
     /// Representative non-zero temperature for default-path chat tests;
     /// mocks ignore it, so any plausible in-range value is fine — this
@@ -40,11 +40,11 @@ mod tests {
             Ok("ok".into())
         }
     }
-    impl ::zeroclaw_api::attribution::Attributable for CapabilityMockModelProvider {
-        fn role(&self) -> ::zeroclaw_api::attribution::Role {
-            ::zeroclaw_api::attribution::Role::Provider(
-                ::zeroclaw_api::attribution::ProviderKind::Model(
-                    ::zeroclaw_api::attribution::ModelProviderKind::Custom,
+    impl ::kinetic_api::attribution::Attributable for CapabilityMockModelProvider {
+        fn role(&self) -> ::kinetic_api::attribution::Role {
+            ::kinetic_api::attribution::Role::Provider(
+                ::kinetic_api::attribution::ProviderKind::Model(
+                    ::kinetic_api::attribution::ModelProviderKind::Custom,
                 ),
             )
         }
@@ -279,11 +279,11 @@ mod tests {
             Ok("response".to_string())
         }
     }
-    impl ::zeroclaw_api::attribution::Attributable for MockModelProvider {
-        fn role(&self) -> ::zeroclaw_api::attribution::Role {
-            ::zeroclaw_api::attribution::Role::Provider(
-                ::zeroclaw_api::attribution::ProviderKind::Model(
-                    ::zeroclaw_api::attribution::ModelProviderKind::Custom,
+    impl ::kinetic_api::attribution::Attributable for MockModelProvider {
+        fn role(&self) -> ::kinetic_api::attribution::Role {
+            ::kinetic_api::attribution::Role::Provider(
+                ::kinetic_api::attribution::ProviderKind::Model(
+                    ::kinetic_api::attribution::ModelProviderKind::Custom,
                 ),
             )
         }
@@ -377,11 +377,11 @@ mod tests {
             Ok(system.unwrap_or_default().to_string())
         }
     }
-    impl ::zeroclaw_api::attribution::Attributable for EchoSystemModelProvider {
-        fn role(&self) -> ::zeroclaw_api::attribution::Role {
-            ::zeroclaw_api::attribution::Role::Provider(
-                ::zeroclaw_api::attribution::ProviderKind::Model(
-                    ::zeroclaw_api::attribution::ModelProviderKind::Custom,
+    impl ::kinetic_api::attribution::Attributable for EchoSystemModelProvider {
+        fn role(&self) -> ::kinetic_api::attribution::Role {
+            ::kinetic_api::attribution::Role::Provider(
+                ::kinetic_api::attribution::ProviderKind::Model(
+                    ::kinetic_api::attribution::ModelProviderKind::Custom,
                 ),
             )
         }
@@ -414,11 +414,11 @@ mod tests {
             Ok(system.unwrap_or_default().to_string())
         }
     }
-    impl ::zeroclaw_api::attribution::Attributable for CustomConvertModelProvider {
-        fn role(&self) -> ::zeroclaw_api::attribution::Role {
-            ::zeroclaw_api::attribution::Role::Provider(
-                ::zeroclaw_api::attribution::ProviderKind::Model(
-                    ::zeroclaw_api::attribution::ModelProviderKind::Custom,
+    impl ::kinetic_api::attribution::Attributable for CustomConvertModelProvider {
+        fn role(&self) -> ::kinetic_api::attribution::Role {
+            ::kinetic_api::attribution::Role::Provider(
+                ::kinetic_api::attribution::ProviderKind::Model(
+                    ::kinetic_api::attribution::ModelProviderKind::Custom,
                 ),
             )
         }
@@ -451,11 +451,11 @@ mod tests {
             Ok("should_not_reach".to_string())
         }
     }
-    impl ::zeroclaw_api::attribution::Attributable for InvalidConvertModelProvider {
-        fn role(&self) -> ::zeroclaw_api::attribution::Role {
-            ::zeroclaw_api::attribution::Role::Provider(
-                ::zeroclaw_api::attribution::ProviderKind::Model(
-                    ::zeroclaw_api::attribution::ModelProviderKind::Custom,
+    impl ::kinetic_api::attribution::Attributable for InvalidConvertModelProvider {
+        fn role(&self) -> ::kinetic_api::attribution::Role {
+            ::kinetic_api::attribution::Role::Provider(
+                ::kinetic_api::attribution::ProviderKind::Model(
+                    ::kinetic_api::attribution::ModelProviderKind::Custom,
                 ),
             )
         }
@@ -578,11 +578,11 @@ mod tests {
             .boxed()
         }
     }
-    impl ::zeroclaw_api::attribution::Attributable for StreamingChunkOnlyModelProvider {
-        fn role(&self) -> ::zeroclaw_api::attribution::Role {
-            ::zeroclaw_api::attribution::Role::Provider(
-                ::zeroclaw_api::attribution::ProviderKind::Model(
-                    ::zeroclaw_api::attribution::ModelProviderKind::Custom,
+    impl ::kinetic_api::attribution::Attributable for StreamingChunkOnlyModelProvider {
+        fn role(&self) -> ::kinetic_api::attribution::Role {
+            ::kinetic_api::attribution::Role::Provider(
+                ::kinetic_api::attribution::ProviderKind::Model(
+                    ::kinetic_api::attribution::ModelProviderKind::Custom,
                 ),
             )
         }

@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use zeroclaw_config::agent_bundle::{CONFIG_FILE, MANIFEST_FILE, SKILLS_DIR, WORKSPACE_DIR};
+use kinetic_config::agent_bundle::{CONFIG_FILE, MANIFEST_FILE, SKILLS_DIR, WORKSPACE_DIR};
 
 fn write(path: &Path, body: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -9,12 +9,12 @@ fn write(path: &Path, body: &str) {
 }
 
 fn export(config_dir: &Path, out: &Path, force: bool) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_zeroclaw"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_kinetic"));
     command
         .current_dir(config_dir)
-        .env("ZEROCLAW_CONFIG_DIR", config_dir)
-        .env_remove("ZEROCLAW_DATA_DIR")
-        .env_remove("ZEROCLAW_WORKSPACE")
+        .env("KINETIC_CONFIG_DIR", config_dir)
+        .env_remove("KINETIC_DATA_DIR")
+        .env_remove("KINETIC_WORKSPACE")
         .env("RUST_LOG", "off")
         .arg("--config-dir")
         .arg(config_dir)
@@ -23,7 +23,7 @@ fn export(config_dir: &Path, out: &Path, force: bool) -> Output {
     if force {
         command.arg("--force");
     }
-    command.output().expect("run zeroclaw agents export")
+    command.output().expect("run kinetic agents export")
 }
 
 fn assert_success(output: &Output) {
@@ -51,7 +51,7 @@ model_provider = "anthropic.fixture"
 risk_profile = "guarded"
 skill_bundles = ["fixture"]
 "#,
-        zeroclaw_config::migration::CURRENT_SCHEMA_VERSION
+        kinetic_config::migration::CURRENT_SCHEMA_VERSION
     );
     if let Some(workspace) = workspace {
         config.push_str(&format!(

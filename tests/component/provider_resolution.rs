@@ -1,7 +1,7 @@
 //! TG1: ModelProvider End-to-End Resolution Tests
 
-use zeroclaw::providers::compatible::{AuthStyle, OpenAiCompatibleModelProvider};
-use zeroclaw::providers::{
+use kinetic::providers::compatible::{AuthStyle, OpenAiCompatibleModelProvider};
+use kinetic::providers::{
     create_model_provider, create_model_provider_with_options, create_model_provider_with_url,
 };
 
@@ -197,7 +197,7 @@ fn factory_resolves_gemini_provider() {
 
 #[test]
 fn factory_resolves_openai_codex_provider() {
-    let options = zeroclaw::providers::ModelProviderRuntimeOptions::default();
+    let options = kinetic::providers::ModelProviderRuntimeOptions::default();
     let result = create_model_provider_with_options("openai-codex", None, &options);
     assert!(
         result.is_ok(),

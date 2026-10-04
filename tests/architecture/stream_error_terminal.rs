@@ -11,7 +11,7 @@ use std::path::Path;
 /// it: the runtime would strand partial output without recovery, and a
 /// mid-stream producer would silently skip the non-streaming fallback the
 /// stream contract promises.
-const ALLOWED_PRODUCER_FILES: &[&str] = &["zeroclaw-providers/src/router.rs"];
+const ALLOWED_PRODUCER_FILES: &[&str] = &["kinetic-providers/src/router.rs"];
 
 /// Directories scanned for construction sites.
 const SCAN_ROOTS: &[&str] = &["crates", "apps"];
@@ -41,7 +41,7 @@ fn stream_error_terminal_is_produced_only_by_router_synthesis() {
 #[test]
 fn synthesized_failure_logging_keeps_fallback_and_terminal_lines_distinct() {
     let src = fs::read_to_string(
-        workspace_root().join("crates/zeroclaw-runtime/src/agent/turn/provider_call.rs"),
+        workspace_root().join("crates/kinetic-runtime/src/agent/turn/provider_call.rs"),
     )
     .expect("provider_call.rs must exist");
     let fallback_lines = src.matches("llm_stream_fallback").count();
@@ -60,7 +60,7 @@ fn synthesized_failure_logging_keeps_fallback_and_terminal_lines_distinct() {
 
 fn workspace_root() -> std::path::PathBuf {
     // `CARGO_MANIFEST_DIR` for the workspace's top-level crate (the
-    // `zeroclaw` binary) — that's where `cargo test` invokes from.
+    // `kinetic` binary) — that's where `cargo test` invokes from.
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
 

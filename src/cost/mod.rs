@@ -1,2 +1,2 @@
 #[allow(unused_imports)]
-pub use zeroclaw_runtime::cost::*;
+pub use kinetic_runtime::cost::*;

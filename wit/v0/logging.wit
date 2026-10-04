@@ -1,6 +1,6 @@
-package zeroclaw:plugin@0.1.0;
+package kinetic:plugin@0.1.0;
 
-/// Centralized logging interface used by all ZeroClaw plugin types.
+/// Centralized logging interface used by all KineticVM plugin types.
 ///
 /// Plugins call `log-record` to emit structured log events back to the host.
 /// The call is fire-and-forget: `log-record` returns nothing and the host
@@ -9,13 +9,13 @@ package zeroclaw:plugin@0.1.0;
 ///
 /// NOTE: Do NOT use wasi:logging or the plugin log messages will be formatted
 /// differently than all others and will not appear in all of the three locations
-/// to which zeroclaw_log writes. Use `log-record` to ensure consistent logging.
+/// to which kinetic_log writes. Use `log-record` to ensure consistent logging.
 @unstable(feature = plugins-wit-v0)
 interface logging {
     @unstable(feature = plugins-wit-v0)
     use types.{json-string};
 
-    /// Severity level for a log record. Mirrors `Severity` in zeroclaw-log.
+    /// Severity level for a log record. Mirrors `Severity` in kinetic-log.
     @unstable(feature = plugins-wit-v0)
     enum log-level {
         trace,
@@ -26,7 +26,7 @@ interface logging {
     }
 
     /// Closed taxonomy of actions a plugin may report. Mirrors the `Action`
-    /// enum in zeroclaw-log; no escape hatch variant is provided on purpose.
+    /// enum in kinetic-log; no escape hatch variant is provided on purpose.
     @unstable(feature = plugins-wit-v0)
     enum plugin-action {
         start,

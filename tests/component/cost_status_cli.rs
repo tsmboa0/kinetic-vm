@@ -85,13 +85,13 @@ fn run_status(records: &[Value]) -> Output {
     ledger.push('\n');
     std::fs::write(state_dir.join("costs.jsonl"), ledger).unwrap();
 
-    Command::new(env!("CARGO_BIN_EXE_zeroclaw"))
+    Command::new(env!("CARGO_BIN_EXE_kinetic"))
         .env("RUST_LOG", "off")
         .arg("--config-dir")
         .arg(config_dir.path())
         .arg("status")
         .output()
-        .expect("failed to run zeroclaw status")
+        .expect("failed to run kinetic status")
 }
 
 fn output_text(output: &Output) -> (String, String) {
@@ -99,7 +99,7 @@ fn output_text(output: &Output) -> (String, String) {
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(
         output.status.success(),
-        "zeroclaw status failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "kinetic status failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     (stdout, stderr)
 }

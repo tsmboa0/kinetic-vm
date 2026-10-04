@@ -48,7 +48,7 @@ struct DiscoveryEntry {
 
 struct ValidatedTarget {
     url: Url,
-    destination: zeroclaw_infra::net_guard::ResolvedDestination,
+    destination: kinetic_infra::net_guard::ResolvedDestination,
 }
 
 /// Fetch and install one selected entry from an origin's well-known index.
@@ -75,7 +75,7 @@ trait DiscoveryTransport {
     async fn get(
         &self,
         logical_url: &Url,
-        nat64_prefixes: &[zeroclaw_infra::net_guard::Nat64Prefix],
+        nat64_prefixes: &[kinetic_infra::net_guard::Nat64Prefix],
     ) -> Result<(Url, reqwest::Response)>;
 }
 
@@ -86,7 +86,7 @@ impl DiscoveryTransport for ProductionTransport {
     async fn get(
         &self,
         url: &Url,
-        nat64_prefixes: &[zeroclaw_infra::net_guard::Nat64Prefix],
+        nat64_prefixes: &[kinetic_infra::net_guard::Nat64Prefix],
     ) -> Result<(Url, reqwest::Response)> {
         let target = validate_target(url, nat64_prefixes).await?;
         let builder = reqwest::Client::builder()
@@ -124,7 +124,7 @@ async fn install_well_known_skill_with_transport<T: DiscoveryTransport>(
         .join(WELL_KNOWN_PATH)
         .context("failed to construct the well-known index URL")?;
     let nat64_prefixes =
-        zeroclaw_infra::net_guard::parse_nat64_prefixes(nat64_config, "security.nat64_prefixes")?;
+        kinetic_infra::net_guard::parse_nat64_prefixes(nat64_config, "security.nat64_prefixes")?;
     let (index_bytes, final_index_url, _) =
         fetch_bounded_with_transport(index_url, MAX_INDEX_BYTES, &nat64_prefixes, transport)
             .await?;
@@ -166,7 +166,7 @@ fn validate_url_shape(url: &Url) -> Result<()> {
 }
 
 fn validate_skill_name(name: &str) -> Result<()> {
-    zeroclaw_runtime::skills::scaffold::validate_name(name).map_err(|error| {
+    kinetic_runtime::skills::scaffold::validate_name(name).map_err(|error| {
         anyhow::Error::msg(format!("invalid discovered skill name '{name}': {error}"))
     })
 }
@@ -194,10 +194,10 @@ fn parse_index(bytes: &[u8]) -> Result<DiscoveryIndex> {
         }
         validate_digest(&entry.digest)?;
         if entry.artifact_type != "skill-md" && entry.artifact_type != "archive" {
-            ::zeroclaw_log::record!(
+            ::kinetic_log::record!(
                 WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Unknown),
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                    .with_outcome(::kinetic_log::EventOutcome::Unknown),
                 &format!(
                     "skipping discovered skill '{}' with unsupported artifact type '{}'",
                     entry.name, entry.artifact_type
@@ -242,7 +242,7 @@ fn validate_digest(raw: &str) -> Result<[u8; 32]> {
 async fn fetch_bounded_with_transport<T: DiscoveryTransport>(
     mut url: Url,
     max_bytes: usize,
-    nat64_prefixes: &[zeroclaw_infra::net_guard::Nat64Prefix],
+    nat64_prefixes: &[kinetic_infra::net_guard::Nat64Prefix],
     transport: &T,
 ) -> Result<(Vec<u8>, Url, Option<String>)> {
     for redirect in 0..=MAX_REDIRECTS {
@@ -301,10 +301,10 @@ async fn read_response_bounded(
 
 async fn validate_target(
     url: &Url,
-    nat64_prefixes: &[zeroclaw_infra::net_guard::Nat64Prefix],
+    nat64_prefixes: &[kinetic_infra::net_guard::Nat64Prefix],
 ) -> Result<ValidatedTarget> {
     validate_url_shape(url)?;
-    let host = zeroclaw_infra::net_guard::normalize_host(
+    let host = kinetic_infra::net_guard::normalize_host(
         url.host_str().context("URL must include a host")?,
     )
     .map_err(|_| anyhow::Error::msg("URL host is invalid"))?;
@@ -318,11 +318,11 @@ async fn validate_target(
             .context("failed to resolve discovery host")?
             .collect::<Vec<_>>()
     };
-    let destination = zeroclaw_infra::net_guard::ResolvedDestination::new(
+    let destination = kinetic_infra::net_guard::ResolvedDestination::new(
         &host,
         port,
         addresses,
-        zeroclaw_infra::net_guard::PrivateNetworkAccess::Deny,
+        kinetic_infra::net_guard::PrivateNetworkAccess::Deny,
         nat64_prefixes,
     )
     .map_err(|error| {
@@ -385,7 +385,7 @@ fn install_verified_artifact(
     }
     // This is the only publication path. It performs the existing no-follow
     // copy, security audit, destination collision check, and atomic rename.
-    zeroclaw_runtime::skills::install_local_skill_source(
+    kinetic_runtime::skills::install_local_skill_source(
         source.to_str().context("staging path is not UTF-8")?,
         skills_path,
         allow_scripts,
@@ -659,7 +659,7 @@ mod tests {
         async fn get(
             &self,
             logical_url: &Url,
-            _nat64_prefixes: &[zeroclaw_infra::net_guard::Nat64Prefix],
+            _nat64_prefixes: &[kinetic_infra::net_guard::Nat64Prefix],
         ) -> Result<(Url, reqwest::Response)> {
             let mut fixture_url = self.base.clone();
             fixture_url.set_path(logical_url.path());
@@ -1114,7 +1114,7 @@ mod tests {
             .unwrap();
         let address = listener.local_addr().unwrap();
         let body = vec![b'x'; MAX_INDEX_BYTES + 1];
-        let server = ::zeroclaw_spawn::spawn!(async move {
+        let server = ::kinetic_spawn::spawn!(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0u8; 1024];
             let _ = stream.read(&mut request).await;

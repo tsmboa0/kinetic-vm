@@ -1,4 +1,4 @@
-//! Linux process-boundary proof for `zeroclaw desktop`.
+//! Linux process-boundary proof for `kinetic desktop`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -16,7 +16,7 @@ fn make_executable(path: &Path, contents: &str) {
 }
 
 fn desktop_command(config: &Path, home: &Path, xdg_data: &Path, path: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_zeroclaw"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_kinetic"));
     command
         .env_clear()
         .env("HOME", home)
@@ -60,13 +60,13 @@ fn desktop_launch_and_install_reach_the_linux_process_boundary() {
         std::fs::create_dir_all(dir).unwrap();
     }
 
-    let appimage = root.path().join("ZeroClaw-smoke.AppImage");
+    let appimage = root.path().join("KineticVM-smoke.AppImage");
     let launch_sentinel = PathBuf::from(format!("{}.launched", appimage.display()));
     make_executable(&appimage, "#!/bin/sh\n: > \"$0.launched\"\n");
     std::fs::write(
-        applications.join("ZeroClaw.desktop"),
+        applications.join("KineticVM.desktop"),
         format!(
-            "[Desktop Entry]\nType=Application\nName=ZeroClaw\nExec={}\n",
+            "[Desktop Entry]\nType=Application\nName=KineticVM\nExec={}\n",
             appimage.display()
         ),
     )
@@ -74,7 +74,7 @@ fn desktop_launch_and_install_reach_the_linux_process_boundary() {
 
     let output = desktop_command(&config, &home, &xdg_data, &path_dir)
         .output()
-        .expect("failed to run `zeroclaw desktop`");
+        .expect("failed to run `kinetic desktop`");
     assert_success(&output, "desktop launch");
     wait_for_file(&launch_sentinel);
 
@@ -84,11 +84,11 @@ fn desktop_launch_and_install_reach_the_linux_process_boundary() {
     let output = desktop_command(&config, &home, &xdg_data, &path_dir)
         .arg("--install")
         .output()
-        .expect("failed to run `zeroclaw desktop --install`");
+        .expect("failed to run `kinetic desktop --install`");
     assert_success(&output, "desktop install-page open");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Opening the ZeroClaw companion app download page"),
+        stdout.contains("Opening the KineticVM companion app download page"),
         "desktop --install output must say that it opens the page:\n{stdout}"
     );
     wait_for_file(&url_sentinel);
@@ -100,7 +100,7 @@ fn desktop_launch_and_install_reach_the_linux_process_boundary() {
     let output = desktop_command(&config, &home, &xdg_data, &path_dir)
         .arg("--help")
         .output()
-        .expect("failed to run `zeroclaw desktop --help`");
+        .expect("failed to run `kinetic desktop --help`");
     assert_success(&output, "desktop help");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(

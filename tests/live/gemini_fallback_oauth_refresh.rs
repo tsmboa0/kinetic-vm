@@ -15,17 +15,17 @@ use std::path::PathBuf;
 #[tokio::test]
 #[ignore = "requires live Gemini OAuth credentials with refresh_token"]
 async fn gemini_warmup_refreshes_expired_oauth_token() -> Result<()> {
-    // Find ~/.zeroclaw/auth-profiles.json
+    // Find ~/.kinetic/auth-profiles.json
     let home = env::var("HOME").expect("HOME env var not set");
-    let zeroclaw_dir = PathBuf::from(home).join(".zeroclaw");
-    let auth_profiles_path = zeroclaw_dir.join("auth-profiles.json");
+    let kinetic_dir = PathBuf::from(home).join(".kinetic");
+    let auth_profiles_path = kinetic_dir.join("auth-profiles.json");
 
     if !auth_profiles_path.exists() {
         eprintln!(
             "⚠️  No auth-profiles.json found at {:?}",
             auth_profiles_path
         );
-        eprintln!("Run: zeroclaw auth login --model-provider gemini");
+        eprintln!("Run: kinetic auth login --model-provider gemini");
         return Ok(());
     }
 
@@ -46,7 +46,7 @@ async fn gemini_warmup_refreshes_expired_oauth_token() -> Result<()> {
         .find(|k| k.starts_with("gemini:"))
         .ok_or_else(|| {
             anyhow::Error::msg(
-                "No Gemini OAuth profile found. Run: zeroclaw auth login --model-provider gemini",
+                "No Gemini OAuth profile found. Run: kinetic auth login --model-provider gemini",
             )
         })?
         .clone();
@@ -105,8 +105,8 @@ async fn gemini_warmup_refreshes_expired_oauth_token() -> Result<()> {
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Create GeminiModelProvider using the default factory
-    // This will load auth from ~/.zeroclaw/auth-profiles.json (with expired token)
-    let model_provider = zeroclaw::providers::create_model_provider("gemini", None)?;
+    // This will load auth from ~/.kinetic/auth-profiles.json (with expired token)
+    let model_provider = kinetic::providers::create_model_provider("gemini", None)?;
 
     println!("Created Gemini model_provider with expired token");
 
@@ -202,7 +202,7 @@ async fn gemini_warmup_refreshes_expired_oauth_token() -> Result<()> {
 #[ignore = "requires live Gemini OAuth credentials"]
 async fn gemini_warmup_with_valid_credentials() -> Result<()> {
     // Create model_provider from default config
-    let model_provider = zeroclaw::providers::create_model_provider("gemini", None)?;
+    let model_provider = kinetic::providers::create_model_provider("gemini", None)?;
 
     println!("Created Gemini model_provider");
     println!("Calling warmup()...");

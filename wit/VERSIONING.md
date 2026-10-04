@@ -3,7 +3,7 @@
 ```
 wit/
   VERSIONING.md       ← this file
-  v0/                 ← zeroclaw:plugin@0.x (experimental → stable)
+  v0/                 ← kinetic:plugin@0.x (experimental → stable)
     .frozen           ← created when v0 stabilizes; absent = experimental
     channel.wit
     config.wit
@@ -14,7 +14,7 @@ wit/
     secrets.wit
     tool.wit
     types.wit
-  v1/                 ← (future) breaking changes → zeroclaw:plugin@1.0.0
+  v1/                 ← (future) breaking changes → kinetic:plugin@1.0.0
 ```
 
 Each `vN/` directory maps to one WIT package major version. Minor bumps (0.2,
@@ -110,7 +110,7 @@ needed for items added via `@since`.
 
 **Targeting a new major version (e.g. V0 → V1):**
 
-1. Update the `package` declaration to `zeroclaw:plugin@1.0.0`.
+1. Update the `package` declaration to `kinetic:plugin@1.0.0`.
 2. Update import paths to reference the new interfaces.
 3. Adapt to any renamed/removed items per the V1 CHANGELOG entry.
 4. Recompile targeting `wasm32-wasip2`.

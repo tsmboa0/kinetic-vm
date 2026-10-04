@@ -1,0 +1,10436 @@
+//! ACP (Agent Control Protocol) Server — JSON-RPC 2.0 over stdio.
+
+use anyhow::Result;
+use kinetic_api::agent::ToolArtifact;
+use kinetic_api::elicitation::ElicitationCapabilities;
+pub use kinetic_api::jsonrpc::RpcOutbound;
+use kinetic_api::jsonrpc::error_codes::*;
+use kinetic_api::jsonrpc::{
+    ACP_PROTOCOL_VERSION, JsonRpcError, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
+};
+use kinetic_api::model_provider::{ChatMessage, ConversationMessage, ToolCall};
+use kinetic_api::plan::PlanEntry;
+use kinetic_config::schema::Config;
+use kinetic_infra::acp_session_store::AcpSessionStore;
+use kinetic_runtime::agent::agent::{Agent, TurnEvent};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::{Mutex, mpsc};
+use uuid::Uuid;
+
+use super::acp_embedded;
+use crate::acp_channel::AcpChannel;
+
+/// Tool name of the structured, replay-only cancellation event a client-cancel
+/// leaves in a persisted transcript. It is a sentinel — recognised structurally
+/// (never by localized text) so `session/load` can exclude it from provider
+/// history and replay it as the live client-cancel update.
+const CANCELLATION_EVENT_TOOL_NAME: &str = "turn-cancelled";
+/// Reserved tool-call id for the cancellation sentinel. Namespaced so it cannot
+/// collide with a real native/custom/MCP tool call: recognition keys off this id
+/// plus the full sentinel shape (see [`AcpServer::is_cancellation_event`]), so an
+/// ordinary tool call merely named `turn-cancelled` is never treated as a cancel.
+const CANCELLATION_EVENT_TOOL_ID: &str = "kinetic.acp.turn-cancelled.v1";
+/// Argument payload the cancellation sentinel always carries. Part of the
+/// discriminator so a real tool call with the reserved name but genuine
+/// arguments is not misclassified.
+const CANCELLATION_EVENT_TOOL_ARGS: &str = "{}";
+
+/// Durable failed-turn marker. A transcript stores this reserved,
+/// locale-independent sentinel where the failure boundary is; the localized
+/// `[turn failed]` text is projected when the transcript is restored (client
+/// replay and provider seed separately). Persisting the localized rendering
+/// instead would make failed-turn recognition depend on the process locale: a
+/// session saved under one locale and reloaded under another would no longer
+/// recognize its own failed turns, and a provider-rejected attachment would
+/// re-enter the next provider request.
+const FAILURE_TURN_SENTINEL: &str = "kinetic.acp.turn-failed.v1";
+
+/// One provider-seed row paired with the index of the stored client row it
+/// came from. The single derived view `session/load` uses to align client
+/// replay with the retained provider boundary: cancellation filtering,
+/// unmatched-call repair, and whole-turn trimming all drop or reshape seed
+/// rows, so replay follows the provenance instead of a scalar position.
+type SeededMessage = (ConversationMessage, usize);
+
+/// Terminal result of a `session/prompt` turn, returned by the per-session turn
+/// task after it has already persisted the outcome's transcript while holding
+/// the session lock. The outer handler only needs to render the client-facing
+/// response, notifications, and logs from it — persistence is done.
+enum TerminalOutcome {
+    Success {
+        response: String,
+    },
+    Cancelled {
+        persist_error: Option<String>,
+    },
+    Failed {
+        /// Raw diagnostic, for the failure log line.
+        error: String,
+        /// The wire error, built in the turn task where the `anyhow::Error` is
+        /// still live, so the localized delivery projection reaches the client
+        /// instead of the raw diagnostic.
+        rpc_error: RpcError,
+        persist_error: Option<String>,
+    },
+}
+
+// ── Configuration ────────────────────────────────────────────────
+
+/// ACP server configuration (optional `[acp]` section in config.toml).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AcpServerConfig {
+    /// Maximum number of concurrent sessions. Default: 10.
+    pub max_sessions: usize,
+    /// Session inactivity timeout in seconds. Default: 3600 (1 hour).
+    pub session_timeout_secs: u64,
+}
+
+impl Default for AcpServerConfig {
+    fn default() -> Self {
+        Self {
+            max_sessions: 10,
+            session_timeout_secs: 3600,
+        }
+    }
+}
+
+// ── Session state ────────────────────────────────────────────────
+
+struct Session {
+    agent: Agent,
+    _lifecycle_lease: kinetic_runtime::live_config_authority::AgentSessionLease,
+    last_active: Instant,
+    /// Agent alias (e.g. `"clamps"`) for attributable span logs.
+    agent_alias: String,
+    /// Model-provider ref (e.g. `"anthropic.default"`) for attributable span logs.
+    model_provider: String,
+    /// Model identifier (e.g. `"claude-sonnet-4-6"`) for attributable span logs.
+    model: String,
+    /// Session cwd / workspace jail root (absolute), used for embedded blob materialization.
+    workspace_dir: String,
+}
+
+// ── ACP Server ───────────────────────────────────────────────────
+
+enum ConfigSource {
+    Standalone(Box<Config>),
+    Live(Arc<parking_lot::RwLock<Config>>),
+}
+
+pub struct AcpServer {
+    /// The sole authority for `Config`-backed settings. Managed stdio and
+    /// gateway ACP resolve their shared authority's config.
+    config_source: ConfigSource,
+    agent_lifecycle: kinetic_runtime::live_config_authority::AgentLifecycleCoordinator,
+    acp_config: AcpServerConfig,
+    sessions: Arc<Mutex<HashMap<String, Arc<Mutex<Session>>>>>,
+    rpc: Arc<RpcOutbound>,
+    /// Receiver for the writer task. Pulled out (replaced with `None`) the
+    /// first time `run()` starts the writer loop.
+    writer_rx: std::sync::Mutex<Option<mpsc::Receiver<String>>>,
+    cancel_tokens: Arc<std::sync::Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
+    /// Tracks session IDs currently being loaded/resumed (between the initial
+    /// check and the final insert into `sessions`). Used to prevent duplicate
+    /// concurrent restores of the same session and to count in-flight slots
+    /// against `max_sessions`.
+    loading_sessions: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    /// Per-session finalization gate. A `session/prompt` turn holds its session's
+    /// gate from the moment it starts until its terminal transcript is committed;
+    /// `session/load`/`session/resume` acquire the same gate before reading the
+    /// store. This keeps a session non-loadable while a prompt is starting or
+    /// persisting — even in the window after `session/close`/`session/stop` have
+    /// removed the live map entry — so a concurrent restore cannot seed a
+    /// replacement agent from pre-append rows. Keyed by session id; entries are
+    /// tiny and bounded by the distinct sessions seen.
+    session_gates: Arc<std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    store: Option<Arc<AcpSessionStore>>,
+    /// Shared SOP engine from the daemon. `None` in standalone mode — agents
+    /// build their own engine from config.
+    sop_engine: Option<Arc<std::sync::Mutex<kinetic_runtime::sop::SopEngine>>>,
+    sop_audit: Option<Arc<kinetic_runtime::sop::SopAuditLogger>>,
+    /// Process- or connection-scoped default agent alias (`--agent` for
+    /// standalone ACP or `?agent=` on the gateway endpoint). Slots into the
+    /// `session/new` alias precedence chain between an explicit `agentAlias`
+    /// and `[acp].default_agent`. Not a config change: it only supplies the
+    /// default for new sessions (restore keeps the operator-controlled chain).
+    connection_default_agent: Option<String>,
+    client_elicitation_caps: std::sync::RwLock<ElicitationCapabilities>,
+}
+
+impl AcpServer {
+    /// Create a stdio server retaining the caller's config and lifecycle authority.
+    pub fn new_stdio_with_authority(
+        authority: &kinetic_runtime::LiveConfigAuthority,
+        acp_config: AcpServerConfig,
+        store: Option<Arc<AcpSessionStore>>,
+    ) -> Self {
+        let (writer_tx, writer_rx) = mpsc::channel::<String>(256);
+        Self::with_writer(
+            ConfigSource::Live(authority.config()),
+            authority.agent_lifecycle(),
+            acp_config,
+            writer_tx,
+            Some(writer_rx),
+            store,
+        )
+    }
+
+    pub fn new(config: Config, acp_config: AcpServerConfig) -> Self {
+        let (writer_tx, writer_rx) = mpsc::channel::<String>(256);
+        Self::with_writer(
+            ConfigSource::Standalone(Box::new(config)),
+            Default::default(),
+            acp_config,
+            writer_tx,
+            Some(writer_rx),
+            None,
+        )
+    }
+
+    pub fn new_with_writer(
+        config: Config,
+        acp_config: AcpServerConfig,
+        writer_tx: mpsc::Sender<String>,
+    ) -> Self {
+        Self::with_writer(
+            ConfigSource::Standalone(Box::new(config)),
+            Default::default(),
+            acp_config,
+            writer_tx,
+            None,
+            None,
+        )
+    }
+
+    pub fn new_with_store(
+        config: Config,
+        acp_config: AcpServerConfig,
+        store: Arc<AcpSessionStore>,
+    ) -> Self {
+        let (writer_tx, writer_rx) = mpsc::channel::<String>(256);
+        Self::with_writer(
+            ConfigSource::Standalone(Box::new(config)),
+            Default::default(),
+            acp_config,
+            writer_tx,
+            Some(writer_rx),
+            Some(store),
+        )
+    }
+
+    pub fn new_with_writer_and_store(
+        config: Config,
+        acp_config: AcpServerConfig,
+        writer_tx: mpsc::Sender<String>,
+        store: Arc<AcpSessionStore>,
+    ) -> Self {
+        Self::with_writer(
+            ConfigSource::Standalone(Box::new(config)),
+            Default::default(),
+            acp_config,
+            writer_tx,
+            None,
+            Some(store),
+        )
+    }
+
+    /// Create a gateway-backed ACP server without durable session storage.
+    ///
+    /// The server retains no parallel `Config` clone and resolves an on-demand
+    /// view whenever it handles a request.
+    pub fn new_with_live_config_and_writer(
+        live_config: Arc<parking_lot::RwLock<Config>>,
+        agent_lifecycle: kinetic_runtime::live_config_authority::AgentLifecycleCoordinator,
+        acp_config: AcpServerConfig,
+        writer_tx: mpsc::Sender<String>,
+    ) -> Self {
+        Self::with_writer(
+            ConfigSource::Live(live_config),
+            agent_lifecycle,
+            acp_config,
+            writer_tx,
+            None,
+            None,
+        )
+    }
+
+    /// Create a gateway-backed ACP server with durable session storage.
+    ///
+    /// The server retains no parallel `Config` clone and resolves an on-demand
+    /// view whenever it handles a request.
+    pub fn new_with_live_config_and_writer_and_store(
+        live_config: Arc<parking_lot::RwLock<Config>>,
+        agent_lifecycle: kinetic_runtime::live_config_authority::AgentLifecycleCoordinator,
+        acp_config: AcpServerConfig,
+        writer_tx: mpsc::Sender<String>,
+        store: Arc<AcpSessionStore>,
+    ) -> Self {
+        Self::with_writer(
+            ConfigSource::Live(live_config),
+            agent_lifecycle,
+            acp_config,
+            writer_tx,
+            None,
+            Some(store),
+        )
+    }
+
+    fn with_writer(
+        config_source: ConfigSource,
+        agent_lifecycle: kinetic_runtime::live_config_authority::AgentLifecycleCoordinator,
+        acp_config: AcpServerConfig,
+        writer_tx: mpsc::Sender<String>,
+        writer_rx: Option<mpsc::Receiver<String>>,
+        store: Option<Arc<AcpSessionStore>>,
+    ) -> Self {
+        Self {
+            config_source,
+            agent_lifecycle,
+            acp_config,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            rpc: Arc::new(RpcOutbound::new(writer_tx)),
+            writer_rx: std::sync::Mutex::new(writer_rx),
+            cancel_tokens: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            loading_sessions: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            session_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            store,
+            sop_engine: None,
+            sop_audit: None,
+            connection_default_agent: None,
+            client_elicitation_caps: std::sync::RwLock::new(ElicitationCapabilities::default()),
+        }
+    }
+
+    fn config_snapshot(&self) -> Config {
+        match &self.config_source {
+            ConfigSource::Standalone(config) => config.as_ref().clone(),
+            ConfigSource::Live(config) => config.read().clone(),
+        }
+    }
+
+    fn client_elicitation_capabilities(&self) -> ElicitationCapabilities {
+        match self.client_elicitation_caps.read() {
+            Ok(guard) => *guard,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
+    }
+
+    fn set_client_elicitation_capabilities(&self, capabilities: ElicitationCapabilities) {
+        let mut current = match self.client_elicitation_caps.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *current = capabilities;
+    }
+
+    async fn build_agent(
+        &self,
+        config: &Config,
+        agent_alias: &str,
+        workspace_dir: &std::path::Path,
+    ) -> Result<Agent> {
+        let Some(store) = self.store.as_ref() else {
+            return if let ConfigSource::Live(live_config) = &self.config_source {
+                Agent::from_live_config_with_session_cwd_and_mcp_backchannel_with_capability(
+                    Arc::clone(live_config),
+                    agent_alias,
+                    Some(workspace_dir),
+                    true,
+                    true,
+                    self.sop_engine.clone(),
+                    self.sop_audit.clone(),
+                    Some(kinetic_runtime::AgentExecutionCapability::from_parts(
+                        Arc::clone(live_config),
+                        self.agent_lifecycle.clone(),
+                    )),
+                )
+                .await
+            } else {
+                Agent::from_config_with_session_cwd_and_mcp_backchannel(
+                    config,
+                    agent_alias,
+                    Some(workspace_dir),
+                    true,
+                    true,
+                    self.sop_engine.clone(),
+                    self.sop_audit.clone(),
+                )
+                .await
+            };
+        };
+        if let ConfigSource::Live(live_config) = &self.config_source {
+            let execution_capability = kinetic_runtime::AgentExecutionCapability::from_parts(
+                Arc::clone(live_config),
+                self.agent_lifecycle.clone(),
+            );
+            Agent::from_live_config_with_session_cwd_and_mcp_backchannel_and_acp_sessions_with_capability(
+                Arc::clone(live_config),
+                agent_alias,
+                Some(workspace_dir),
+                true,
+                // ACP turns transport the typed file attachment `deliver_file` emits.
+                true,
+                self.sop_engine.clone(),
+                self.sop_audit.clone(),
+                Arc::clone(store),
+                Some(execution_capability),
+            )
+            .await
+        } else {
+            Agent::from_config_with_session_cwd_and_mcp_backchannel_and_acp_sessions(
+                config,
+                agent_alias,
+                Some(workspace_dir),
+                true,
+                // ACP turns transport the typed file attachment `deliver_file` emits.
+                true,
+                self.sop_engine.clone(),
+                self.sop_audit.clone(),
+                Arc::clone(store),
+            )
+            .await
+        }
+    }
+
+    /// Set the process- or connection-scoped default agent alias (`--agent`
+    /// for standalone ACP or `?agent=` on the gateway endpoint). Blank values
+    /// are treated as absent. The alias is validated at `session/new` with the
+    /// same dispatchable-agent checks as an explicit `agentAlias`. Restore
+    /// paths ignore this value.
+    pub fn with_connection_default_agent(mut self, alias: Option<String>) -> Self {
+        self.connection_default_agent = alias
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        self
+    }
+
+    /// Attach the shared SOP engine from the daemon so that agents created by
+    /// this server share a single SOP engine with the rest of the daemon.
+    pub fn with_sop_engine(
+        mut self,
+        sop_engine: Option<Arc<std::sync::Mutex<kinetic_runtime::sop::SopEngine>>>,
+        sop_audit: Option<Arc<kinetic_runtime::sop::SopAuditLogger>>,
+    ) -> Self {
+        self.sop_engine = sop_engine;
+        self.sop_audit = sop_audit;
+        self
+    }
+
+    /// Run the ACP server, reading JSON-RPC requests from stdin and writing
+    /// responses/notifications to stdout.
+    pub async fn run(self: Arc<Self>) -> Result<()> {
+        ::kinetic_log::record!(
+            DEBUG,
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                .with_category(::kinetic_log::EventCategory::Channel),
+            &format!(
+                "ACP server starting (max_sessions={}, timeout={}s)",
+                self.acp_config.max_sessions, self.acp_config.session_timeout_secs
+            )
+        );
+
+        // Pull the writer-rx out of self so we can move it into the writer
+        // task. Subsequent `run()` calls would have nothing to drive — but
+        // `run()` is normally invoked once per process.
+        let writer_rx = self
+            .writer_rx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .ok_or_else(|| {
+                ::kinetic_log::record!(
+                    ERROR,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                        .with_category(::kinetic_log::EventCategory::Channel)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure),
+                    "ACP server writer already started"
+                );
+                anyhow::Error::msg("ACP server writer already started")
+            })?;
+        kinetic_spawn::spawn!(writer_task(writer_rx));
+
+        // Spawn session reaper
+        let sessions = Arc::clone(&self.sessions);
+        let timeout = Duration::from_secs(self.acp_config.session_timeout_secs);
+        kinetic_spawn::spawn!(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let mut sessions = sessions.lock().await;
+                let before = sessions.len();
+                sessions.retain(|id, session_arc| {
+                    // Never reap a session whose inner lock is held — it has an
+                    // active prompt turn in flight and is by definition not idle.
+                    match session_arc.try_lock() {
+                        Ok(session) => {
+                            let expired = session.last_active.elapsed() > timeout;
+                            if expired {
+                                ::kinetic_log::record!(
+                                    DEBUG,
+                                    ::kinetic_log::Event::new(
+                                        module_path!(),
+                                        ::kinetic_log::Action::Note
+                                    )
+                                    .with_category(::kinetic_log::EventCategory::Channel)
+                                    .with_attrs(
+                                        ::serde_json::json!({
+                                            "id": id,
+                                            "agent_alias": session.agent_alias,
+                                            "model_provider": session.model_provider,
+                                            "model": session.model,
+                                        })
+                                    ),
+                                    "Session expired after inactivity"
+                                );
+                            }
+                            !expired
+                        }
+                        Err(_) => true,
+                    }
+                });
+                let reaped = before - sessions.len();
+                if reaped > 0 {
+                    ::kinetic_log::record!(
+                        DEBUG,
+                        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                            .with_category(::kinetic_log::EventCategory::Channel)
+                            .with_attrs(::serde_json::json!({"reaped": reaped})),
+                        "Reaped expired session(s)"
+                    );
+                }
+            }
+        });
+
+        // Read newline-delimited JSON-RPC from the process's real stdin.
+        // Factored into `serve_reader` so tests can drive the exact same
+        // framing loop with an in-memory pipe instead of the stdin handle.
+        self.serve_reader(tokio::io::stdin()).await?;
+
+        ::kinetic_log::record!(
+            DEBUG,
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                .with_category(::kinetic_log::EventCategory::Channel),
+            "ACP server: stdin closed, shutting down"
+        );
+
+        Ok(())
+    }
+
+    /// Read newline-delimited JSON-RPC requests from `reader`, dispatching each
+    /// non-empty line through the shared `process_line` path. This is the exact
+    /// framing loop the stdio front door uses: `run()` calls it with the
+    /// process's real stdin, and tests drive it with an in-memory pipe to prove
+    /// `session/new` end-to-end through the stdio surface.
+    async fn serve_reader<R>(self: &Arc<Self>, reader: R) -> Result<()>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let bytes_read = reader.read_line(&mut line).await?;
+            if bytes_read == 0 {
+                break;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            self.process_line(trimmed).await;
+        }
+        Ok(())
+    }
+
+    pub async fn run_messages(self: Arc<Self>, mut input_rx: mpsc::Receiver<String>) -> Result<()> {
+        ::kinetic_log::record!(
+            DEBUG,
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                .with_category(::kinetic_log::EventCategory::Channel),
+            "ACP server starting (WebSocket/framed mode)"
+        );
+        while let Some(line) = input_rx.recv().await {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            self.process_line(trimmed).await;
+        }
+
+        Ok(())
+    }
+
+    async fn process_line(self: &Arc<Self>, trimmed: &str) {
+        // First, peek at whether this is a response (has `result` or
+        // `error`) to a request *we* sent. Inbound requests/notifications
+        // fall through to the JsonRpcRequest path.
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed)
+            && value.is_object()
+            && (value.get("result").is_some() || value.get("error").is_some())
+            && let Some(id) = value.get("id")
+        {
+            let id_str = id
+                .as_str()
+                .map(String::from)
+                .unwrap_or_else(|| id.to_string());
+            let result = value.get("result").cloned();
+            let error: Option<JsonRpcError> = value
+                .get("error")
+                .and_then(|e| serde_json::from_value(e.clone()).ok());
+            self.rpc.dispatch_response(&id_str, result, error);
+            return;
+        }
+
+        match serde_json::from_str::<JsonRpcRequest>(trimmed) {
+            Ok(request) => {
+                if request.jsonrpc != "2.0" {
+                    if let Some(id) = request.id {
+                        self.write_error(id, INVALID_REQUEST, "Invalid JSON-RPC version")
+                            .await;
+                    }
+                    return;
+                }
+                let server = Arc::clone(self);
+                ::kinetic_spawn::spawn!(async move {
+                    server.handle_request(request).await;
+                });
+            }
+            Err(e) => {
+                ::kinetic_log::record!(
+                    WARN,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                        .with_category(::kinetic_log::EventCategory::Channel)
+                        .with_outcome(::kinetic_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                    "Failed to parse JSON-RPC request"
+                );
+                self.write_error(Value::Null, PARSE_ERROR, &format!("Parse error: {e}"))
+                    .await;
+            }
+        }
+    }
+
+    async fn handle_request(&self, request: JsonRpcRequest) {
+        let id = request.id.clone().unwrap_or(Value::Null);
+        let is_notification = request.id.is_none();
+
+        let result = match request.method.as_str() {
+            "initialize" => self.handle_initialize(&request.params),
+            "session/new" => self.handle_session_new(&request.params).await,
+            "session/load" => self.handle_session_load(&request.params).await,
+            "session/resume" => self.handle_session_resume(&request.params).await,
+            "session/close" => self.handle_session_close(&request.params).await,
+            "session/prompt" => self.handle_session_prompt(&request.params, &id).await,
+            "session/stop" => self.handle_session_stop(&request.params).await,
+            "session/cancel" => self.handle_session_cancel(&request.params).await,
+            "session/event" | "session/update" => self.handle_session_event(&request.params).await,
+            _ => {
+                ::kinetic_log::record!(
+                    WARN,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                        .with_category(::kinetic_log::EventCategory::Channel)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({"method": request.method})),
+                    "ACP method not found"
+                );
+                Err(RpcError {
+                    code: METHOD_NOT_FOUND,
+                    message: format!("Method not found: {}", request.method),
+                    data: None,
+                })
+            }
+        };
+
+        // Only send response for requests (with id), not notifications
+        if !is_notification {
+            match result {
+                Ok(value) => self.write_result(id, value).await,
+                Err(e) => {
+                    ::kinetic_log::record!(
+                        WARN,
+                        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                            .with_category(::kinetic_log::EventCategory::Channel)
+                            .with_outcome(::kinetic_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({
+                                "method": request.method,
+                                "error_code": e.code,
+                                "error": e.diagnostic(),
+                            })),
+                        "ACP request failed"
+                    );
+                    self.write_error(id, e.code, &e.message).await;
+                }
+            }
+        }
+    }
+
+    // ── Method handlers ──────────────────────────────────────────
+
+    fn handle_initialize(&self, params: &Value) -> RpcResult {
+        let elicitation = params
+            .get("clientCapabilities")
+            .and_then(|c| c.get("elicitation"));
+        self.set_client_elicitation_capabilities(ElicitationCapabilities::from_value(elicitation));
+
+        let config = self.config_snapshot();
+        // Advertise the model a new session on this connection would use by
+        // default — the default session agent's model — falling back to the
+        // install-wide first configured model when no default agent can be
+        // inferred (e.g. agent-less onboarding configs).
+        let default_model = match self.default_session_agent_alias(&config) {
+            Some(alias) => Self::alias_if_dispatchable(&config, &alias)
+                .and_then(|alias| config.resolved_model_provider_for_agent(&alias))
+                .and_then(|(_, _, entry)| {
+                    entry
+                        .model
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|model| !model.is_empty())
+                        .map(ToString::to_string)
+                }),
+            None => config.resolve_default_model(),
+        };
+
+        let mut kinetic_meta = serde_json::json!({
+            "maxSessions": self.acp_config.max_sessions,
+            "sessionTimeoutSecs": self.acp_config.session_timeout_secs,
+        });
+        if let Some(model) = default_model {
+            kinetic_meta["defaultModel"] = serde_json::json!(model);
+        }
+
+        let session_capabilities = if self.store.is_some() {
+            serde_json::json!({ "resume": {}, "close": {} })
+        } else {
+            serde_json::json!({})
+        };
+
+        Ok(serde_json::json!({
+            "protocolVersion": ACP_PROTOCOL_VERSION,
+            "agentCapabilities": {
+                "loadSession": self.store.is_some(),
+                "promptCapabilities": {
+                    "image": false,
+                    "audio": false,
+                    "embeddedContext": true,
+                },
+                "mcpCapabilities": {
+                    "http": false,
+                    "sse": false,
+                },
+                "sessionCapabilities": session_capabilities,
+            },
+            "agentInfo": {
+                "name": "kinetic-acp",
+                "title": "KineticVM ACP",
+                "version": env!("CARGO_PKG_VERSION"),
+            },
+            "authMethods": [],
+            "_meta": {
+                "kinetic": kinetic_meta,
+            }
+        }))
+    }
+
+    /// True when `alias` names a configured agent that can dispatch a turn.
+    fn alias_if_dispatchable(config: &Config, alias: &str) -> Option<String> {
+        if alias.trim().is_empty() {
+            return None;
+        }
+        config
+            .agent(alias)
+            .filter(|agent| agent.is_dispatchable())
+            .map(|_| alias.to_string())
+    }
+
+    /// Shared validation for explicit `agentAlias`, process/connection
+    /// defaults, config defaults, and sole-agent auto-select.
+    fn validate_dispatchable_agent_alias(
+        config: &Config,
+        agent_alias: &str,
+    ) -> Result<(), RpcError> {
+        match config.agent(agent_alias) {
+            None => Err(RpcError {
+                code: INVALID_PARAMS,
+                message: format!(
+                    "Unknown agent `{agent_alias}` — no [agents.{agent_alias}] entry configured"
+                ),
+                data: None,
+            }),
+            Some(agent) if !agent.is_dispatchable() => Err(RpcError {
+                code: INVALID_PARAMS,
+                message: format!("Agent `{agent_alias}` is not enabled for dispatch"),
+                data: None,
+            }),
+            Some(_) => Ok(()),
+        }
+    }
+
+    fn agent_admission_error(
+        error: kinetic_runtime::live_config_authority::AgentAdmissionError,
+    ) -> RpcError {
+        let message = match error {
+            kinetic_runtime::live_config_authority::AgentAdmissionError::Deleting { alias }
+            | kinetic_runtime::live_config_authority::AgentAdmissionError::StaleGeneration {
+                alias,
+            } => format!("Agent `{alias}` changed while the session was being created"),
+            kinetic_runtime::live_config_authority::AgentAdmissionError::GenerationClosing => {
+                "Agent sessions are unavailable while the daemon reloads".to_string()
+            }
+        };
+        RpcError {
+            code: INVALID_PARAMS,
+            message,
+            data: None,
+        }
+    }
+
+    /// Alias a new session on this connection would use when the client does
+    /// not pass an explicit `agentAlias`: the connection-scoped default
+    /// (`?agent=`), then `[acp].default_agent`, then the sole configured
+    /// agent. `None` when no default can be inferred. Shared by
+    /// `session/new`'s parameter fallback and the `initialize` defaultModel
+    /// advertisement so the two cannot drift apart.
+    fn default_session_agent_alias(&self, config: &Config) -> Option<String> {
+        self.connection_default_agent
+            .clone()
+            .or_else(|| config.acp.default_agent.clone())
+            .or_else(|| {
+                let mut keys = config.agents.keys();
+                if config.agents.len() == 1 {
+                    keys.next().cloned()
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// Restore alias precedence: persisted owner (when still dispatchable) →
+    /// `[acp].default_agent` → sole configured agent → `"default"`.
+    ///
+    /// The process/connection default is intentionally omitted: restore accepts
+    /// only a session ID and must not let launcher or transport input rebind a
+    /// persisted workspace/history to a different agent.
+    fn resolve_restore_agent_alias(config: &Config, persisted_agent_alias: &str) -> String {
+        Self::alias_if_dispatchable(config, persisted_agent_alias)
+            .or_else(|| {
+                config
+                    .acp
+                    .default_agent
+                    .as_ref()
+                    .and_then(|alias| Self::alias_if_dispatchable(config, alias))
+            })
+            .or_else(|| {
+                if config.agents.len() == 1 {
+                    config
+                        .agents
+                        .keys()
+                        .next()
+                        .and_then(|alias| Self::alias_if_dispatchable(config, alias))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    async fn handle_session_new(&self, params: &Value) -> RpcResult {
+        let config = self.config_snapshot();
+
+        // Every ACP session is bound to an explicit agent alias.
+        // Accept `agentAlias` (camelCase) or `agent_alias` / `agent`,
+        // then the connection-scoped default (`?agent=`), then
+        // `[acp].default_agent`. When all are absent and exactly one agent
+        // is configured, auto-select it so single-agent setups work without
+        // extra config.
+        // NOTE: agent_alias MUST be resolved before workspace_dir so the
+        // default fallback can use the per-agent workspace path instead of
+        // the daemon process CWD.
+        let agent_alias = params
+            .get("agentAlias")
+            .or_else(|| params.get("agent_alias"))
+            .or_else(|| params.get("agent"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.default_session_agent_alias(&config))
+            .ok_or_else(|| RpcError {
+                code: INVALID_PARAMS,
+                message: "session/new requires `agentAlias` (alias of a configured \
+                          [agents.<alias>] entry)"
+                    .to_string(),
+                data: None,
+            })?;
+        Self::validate_dispatchable_agent_alias(&config, &agent_alias)?;
+        let admission = self
+            .agent_lifecycle
+            .reserve_admission(agent_alias.clone())
+            .map_err(Self::agent_admission_error)?;
+
+        // Default workspace is the per-agent directory. An explicit
+        // `cwd`/`workspaceDir`/`workspace_dir` is the session's file-access
+        // boundary and is honored exactly as given — including a narrower
+        // subdirectory under the install root. The ONE exception is a cwd that
+        // resolves to the install root itself: clients such as Thunderbolt pass
+        // `.` as a placeholder, which canonicalizes to the daemon's working
+        // directory. Treating that lone placeholder as "no meaningful cwd" and
+        // falling back to the per-agent workspace keeps uploads and the tool
+        // sandbox out of the daemon root, without silently broadening any other
+        // explicit path.
+        //
+        // Canonicalize the install root too: the explicit cwd goes through
+        // `canonicalize`, so comparing it against a non-canonical install root
+        // silently never matches whenever the path is symlinked or carries a
+        // platform prefix (macOS `/var`->`/private/var`, Windows `\\?\`
+        // verbatim). Both sides must be canonical for the equality to hold.
+        //
+        // An explicitly-provided cwd that cannot be resolved is a client error,
+        // not a silent substitution: fail with INVALID_PARAMS. Only an absent
+        // cwd falls back to the per-agent workspace.
+        let install_root = std::fs::canonicalize(config.install_root_dir())
+            .unwrap_or_else(|_| config.install_root_dir());
+        let workspace_dir = match self.requested_session_cwd(params) {
+            Some(requested) => {
+                let canon = std::fs::canonicalize(&requested).map_err(|e| RpcError {
+                    code: INVALID_PARAMS,
+                    message: format!(
+                        "cwd is not a usable directory ({}): {e}",
+                        requested.display()
+                    ),
+                    data: None,
+                })?;
+                if canon == install_root {
+                    config.agent_workspace_dir(&agent_alias)
+                } else {
+                    canon
+                }
+            }
+            None => config.agent_workspace_dir(&agent_alias),
+        }
+        .to_string_lossy()
+        .into_owned();
+
+        let session_id = Uuid::new_v4().to_string();
+
+        {
+            let sessions = self.sessions.lock().await;
+            let mut loading = self.loading_sessions.lock().await;
+            if sessions.len() + loading.len() >= self.acp_config.max_sessions {
+                ::kinetic_log::record!(
+                    WARN,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                        .with_category(::kinetic_log::EventCategory::Channel)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "active": sessions.len(),
+                            "loading": loading.len(),
+                            "max": self.acp_config.max_sessions,
+                        })),
+                    "ACP session/new rejected: session limit reached"
+                );
+                return Err(RpcError {
+                    code: SESSION_LIMIT_REACHED,
+                    message: format!(
+                        "Maximum session limit reached ({})",
+                        self.acp_config.max_sessions
+                    ),
+                    data: None,
+                });
+            }
+            loading.insert(session_id.clone());
+        }
+
+        // Build agent from global config, with the session's cwd pinned as
+        // the file/shell sandbox boundary. The agent's data directory
+        // (identity, scheduled tasks) still lives under `config.data_dir`.
+        // ACP sessions exclude persistent memory — context comes from the
+        // persisted session history, not the agent's long-term memory store.
+        let mut agent = match self
+            .build_agent(&config, &agent_alias, std::path::Path::new(&workspace_dir))
+            .await
+        {
+            Ok(agent) => agent,
+            Err(e) => {
+                self.loading_sessions.lock().await.remove(&session_id);
+                let model_provider = config
+                    .agent(&agent_alias)
+                    .map(|a| a.model_provider.to_string())
+                    .unwrap_or_default();
+                let model = config
+                    .model_provider_for_agent(&agent_alias)
+                    .and_then(|mp| mp.model.clone())
+                    .unwrap_or_default();
+                let error = kinetic_runtime::security::scrub(
+                    &kinetic_providers::sanitize_api_error(&e.to_string()),
+                );
+                ::kinetic_log::scope!(
+                    session_key: session_id.as_str(),
+                    agent_alias: agent_alias.as_str(),
+                    model_provider: model_provider.as_str(),
+                    model: model.as_str(),
+                    channel: "acp",
+                    => async {
+                        ::kinetic_log::record!(
+                            ERROR,
+                            ::kinetic_log::Event::new(
+                                module_path!(),
+                                ::kinetic_log::Action::Fail,
+                            )
+                            .with_category(::kinetic_log::EventCategory::Channel)
+                            .with_outcome(::kinetic_log::EventOutcome::Failure)
+                            .with_attrs(::serde_json::json!({
+                                "workspace_dir": workspace_dir,
+                                "error": error.as_str(),
+                            })),
+                            "ACP session/new failed: agent init error"
+                        );
+                    }
+                )
+                .await;
+                return Err(RpcError {
+                    code: INTERNAL_ERROR,
+                    message: format!("Failed to create agent: {error}"),
+                    data: None,
+                });
+            }
+        };
+
+        // Wire an ACP back-channel so tools like `ask_user`,
+        // `escalate_to_human`, and `reaction` can talk to the IDE/CLI client
+        // for this session. Registered as `"acp"`; channel_name must match so
+        // interactive tools default here instead of an arbitrary map entry.
+        let acp_channel = Arc::new(AcpChannel::new(
+            "acp",
+            session_id.clone(),
+            Arc::clone(&self.rpc),
+            Duration::from_secs(self.acp_config.session_timeout_secs),
+            self.client_elicitation_capabilities(),
+        ));
+        agent.set_channel_name("acp".to_string());
+        agent.channel_handles().register_channel("acp", acp_channel);
+
+        // Persist before publishing the session, so a failed write never
+        // leaves a live-but-unpersisted session; release the reservation on
+        // failure. The slot stays accounted for (still in `loading`) until the
+        // insert below.
+        if let Some(store) = &self.store {
+            let store = store.clone();
+            let sid = session_id.clone();
+            let alias = agent_alias.clone();
+            let wsd = workspace_dir.clone();
+            // The orchestrator ACP transport (CLI/IDE-native) carries no
+            // authenticated gateway principal, so these sessions are stamped
+            // with a NULL owner -- visible only to unscoped connections, never
+            // to a scoped gateway principal (RFC 7141 F2).
+            let created =
+                tokio::task::spawn_blocking(move || store.create_session(&sid, &alias, &wsd, None))
+                    .await;
+            let error = match created {
+                Ok(Ok(_)) => None,
+                Ok(Err(e)) => Some(e.to_string()),
+                Err(join) => Some(join.to_string()),
+            };
+            if let Some(detail) = error {
+                self.loading_sessions.lock().await.remove(&session_id);
+                return Err(RpcError {
+                    code: INTERNAL_ERROR,
+                    message: format!("Failed to persist session: {detail}"),
+                    data: None,
+                });
+            }
+        }
+
+        let lifecycle_lease = match admission.publish() {
+            Ok(lease) => lease,
+            Err(error) => {
+                self.loading_sessions.lock().await.remove(&session_id);
+                if let Some(store) = &self.store {
+                    let store = Arc::clone(store);
+                    let sid = session_id.clone();
+                    let _ = tokio::task::spawn_blocking(move || store.delete_session(&sid)).await;
+                }
+                return Err(Self::agent_admission_error(error));
+            }
+        };
+        let now = Instant::now();
+        // Atomically insert and release the reservation.
+        {
+            let mut sessions = self.sessions.lock().await;
+            let mut loading = self.loading_sessions.lock().await;
+            loading.remove(&session_id);
+            sessions.insert(
+                session_id.clone(),
+                Arc::new(Mutex::new(Session {
+                    agent,
+                    _lifecycle_lease: lifecycle_lease,
+                    last_active: now,
+                    agent_alias: agent_alias.clone(),
+                    model_provider: config
+                        .agent(&agent_alias)
+                        .map(|a| a.model_provider.to_string())
+                        .unwrap_or_default(),
+                    model: config
+                        .model_provider_for_agent(&agent_alias)
+                        .and_then(|mp| mp.model.clone())
+                        .unwrap_or_default(),
+                    workspace_dir: workspace_dir.clone(),
+                })),
+            );
+        }
+
+        let mp = config
+            .agent(&agent_alias)
+            .map(|a| a.model_provider.to_string())
+            .unwrap_or_default();
+        let model_name = config
+            .model_provider_for_agent(&agent_alias)
+            .and_then(|mp| mp.model.clone())
+            .unwrap_or_default();
+        ::kinetic_log::record!(
+            INFO,
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Start)
+                .with_category(::kinetic_log::EventCategory::Channel)
+                .with_outcome(::kinetic_log::EventOutcome::Success)
+                .with_attrs(::serde_json::json!({
+                    "session_id": session_id,
+                    "workspace_dir": workspace_dir,
+                    "agent_alias": agent_alias,
+                    "model_provider": mp,
+                    "model": model_name,
+                })),
+            "ACP session created"
+        );
+
+        Ok(serde_json::json!({
+            "sessionId": session_id,
+            "workspaceDir": workspace_dir,
+        }))
+    }
+
+    async fn handle_session_load(&self, params: &Value) -> RpcResult {
+        let session_id = params
+            .get("sessionId")
+            .or_else(|| params.get("session_id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: INVALID_PARAMS,
+                message: "Missing required parameter: sessionId".to_string(),
+                data: None,
+            })?
+            .to_string();
+
+        let store = self.store.as_ref().ok_or_else(|| RpcError {
+            code: SESSION_NOT_FOUND,
+            message: format!("Session not found: {session_id}"),
+            data: None,
+        })?;
+
+        // Wait out any in-flight prompt on this session before reading the store,
+        // so a restore cannot seed a replacement agent from pre-append rows while
+        // a terminal transcript is still being committed — including the window
+        // after `session/close`/`session/stop` remove the live map entry (see
+        // `session_gates`). Held across the store read and the map insert below.
+        // Declared before the gate so it drops last: reclamation only succeeds
+        // once the map is the sole owner of the entry.
+        let mut restore_gate = self.restore_gate(&session_id);
+        let finalize_gate = self.session_gate(&session_id);
+        let _finalize_guard = finalize_gate.lock().await;
+
+        // Atomically check and reserve the session slot
+        {
+            let sessions = self.sessions.lock().await;
+            let mut loading = self.loading_sessions.lock().await;
+            if sessions.len() + loading.len() >= self.acp_config.max_sessions {
+                ::kinetic_log::record!(
+                    WARN,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                        .with_category(::kinetic_log::EventCategory::Channel)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "session_id": session_id,
+                            "active": sessions.len(),
+                            "loading": loading.len(),
+                            "max": self.acp_config.max_sessions,
+                        })),
+                    "ACP session/load rejected: session limit reached"
+                );
+                return Err(RpcError {
+                    code: SESSION_LIMIT_REACHED,
+                    message: format!(
+                        "Maximum session limit reached ({})",
+                        self.acp_config.max_sessions
+                    ),
+                    data: None,
+                });
+            }
+            if sessions.contains_key(&session_id) || loading.contains(&session_id) {
+                ::kinetic_log::record!(
+                    WARN,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                        .with_category(::kinetic_log::EventCategory::Channel)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({"session_id": session_id})),
+                    "ACP session/load rejected: session already active"
+                );
+                return Err(RpcError {
+                    code: INVALID_PARAMS,
+                    message: format!(
+                        "Session already active: {session_id}. Call session/close first."
+                    ),
+                    data: None,
+                });
+            }
+            loading.insert(session_id.clone());
+        }
+
+        // Flatten both the SQLite error and the not-found case into a single
+        // Result so the cleanup match below runs for every failure after the
+        // reservation was inserted.
+        let data = store
+            .load_session(&session_id)
+            .map_err(|e| RpcError {
+                code: INTERNAL_ERROR,
+                message: format!("Failed to load session: {e}"),
+                data: None,
+            })
+            .and_then(|opt| {
+                opt.ok_or_else(|| RpcError {
+                    code: SESSION_NOT_FOUND,
+                    message: format!("Session not found: {session_id}"),
+                    data: None,
+                })
+            });
+
+        // On error (SQLite failure or not-found), release the reservation.
+        let data = match data {
+            Ok(d) => d,
+            Err(e) => {
+                self.loading_sessions.lock().await.remove(&session_id);
+                return Err(e);
+            }
+        };
+
+        let workspace_dir = std::path::PathBuf::from(&data.workspace_dir);
+        let config = self.config_snapshot();
+
+        // Restore the agent the session was created with — its alias is
+        // persisted on the session row. Fall back to the operator-controlled
+        // ACP default (or sole agent, or "default") only when the persisted
+        // owner is missing or not dispatchable. `?agent=` is not consulted.
+        let restore_alias = Self::resolve_restore_agent_alias(&config, &data.agent_alias);
+        let admission = match self
+            .agent_lifecycle
+            .reserve_admission(restore_alias.clone())
+        {
+            Ok(admission) => admission,
+            Err(error) => {
+                self.loading_sessions.lock().await.remove(&session_id);
+                return Err(Self::agent_admission_error(error));
+            }
+        };
+
+        let agent_result = self
+            .build_agent(&config, &restore_alias, &workspace_dir)
+            .await
+            .map_err(|e| RpcError {
+                code: INTERNAL_ERROR,
+                message: format!("Failed to create agent: {e}"),
+                data: None,
+            });
+
+        let mut agent = match agent_result {
+            Ok(a) => a,
+            Err(e) => {
+                self.loading_sessions.lock().await.remove(&session_id);
+                return Err(e);
+            }
+        };
+
+        // Repair an interrupted native-tool exchange left by a failed/cancelled
+        // turn and drop the replay-only cancellation sentinel before seeding, on
+        // the same typed-restore path `session/resume` uses. `stored_messages`
+        // retains the original transcript (incl. sentinels and unrepaired rows)
+        // for client replay below; `seed_pairs` is the single derived provider
+        // view — every seed row carries the stored index it came from — so the
+        // retained provider boundary maps back onto client replay after
+        // cancellation filtering, unmatched-call repair, and trimming reshape
+        // the seed.
+        let (stored_messages, seed_pairs, repaired_tool_calls) =
+            Self::sanitize_restored_history(data.messages);
+        if repaired_tool_calls > 0 {
+            ::kinetic_log::record!(
+                WARN,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Delete)
+                    .with_category(::kinetic_log::EventCategory::Channel)
+                    .with_outcome(::kinetic_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "session_id": session_id,
+                        "assistant_messages_repaired": repaired_tool_calls,
+                    })),
+                "ACP session/load repaired interrupted tool calls in restored transcript"
+            );
+        }
+        let seed_messages: Vec<ConversationMessage> = seed_pairs
+            .iter()
+            .map(|(message, _)| message.clone())
+            .collect();
+        // Breadcrumb provenance is the store's canonical record alongside
+        // the transcript, never inferred from message text. Set it BEFORE
+        // seeding: seed-time trim reads the flag to decide whether a leading
+        // synthetic marker counts as a real turn.
+        agent.set_history_has_trim_breadcrumb(data.trim_breadcrumb);
+        let restore_trim_event = agent.seed_conversation_history_with_event(seed_messages);
+        if restore_trim_event.is_some() {
+            // Seed-time trim only fires when the restored history exceeded
+            // the structured cap, so it dropped rows, not just relabeled
+            // them. Mirror the terminal-path persistence contract
+            // (`replace_transcript`) so the retained projection and
+            // corrected breadcrumb are durable before the session goes
+            // live; otherwise a later restart reloads the untruncated
+            // transcript and resurrects the turns this trim just dropped.
+            // A failure here must not let the session go live against a
+            // store that still has the untrimmed prefix, so it fails the
+            // restore instead of swallowing the error.
+            if let Err(e) = Self::replace_transcript(
+                self.store.clone(),
+                session_id.clone(),
+                agent.history().to_vec(),
+                agent.history_has_trim_breadcrumb(),
+            )
+            .await
+            {
+                self.loading_sessions.lock().await.remove(&session_id);
+                return Err(RpcError {
+                    code: INTERNAL_ERROR,
+                    message: format!("Failed to persist restored history trim: {e}"),
+                    data: None,
+                });
+            }
+        }
+        let dropped_messages = match &restore_trim_event {
+            Some(TurnEvent::HistoryTrimmed {
+                dropped_messages, ..
+            }) => *dropped_messages,
+            _ => 0,
+        };
+        // Whole-turn trimming drops a prefix of the provider seed. Map that
+        // boundary back to the original stored index so client replay starts
+        // at the same retained turn even though repair may have removed seed
+        // rows the stored transcript still contains.
+        //
+        // `dropped_messages` counts only real messages: a leading persisted
+        // synthetic breadcrumb is excluded by the crumb-aware trim but is
+        // still present in `seed_pairs`, so the seed-vector offset is the
+        // dropped count plus the leading crumb row.
+        let seed_crumbs = if data.trim_breadcrumb
+            && seed_pairs.first().is_some_and(|(message, _)| {
+                if let ConversationMessage::Chat(chat) = message {
+                    chat.role == "user"
+                        && kinetic_runtime::agent::history::is_history_trim_breadcrumb_text(
+                            &chat.content,
+                        )
+                } else {
+                    false
+                }
+            }) {
+            1
+        } else {
+            0
+        };
+        let replay_from = seed_pairs
+            .get(dropped_messages + seed_crumbs)
+            .map(|(_, original_index)| *original_index)
+            .unwrap_or(stored_messages.len());
+
+        let acp_channel = Arc::new(AcpChannel::new(
+            "acp",
+            session_id.clone(),
+            Arc::clone(&self.rpc),
+            Duration::from_secs(self.acp_config.session_timeout_secs),
+            self.client_elicitation_capabilities(),
+        ));
+        agent.set_channel_name("acp".to_string());
+        agent.channel_handles().register_channel("acp", acp_channel);
+
+        let lifecycle_lease = match admission.publish() {
+            Ok(lease) => lease,
+            Err(error) => {
+                self.loading_sessions.lock().await.remove(&session_id);
+                return Err(Self::agent_admission_error(error));
+            }
+        };
+        let now = Instant::now();
+        // The session is about to become live, so `session/close` owns the gate
+        // from here on.
+        restore_gate.disarm();
+        // Atomically insert and release reservation
+        {
+            let mut sessions = self.sessions.lock().await;
+            let mut loading = self.loading_sessions.lock().await;
+            loading.remove(&session_id);
+            sessions.insert(
+                session_id.clone(),
+                Arc::new(Mutex::new(Session {
+                    agent,
+                    _lifecycle_lease: lifecycle_lease,
+                    last_active: now,
+                    agent_alias: restore_alias.clone(),
+                    model_provider: config
+                        .agent(&restore_alias)
+                        .map(|a| a.model_provider.to_string())
+                        .unwrap_or_default(),
+                    model: config
+                        .model_provider_for_agent(&restore_alias)
+                        .and_then(|mp| mp.model.clone())
+                        .unwrap_or_default(),
+                    workspace_dir: workspace_dir.to_string_lossy().into_owned(),
+                })),
+            );
+        }
+
+        if let Some(event) = restore_trim_event
+            && let Some(notification) = notification_for_turn_event(&session_id, &event)
+        {
+            self.write_notification(&notification).await;
+        }
+
+        // Replay exactly the stored rows the retained provider seed still
+        // covers. Replaying the stored pre-trim rows would make the client
+        // display context the restored agent has already discarded, and
+        // skipping a scalar count of stored rows would drift from the seed
+        // once unmatched-call repair removes rows the transcript keeps.
+        // Cancellation events are not part of the seeded set, so they never
+        // move the boundary; one that belongs to a dropped turn is dropped
+        // from replay too, and each surviving one replays as the live
+        // client-cancel update rather than a verbatim assistant message.
+        let mut replayed_messages = 0;
+        for (original_index, msg) in stored_messages.iter().enumerate() {
+            if original_index < replay_from {
+                continue;
+            }
+            replayed_messages += 1;
+            if Self::is_cancellation_event(msg) {
+                self.write_notification(&Self::turn_cancelled_notification(&session_id))
+                    .await;
+                continue;
+            }
+            for notification in history_notifications_for_message(&session_id, msg) {
+                self.write_notification(&notification).await;
+            }
+        }
+
+        let mp = config
+            .agent(&restore_alias)
+            .map(|a| a.model_provider.to_string())
+            .unwrap_or_default();
+        let model_name = config
+            .model_provider_for_agent(&restore_alias)
+            .and_then(|mp| mp.model.clone())
+            .unwrap_or_default();
+        ::kinetic_log::record!(
+            INFO,
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Start)
+                .with_category(::kinetic_log::EventCategory::Channel)
+                .with_outcome(::kinetic_log::EventOutcome::Success)
+                .with_attrs(::serde_json::json!({
+                    "session_id": session_id,
+                    "message_count": replayed_messages,
+                    "agent_alias": restore_alias,
+                    "model_provider": mp,
+                    "model": model_name,
+                })),
+            "ACP session loaded"
+        );
+        Ok(serde_json::json!({}))
+    }
+
+    async fn handle_session_resume(&self, params: &Value) -> RpcResult {
+        let session_id = params
+            .get("sessionId")
+            .or_else(|| params.get("session_id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: INVALID_PARAMS,
+                message: "Missing required parameter: sessionId".to_string(),
+                data: None,
+            })?
+            .to_string();
+
+        let store = self.store.as_ref().ok_or_else(|| RpcError {
+            code: SESSION_NOT_FOUND,
+            message: format!("Session not found: {session_id}"),
+            data: None,
+        })?;
+
+        // Wait out any in-flight prompt on this session before reading the store
+        // (same finalization barrier as `session/load`; see `session_gates`).
+        let mut restore_gate = self.restore_gate(&session_id);
+        let finalize_gate = self.session_gate(&session_id);
+        let _finalize_guard = finalize_gate.lock().await;
+
+        // Atomically check and reserve the session slot
+        {
+            let sessions = self.sessions.lock().await;
+            let mut loading = self.loading_sessions.lock().await;
+            if sessions.len() + loading.len() >= self.acp_config.max_sessions {
+                ::kinetic_log::record!(
+                    WARN,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                        .with_category(::kinetic_log::EventCategory::Channel)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "session_id": session_id,
+                            "active": sessions.len(),
+                            "loading": loading.len(),
+                            "max": self.acp_config.max_sessions,
+                        })),
+                    "ACP session/resume rejected: session limit reached"
+                );
+                return Err(RpcError {
+                    code: SESSION_LIMIT_REACHED,
+                    message: format!(
+                        "Maximum session limit reached ({})",
+                        self.acp_config.max_sessions
+                    ),
+                    data: None,
+                });
+            }
+            if sessions.contains_key(&session_id) || loading.contains(&session_id) {
+                ::kinetic_log::record!(
+                    WARN,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                        .with_category(::kinetic_log::EventCategory::Channel)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({"session_id": session_id})),
+                    "ACP session/resume rejected: session already active"
+                );
+                return Err(RpcError {
+                    code: INVALID_PARAMS,
+                    message: format!(
+                        "Session already active: {session_id}. Call session/close first."
+                    ),
+                    data: None,
+                });
+            }
+            loading.insert(session_id.clone());
+        }
+
+        let data = store
+            .load_session(&session_id)
+            .map_err(|e| RpcError {
+                code: INTERNAL_ERROR,
+                message: format!("Failed to load session: {e}"),
+                data: None,
+            })
+            .and_then(|opt| {
+                opt.ok_or_else(|| RpcError {
+                    code: SESSION_NOT_FOUND,
+                    message: format!("Session not found: {session_id}"),
+                    data: None,
+                })
+            });
+
+        // On error (SQLite failure or not-found), release the reservation.
+        let data = match data {
+            Ok(d) => d,
+            Err(e) => {
+                self.loading_sessions.lock().await.remove(&session_id);
+                return Err(e);
+            }
+        };
+
+        let workspace_dir = std::path::PathBuf::from(&data.workspace_dir);
+        let config = self.config_snapshot();
+
+        // Restore the agent the session was created with — its alias is
+        // persisted on the session row. Fall back to the operator-controlled
+        // ACP default (or sole agent, or "default") only when the persisted
+        // owner is missing or not dispatchable. `?agent=` is not consulted.
+        let restore_alias = Self::resolve_restore_agent_alias(&config, &data.agent_alias);
+        let admission = match self
+            .agent_lifecycle
+            .reserve_admission(restore_alias.clone())
+        {
+            Ok(admission) => admission,
+            Err(error) => {
+                self.loading_sessions.lock().await.remove(&session_id);
+                return Err(Self::agent_admission_error(error));
+            }
+        };
+
+        let agent_result = self
+            .build_agent(&config, &restore_alias, &workspace_dir)
+            .await
+            .map_err(|e| RpcError {
+                code: INTERNAL_ERROR,
+                message: format!("Failed to create agent: {e}"),
+                data: None,
+            });
+
+        let mut agent = match agent_result {
+            Ok(a) => a,
+            Err(e) => {
+                self.loading_sessions.lock().await.remove(&session_id);
+                return Err(e);
+            }
+        };
+
+        // `session/resume` seeds provider history but emits no client replay, so
+        // it needs the same typed sanitization `session/load` applies: repair an
+        // interrupted native-tool exchange and drop the replay-only cancellation
+        // sentinel, otherwise the next native-provider prompt would receive the
+        // unmatched tool call / re-entered cancellation the repair prevents.
+        let (_stored_messages, seed_pairs, repaired_tool_calls) =
+            Self::sanitize_restored_history(data.messages);
+        let seed_messages: Vec<ConversationMessage> = seed_pairs
+            .iter()
+            .map(|(message, _)| message.clone())
+            .collect();
+        if repaired_tool_calls > 0 {
+            ::kinetic_log::record!(
+                WARN,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Delete)
+                    .with_category(::kinetic_log::EventCategory::Channel)
+                    .with_outcome(::kinetic_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({
+                        "session_id": session_id,
+                        "assistant_messages_repaired": repaired_tool_calls,
+                    })),
+                "ACP session/resume repaired interrupted tool calls in restored transcript"
+            );
+        }
+        // Breadcrumb provenance is the store's canonical record alongside
+        // the transcript, never inferred from message text. Set it BEFORE
+        // seeding: seed-time trim reads the flag.
+        agent.set_history_has_trim_breadcrumb(data.trim_breadcrumb);
+        let restore_trim_event = agent.seed_conversation_history_with_event(seed_messages);
+        if restore_trim_event.is_some() {
+            // See the matching `session/load` comment above: seed-time trim
+            // must be persisted back the same way the terminal path does, or
+            // the retained projection and corrected breadcrumb only ever
+            // live in the process's memory and a restart resurrects the
+            // turns this trim just dropped. A failure here must not let the
+            // session go live against a store that still has the untrimmed
+            // prefix, so it fails the restore instead of swallowing the
+            // error.
+            if let Err(e) = Self::replace_transcript(
+                self.store.clone(),
+                session_id.clone(),
+                agent.history().to_vec(),
+                agent.history_has_trim_breadcrumb(),
+            )
+            .await
+            {
+                self.loading_sessions.lock().await.remove(&session_id);
+                return Err(RpcError {
+                    code: INTERNAL_ERROR,
+                    message: format!("Failed to persist restored history trim: {e}"),
+                    data: None,
+                });
+            }
+        }
+
+        let acp_channel = Arc::new(AcpChannel::new(
+            "acp",
+            session_id.clone(),
+            Arc::clone(&self.rpc),
+            Duration::from_secs(self.acp_config.session_timeout_secs),
+            self.client_elicitation_capabilities(),
+        ));
+        agent.set_channel_name("acp".to_string());
+        agent.channel_handles().register_channel("acp", acp_channel);
+
+        let lifecycle_lease = match admission.publish() {
+            Ok(lease) => lease,
+            Err(error) => {
+                self.loading_sessions.lock().await.remove(&session_id);
+                return Err(Self::agent_admission_error(error));
+            }
+        };
+        let now = Instant::now();
+        // The session is about to become live, so `session/close` owns the gate
+        // from here on.
+        restore_gate.disarm();
+        // Atomically insert and release reservation
+        {
+            let mut sessions = self.sessions.lock().await;
+            let mut loading = self.loading_sessions.lock().await;
+            loading.remove(&session_id);
+            sessions.insert(
+                session_id.clone(),
+                Arc::new(Mutex::new(Session {
+                    agent,
+                    _lifecycle_lease: lifecycle_lease,
+                    last_active: now,
+                    agent_alias: restore_alias.clone(),
+                    model_provider: config
+                        .agent(&restore_alias)
+                        .map(|a| a.model_provider.to_string())
+                        .unwrap_or_default(),
+                    model: config
+                        .model_provider_for_agent(&restore_alias)
+                        .and_then(|mp| mp.model.clone())
+                        .unwrap_or_default(),
+                    workspace_dir: workspace_dir.to_string_lossy().into_owned(),
+                })),
+            );
+        }
+
+        if let Some(event) = restore_trim_event
+            && let Some(notification) = notification_for_turn_event(&session_id, &event)
+        {
+            self.write_notification(&notification).await;
+        }
+
+        let mp = config
+            .agent(&restore_alias)
+            .map(|a| a.model_provider.to_string())
+            .unwrap_or_default();
+        let model_name = config
+            .model_provider_for_agent(&restore_alias)
+            .and_then(|mp| mp.model.clone())
+            .unwrap_or_default();
+
+        // Replay the durable TodoWrite plan so the resuming client's tracker
+        // repopulates without a model round-trip — parity with the daemon RPC
+        // ACP bridge. Best-effort: a load failure or empty plan emits nothing.
+        if let Some(store) = self.store.as_ref() {
+            let entries = store.get_plan(&session_id).unwrap_or_default();
+            if !entries.is_empty()
+                && let Some(notification) =
+                    notification_for_turn_event(&session_id, &TurnEvent::Plan { entries })
+            {
+                self.write_notification(&notification).await;
+            }
+        }
+
+        ::kinetic_log::record!(
+            INFO,
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Start)
+                .with_category(::kinetic_log::EventCategory::Channel)
+                .with_outcome(::kinetic_log::EventOutcome::Success)
+                .with_attrs(::serde_json::json!({
+                    "session_id": session_id,
+                    "agent_alias": restore_alias,
+                    "model_provider": mp,
+                    "model": model_name,
+                })),
+            "ACP session resumed"
+        );
+        Ok(serde_json::json!({}))
+    }
+    async fn handle_session_close(&self, params: &Value) -> RpcResult {
+        let session_id = params
+            .get("sessionId")
+            .or_else(|| params.get("session_id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: INVALID_PARAMS,
+                message: "Missing required parameter: sessionId".to_string(),
+                data: None,
+            })?;
+
+        // Fire the cancel token for any in-flight turn before acquiring the session lock.
+        let token = self
+            .cancel_tokens
+            .lock()
+            .expect("cancel_tokens lock poisoned — invariant: all guarded critical sections are short, infallible HashMap ops")
+            .get(session_id)
+            .cloned();
+        if let Some(token) = token {
+            token.cancel();
+            ::kinetic_log::record!(
+                INFO,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                    .with_category(::kinetic_log::EventCategory::Channel)
+                    .with_attrs(::serde_json::json!({"session_id": session_id})),
+                "ACP session/close: cancelled active turn"
+            );
+        }
+
+        // Join the session's lifecycle guard before removing the map entry, so
+        // close participates in the same coordination the prompt used at
+        // admission: a `session/prompt` holds this gate from admission through
+        // its terminal transcript commit — including the scheduling window
+        // after the handler validated and spawned its turn task but before
+        // that task first acquires the session lock. Without this, close could
+        // remove the entry and acquire the still-free session lock, return,
+        // and only then let the parked task run and append its terminal
+        // outcome. With it, close parks on the gate while the prompt
+        // revalidates (the entry is still present), runs under the token
+        // cancelled above, and commits its terminal transcript before the gate
+        // frees. Same ordering `session/load`/`session/resume` already use.
+        let finalize_gate = self.session_gate(session_id);
+        let finalize_guard = finalize_gate.lock().await;
+
+        let session_arc = {
+            let mut sessions = self.sessions.lock().await;
+            match sessions.remove(session_id) {
+                Some(arc) => arc,
+                None => {
+                    // `session_gate` created the entry on a miss, so release it
+                    // the same way a rejected restore does. Both owners we
+                    // added (guard + Arc clone) must be gone before reclaim.
+                    drop(finalize_guard);
+                    drop(finalize_gate);
+                    self.reclaim_session_gate(session_id);
+                    return Err(RpcError {
+                        code: SESSION_NOT_FOUND,
+                        message: format!("Session not found: {session_id}"),
+                        data: None,
+                    });
+                }
+            }
+        };
+
+        // Wait for any in-flight turn to finish (the cancel token may have already stopped it).
+        let session = session_arc.lock().await;
+        let agent_alias = session.agent_alias.clone();
+        let model_provider = session.model_provider.clone();
+        let model = session.model.clone();
+        session.agent.channel_handles().unregister_channel("acp");
+        ::kinetic_log::record!(
+            INFO,
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Complete)
+                .with_category(::kinetic_log::EventCategory::Channel)
+                .with_outcome(::kinetic_log::EventOutcome::Success)
+                .with_attrs(::serde_json::json!({
+                    "session_id": session_id,
+                    "agent_alias": agent_alias,
+                    "model_provider": model_provider,
+                    "model": model,
+                })),
+            "ACP session closed"
+        );
+
+        drop(session);
+        // Both owners we added (guard + Arc clone) must be gone before
+        // reclamation: `reclaim_session_gate` only removes entries the map
+        // solely owns.
+        drop(finalize_guard);
+        drop(finalize_gate);
+        self.reclaim_session_gate(session_id);
+        Ok(serde_json::json!({}))
+    }
+
+    fn requested_session_cwd(&self, params: &Value) -> Option<PathBuf> {
+        params
+            .get("cwd")
+            .or_else(|| params.get("workspaceDir"))
+            .or_else(|| params.get("workspace_dir"))
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+    }
+
+    async fn handle_session_prompt(&self, params: &Value, _request_id: &Value) -> RpcResult {
+        let session_id = params
+            .get("sessionId")
+            .or_else(|| params.get("session_id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: INVALID_PARAMS,
+                message: "Missing required parameter: sessionId".to_string(),
+                data: None,
+            })?
+            .to_string();
+
+        // Clone the Arc so the session stays visible in the map throughout the
+        // turn. `session/stop` and the reaper can still find it; they will
+        // block on the inner Mutex until the turn completes.
+        let session_arc = {
+            let sessions = self.sessions.lock().await;
+            sessions.get(&session_id).cloned().ok_or_else(|| RpcError {
+                code: SESSION_NOT_FOUND,
+                message: format!("Session not found: {session_id}"),
+                data: None,
+            })?
+        };
+
+        // Snapshot attribution + workspace before releasing the outer lock.
+        // Workspace is required to materialize `resource.blob` into uploads/.
+        let (agent_alias, model_provider, model, workspace_dir) = {
+            // Try-lock: if the inner lock is held by an active turn, we'll
+            // reject below via register_cancel_token anyway. Use a brief
+            // non-blocking peek so we can log the alias even on the error path.
+            if let Ok(s) = session_arc.try_lock() {
+                (
+                    s.agent_alias.clone(),
+                    s.model_provider.clone(),
+                    s.model.clone(),
+                    s.workspace_dir.clone(),
+                )
+            } else {
+                (String::new(), String::new(), String::new(), String::new())
+            }
+        };
+
+        // Reserve the session turn BEFORE materializing attachments. Materializing
+        // `resource.blob` parts writes files into uploads/; two concurrent prompts for
+        // the same session must not both perform that side effect before one is
+        // rejected with SESSION_BUSY. Reserve first, then do the work.
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        self.register_cancel_token(&session_id, cancel_token.clone())?;
+
+        // Hold the per-session finalization gate for the rest of the prompt,
+        // including the terminal transcript persistence that runs inside the
+        // spawned turn task (awaited below). `session/load`/`session/resume`
+        // acquire the same gate before reading the store, so a concurrent restore
+        // waits for this turn to commit instead of seeding a replacement agent
+        // from pre-append rows — closing the window that persists even after
+        // `session/close`/`session/stop` remove the live map entry. Acquired
+        // after the `register_cancel_token` busy-check so only the single active
+        // prompt holds it (a concurrent prompt is already rejected above).
+        let finalize_gate = self.session_gate(&session_id);
+        let _finalize_guard = finalize_gate.lock().await;
+
+        // Revalidate the captured session generation now that we hold the gate.
+        // Admission (clone + `register_cancel_token`) happens before this gate is
+        // acquired, so between then and here a `session/close` or `session/stop`
+        // may have removed the live map entry and a `session/load`/`session/resume`
+        // may have installed a replacement agent seeded from durable history.
+        // Running the captured (now superseded) `Arc<Session>` would append this
+        // turn's output onto an obsolete generation after the replacement was
+        // seeded. If the map entry is gone or is no longer the Arc we captured,
+        // release the reservation and abort instead.
+        {
+            let sessions = self.sessions.lock().await;
+            let still_current = sessions
+                .get(&session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &session_arc));
+            if !still_current {
+                drop(sessions);
+                self.remove_cancel_token(&session_id);
+                return Err(RpcError {
+                    code: SESSION_NOT_FOUND,
+                    message: format!(
+                        "Session {session_id} was closed or replaced before the prompt could run"
+                    ),
+                    data: None,
+                });
+            }
+        }
+
+        let prompt = match Self::materialize_prompt(
+            params,
+            if workspace_dir.is_empty() {
+                None
+            } else {
+                Some(Path::new(&workspace_dir))
+            },
+        ) {
+            Ok(prompt) => prompt,
+            Err(e) => {
+                // Release the reservation we just took so a bad attachment doesn't
+                // wedge the session for subsequent prompts.
+                self.remove_cancel_token(&session_id);
+                return Err(e);
+            }
+        };
+
+        let session_id_s = session_id.clone();
+        let agent_alias_s = agent_alias.clone();
+        let model_provider_s = model_provider.clone();
+        let model_s = model.clone();
+        ::kinetic_log::scope!(
+            agent_alias: agent_alias_s.as_str(),
+            model_provider: model_provider_s.as_str(),
+            model: model_s.as_str(),
+            session_key: session_id_s.as_str(),
+            channel: "acp",
+        => async move {
+
+        ::kinetic_log::record!(
+            INFO,
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Start).with_category(::kinetic_log::EventCategory::Channel)
+                .with_attrs(::serde_json::json!({
+                    "prompt_len": prompt.len(),
+                })),
+            "ACP session/prompt turn starting"
+        );
+
+        // Turn already reserved (and `cancel_token` created) before materialization.
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TurnEvent>(100);
+
+        let config = self.config_snapshot();
+        let cost_tracker = kinetic_runtime::cost::CostTracker::get_or_init_global(
+            config.cost.clone(),
+            &config.data_dir,
+        );
+        let cost_pricing = std::sync::Arc::new(
+            kinetic_runtime::agent::cost::build_model_provider_pricing(&config),
+        );
+
+        // Move the Arc into the spawned task and lock inside it.  The inner
+        // Mutex stays locked for the duration of the turn, preventing
+        // concurrent stop/reap from touching the agent mid-turn. The outer
+        // map entry remains in place. Terminal persistence also runs inside the
+        // task, under the same lock, so `session/close`/`session/stop` (which
+        // await this lock) cannot expose the session for reload before the
+        // terminal transcript is committed.
+        let session_id_for_task = session_id.clone();
+        let persist_store = self.store.clone();
+        let persist_session_id = session_id.clone();
+        let turn_handle = kinetic_spawn::spawn!(async move {
+            let mut session = session_arc.lock().await;
+            let (turn_alias, turn_provider, turn_model) = session.agent.attribution_fields();
+            let history_trim_generation_before_turn = session.agent.history_trim_generation();
+            // Stamp the resolved per-turn alias so `/api/cost?agent=<alias>`
+            // attributes this spend.
+            let cost_context = cost_tracker.map(|tracker| {
+                kinetic_runtime::agent::cost::ToolLoopCostTrackingContext::new(
+                    tracker,
+                    cost_pricing,
+                )
+                .with_agent_alias(&turn_alias)
+            });
+            let span_session = session_id_for_task.clone();
+            let result = {
+                use ::kinetic_log::Instrument as _;
+                let span = ::kinetic_log::info_span!(
+                    target: "kinetic_log_internal_scope",
+                    "kinetic_scope",
+                    session_key = %span_session,
+                    agent_alias = %turn_alias,
+                    model_provider = %turn_provider,
+                    model = %turn_model,
+                    channel = "acp",
+                );
+                kinetic_runtime::agent::loop_::scope_session_key(
+                    Some(session_id_for_task),
+                    kinetic_runtime::agent::cost::TOOL_LOOP_COST_TRACKING_CONTEXT.scope(
+                        cost_context,
+                        session
+                            .agent
+                            .turn_streamed_with_steering_state(
+                                &prompt,
+                                event_tx,
+                                Some(cancel_token),
+                                None,
+                            )
+                            .instrument(span),
+                    ),
+                )
+                .await
+            };
+            session.last_active = Instant::now();
+
+            // Per ACP spec a cancelled turn is a terminal outcome, not an error.
+            // Detect via ToolLoopCancelled propagated through anyhow.
+            let was_cancelled = match &result {
+                Err(e) => kinetic_runtime::agent::loop_::is_tool_loop_cancelled(&e.error),
+                Ok(_) => false,
+            };
+
+            // A failed or cancelled turn still leaves a user-visible transcript
+            // (prompt, completed tool activity, partial assistant text) on
+            // `StreamedTurnError::new_messages`; persisting only successful turns
+            // dropped it on the next `session/load`. Persist every terminal
+            // outcome here, still holding the session lock, so a racing
+            // close/stop/load observes the committed rows.
+            // The match is the task's return value; its guard (`session`) drops
+            // only after this — i.e. after terminal persistence has committed.
+            match result {
+                Ok(success) => {
+                    // Successful turns keep best-effort persistence: the client
+                    // already has the response, so a persist failure is logged
+                    // but not surfaced. When this turn actually dropped older
+                    // history, replace the whole durable transcript from the
+                    // agent's own authoritative post-turn history, so the trim
+                    // is reflected durably too; otherwise append the delta, so
+                    // any earlier content only durable storage still
+                    // remembers (e.g. a degraded-away attachment marker) is
+                    // preserved.
+                    let _ =
+                        if session.agent.history_trim_generation() != history_trim_generation_before_turn {
+
+                        let full_history = session.agent.history().to_vec();
+                        let trim_breadcrumb = session.agent.history_has_trim_breadcrumb();
+                        Self::replace_transcript(
+                            persist_store,
+                            persist_session_id,
+                            full_history,
+                            trim_breadcrumb,
+                        )
+                        .await
+                    } else {
+                        Self::append_transcript(persist_store, persist_session_id, success.new_messages)
+                            .await
+                    };
+                    TerminalOutcome::Success {
+                        response: success.response,
+                    }
+                }
+                Err(failure) if was_cancelled => {
+                    // The failed/cancelled durability contract is the whole point
+                    // of this change, so retain a persistence failure and surface
+                    // it to the caller instead of reporting a clean cancellation.
+                    let trimmed_this_turn =
+                        session.agent.history_trim_generation() != history_trim_generation_before_turn;
+                    let persist_error = if trimmed_this_turn {
+                        // Build the persisted transcript from the agent's own
+                        // authoritative history (including the trim that
+                        // happened this turn), not just this turn's delta.
+                        let full_history = session.agent.history().to_vec();
+                        let trim_breadcrumb = session.agent.history_has_trim_breadcrumb();
+                        Self::replace_transcript(
+                            persist_store,
+                            persist_session_id,
+                            Self::cancelled_turn_transcript(full_history),
+                            trim_breadcrumb,
+                        )
+                        .await
+                        .err()
+                    } else {
+                        Self::append_transcript(
+                            persist_store,
+                            persist_session_id,
+                            Self::cancelled_turn_transcript(failure.new_messages),
+                        )
+                        .await
+                        .err()
+                    };
+                    // Reconcile the LIVE agent history to match the durable
+                    // projection: the tool loop appended a generic
+                    // `turn-interrupted-by-user` marker, but ACP records
+                    // cancellation as a structured, replay-only event. Drop the
+                    // live marker so the next prompt on this still-active session
+                    // does not re-send "[interrupted by user]" to the provider.
+                    session.agent.strip_trailing_interruption_marker();
+                    TerminalOutcome::Cancelled { persist_error }
+                }
+                Err(failure) => {
+                    let (error, rpc_error) = acp_turn_failure(&failure.error);
+                    // A rejected prompt (e.g. empty/whitespace) fails before
+                    // producing any transcript, leaving `new_messages` empty.
+                    // Keep the old no-write behavior there so repeating an
+                    // invalid request doesn't accrete assistant-only failure
+                    // markers into `session/load`. Only persist — with the
+                    // marker — when the turn produced visible work.
+                    let persist_error = if failure.new_messages.is_empty() {
+                        None
+                    } else {
+                        let trimmed_this_turn = session.agent.history_trim_generation()
+                            != history_trim_generation_before_turn;
+                        // The failed turn is the trailing span of the live
+                        // history (its prompt is the last user message and
+                        // nothing appends after a failure). Snapshot it, with
+                        // this turn's trim state, BEFORE degrading media: the
+                        // durable transcript keeps the original attachment for
+                        // client replay, while the LIVE agent copy below is
+                        // degraded so a vision-capable provider does not
+                        // re-attach the same rejected image to the very next
+                        // prompt of this still-active session.
+                        let full_history = session.agent.history().to_vec();
+                        let trim_breadcrumb = session.agent.history_has_trim_breadcrumb();
+                        let degraded = session.agent.degrade_trailing_turn_media();
+                        if degraded > 0 {
+                            ::kinetic_log::record!(
+                                WARN,
+                                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Write).with_category(::kinetic_log::EventCategory::Channel)
+                                    .with_outcome(::kinetic_log::EventOutcome::Success)
+                                    .with_attrs(::serde_json::json!({
+                                        "session_id": persist_session_id,
+                                        "degraded_image_refs": degraded,
+                                    })),
+                                "Degraded rejected attachments in live ACP history after a failed turn"
+                            );
+                        }
+                        if trimmed_this_turn {
+                            Self::replace_transcript(
+                                persist_store,
+                                persist_session_id,
+                                Self::failed_turn_transcript(full_history),
+                                trim_breadcrumb,
+                            )
+                            .await
+                        } else {
+                            // Not the full authoritative history: the
+                            // pre-degrade delta this turn produced, so
+                            // existing durable content (which may itself hold
+                            // an earlier degraded-away attachment marker)
+                            // stays untouched.
+                            Self::append_transcript(
+                                persist_store,
+                                persist_session_id,
+                                Self::failed_turn_transcript(failure.new_messages),
+                            )
+                            .await
+                        }
+                        .err()
+                    };
+                    TerminalOutcome::Failed {
+                        error,
+                        rpc_error,
+                        persist_error,
+                    }
+                }
+            }
+        });
+
+        let mut accumulated_text = String::new();
+        let mut tool_call_count: u32 = 0;
+        // Latest whole-list plan emitted this turn (TodoWrite). Persisted
+        // durably after the turn so external ACP clients get the same
+        // resume/restart replay the daemon RPC bridge already provides.
+        let mut latest_plan: Option<Vec<PlanEntry>> = None;
+        while let Some(event) = event_rx.recv().await {
+            if let TurnEvent::Usage {
+                input_tokens,
+                accepted,
+                ..
+            } = &event
+            {
+                if let Some(store) = &self.store {
+                    let (tokens, is_accepted) = (*input_tokens, *accepted);
+                    persist_acp_usage_snapshot_ordered(store, &session_id, tokens, is_accepted)
+                        .await;
+                }
+                continue;
+            }
+            // Emit attributable span logs for every tool call and result.
+            // Attribution (agent_alias, model_provider, session_key) flows
+            // from the enclosing spans — not repeated here in attrs.
+            match &event {
+                TurnEvent::ToolCall { id, name, args } => {
+                    tool_call_count += 1;
+                    ::kinetic_log::record!(
+                        DEBUG,
+                        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Start).with_category(::kinetic_log::EventCategory::Channel)
+                            .with_attrs(::serde_json::json!({
+                                "tool_call_id": id,
+                                "tool": name,
+                                "args_len": args.to_string().len(),
+                            })),
+                        "ACP tool call dispatched"
+                    );
+                }
+                TurnEvent::ToolResult {
+                    id, name, output, ..
+                } => {
+                    ::kinetic_log::record!(
+                        DEBUG,
+                        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Complete).with_category(::kinetic_log::EventCategory::Channel)
+                            .with_outcome(::kinetic_log::EventOutcome::Success)
+                            .with_attrs(::serde_json::json!({
+                                "tool_call_id": id,
+                                "tool": name,
+                                "output_len": output.len(),
+                            })),
+                        "ACP tool call completed"
+                    );
+                }
+                TurnEvent::Chunk { delta } => {
+                    accumulated_text.push_str(delta);
+                }
+                TurnEvent::Plan { entries } => {
+                    // Whole-list replace: keep only the latest plan for
+                    // post-turn durable persistence.
+                    latest_plan = Some(entries.clone());
+                }
+                _ => {}
+            }
+            if let Some(notification) = notification_for_turn_event(&session_id, &event) {
+                self.write_notification(&notification).await;
+            }
+        }
+
+        // Remove the cancel token regardless of outcome — the turn is over.
+        // Lock poisoned invariant: same as the insert site above.
+        self.remove_cancel_token(&session_id);
+
+        let outcome = turn_handle.await.map_err(|e| RpcError {
+            code: INTERNAL_ERROR,
+            message: format!("Agent task panicked: {e}"),
+            data: None,
+        })?;
+
+        // The terminal transcript was already persisted inside the turn task,
+        // under the session lock. Here we only render the client-facing result,
+        // notifications, and logs for each outcome.
+        let result_text = match outcome {
+            TerminalOutcome::Success { response } => response,
+            TerminalOutcome::Cancelled { persist_error } => {
+                ::kinetic_log::record!(
+                    INFO,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Complete).with_category(::kinetic_log::EventCategory::Channel)
+                        .with_outcome(::kinetic_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({
+                            "tool_calls": tool_call_count,
+                            "stop_reason": "cancelled",
+                        })),
+                    "ACP session/prompt turn cancelled"
+                );
+                self.write_notification(&Self::turn_cancelled_notification(&session_id))
+                    .await;
+                // The turn was cancelled live, but if its transcript could not be
+                // committed the durability contract was not met — surface that
+                // rather than reporting a clean cancellation.
+                if let Some(detail) = persist_error {
+                    return Err(RpcError {
+                        code: INTERNAL_ERROR,
+                        message: format!(
+                            "Turn cancelled, but its transcript could not be persisted and may be lost on reload: {detail}"
+                        ),
+                        data: None,
+                    });
+                }
+                return Ok(Self::cancelled_prompt_result(session_id, &accumulated_text));
+            }
+            TerminalOutcome::Failed {
+                error,
+                mut rpc_error,
+                persist_error,
+            } => {
+                ::kinetic_log::record!(
+                    ERROR,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail).with_category(::kinetic_log::EventCategory::Channel)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({
+                            "error": error,
+                        })),
+                    "ACP session/prompt turn failed"
+                );
+                if let Some(detail) = persist_error {
+                    // The turn already failed; say so, and say that its
+                    // transcript did not survive either, without losing the
+                    // localized message the client renders.
+                    rpc_error.message = format!(
+                        "{} (its transcript also could not be persisted: {detail})",
+                        rpc_error.message
+                    );
+                }
+                return Err(rpc_error);
+            }
+        };
+
+        // Durably persist the latest TodoWrite plan for this turn so it
+        // replays on session/resume (best-effort; the live emission above
+        // already reached the client). Whole-list replace, including an
+        // empty list (a cleared plan).
+        if let Some(store) = &self.store
+            && let Some(entries) = latest_plan
+        {
+            let store = store.clone();
+            let sid = session_id.clone();
+            let persisted =
+                tokio::task::spawn_blocking(move || store.set_plan(&sid, &entries)).await;
+            let error = match persisted {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(e.to_string()),
+                Err(join) => Some(join.to_string()),
+            };
+            if let Some(detail) = error {
+                ::kinetic_log::record!(
+                    WARN,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                        .with_category(::kinetic_log::EventCategory::Channel)
+                        .with_outcome(::kinetic_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({ "error": detail })),
+                    "Failed to persist TodoWrite plan; session continues in memory"
+                );
+            }
+        }
+
+        ::kinetic_log::record!(
+            INFO,
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Complete).with_category(::kinetic_log::EventCategory::Channel)
+                .with_outcome(::kinetic_log::EventOutcome::Success)
+                .with_attrs(::serde_json::json!({
+                    "tool_calls": tool_call_count,
+                    "response_len": result_text.len(),
+                    "stop_reason": "end_turn",
+                })),
+            "ACP session/prompt turn complete"
+        );
+
+        Ok(Self::prompt_result(session_id, "end_turn", result_text))
+
+        }).await
+    }
+
+    fn register_cancel_token(
+        &self,
+        session_id: &str,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> std::result::Result<(), RpcError> {
+        let mut tokens = self
+            .cancel_tokens
+            .lock()
+            .expect("cancel_tokens lock poisoned — invariant: all guarded critical sections are short, infallible HashMap ops");
+        if tokens.contains_key(session_id) {
+            ::kinetic_log::record!(
+                WARN,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                    .with_category(::kinetic_log::EventCategory::Channel)
+                    .with_outcome(::kinetic_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"session_id": session_id})),
+                "ACP session/prompt rejected: session already has an active turn"
+            );
+            return Err(RpcError {
+                code: SESSION_BUSY,
+                message: format!("Session already has an active prompt turn: {session_id}"),
+                data: None,
+            });
+        }
+        tokens.insert(session_id.to_string(), cancel_token);
+        Ok(())
+    }
+
+    fn remove_cancel_token(&self, session_id: &str) {
+        self.cancel_tokens
+            .lock()
+            .expect("cancel_tokens lock poisoned — invariant: all guarded critical sections are short, infallible HashMap ops")
+            .remove(session_id);
+    }
+
+    /// The per-session finalization gate (see [`Self::session_gates`]). A
+    /// `session/prompt` turn holds it for its whole duration, including terminal
+    /// persistence; `session/load`/`session/resume` acquire it before reading the
+    /// store so a restore waits for an in-flight prompt to commit rather than
+    /// seeding a replacement agent from pre-append rows.
+    /// Take the session's finalization gate, arranging for the map entry to be
+    /// reclaimed if the caller leaves without registering a session.
+    ///
+    /// `session_gate` creates the entry on a miss, and a restore has to take it
+    /// *before* the session-limit, already-active, and store-existence checks so
+    /// it cannot read the store underneath an in-flight prompt. Those checks
+    /// reject client-supplied session ids, so without this every rejected id
+    /// would leave a permanent `session_gates` entry that a client can grow
+    /// without bound. Call `disarm` once the session is registered; from then on
+    /// `session/close` owns reclamation.
+    fn restore_gate(&self, session_id: &str) -> RestoreGate<'_> {
+        RestoreGate {
+            server: self,
+            session_id: session_id.to_string(),
+            armed: true,
+        }
+    }
+
+    fn session_gate(&self, session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.session_gates
+            .lock()
+            .expect("session_gates lock poisoned — invariant: all guarded critical sections are short, infallible HashMap ops")
+            .entry(session_id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// Reclaim a session's finalization gate so `session_gates` does not grow for
+    /// the process lifetime as sessions are closed and re-loaded. The entry is
+    /// dropped only when the map is its sole owner (`strong_count == 1`): if a
+    /// prompt or restore still holds (or is parked on) the gate, it is left in
+    /// place and reclaimed by a later `session/close`/`session/stop`. Because a
+    /// concurrent `session_gate()` create-on-miss serialises on the same
+    /// `session_gates` lock, a still-referenced gate is never split into two
+    /// independent locks.
+    fn reclaim_session_gate(&self, session_id: &str) {
+        let mut gates = self
+            .session_gates
+            .lock()
+            .expect("session_gates lock poisoned — invariant: all guarded critical sections are short, infallible HashMap ops");
+        if let Some(gate) = gates.get(session_id)
+            && Arc::strong_count(gate) == 1
+        {
+            gates.remove(session_id);
+        }
+    }
+
+    /// Assemble the persisted transcript for a failed turn: the messages the
+    /// turn produced before the error (user prompt, completed tool activity,
+    /// any partial assistant text) plus a trailing failure boundary so the
+    /// reloaded transcript explains why the turn stopped.
+    ///
+    /// The boundary is the reserved [`FAILURE_TURN_SENTINEL`], not the localized
+    /// marker: restore paths must recognize a failed turn no matter which locale
+    /// was active when it was persisted (or when it is restored). Localized text
+    /// is projected from the sentinel at the two projection boundaries —
+    /// provider seed (`project_failure_sentinels`) and client replay
+    /// (`history_notifications_for_message`) — never stored.
+    fn failed_turn_transcript(mut messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
+        messages.push(ConversationMessage::Chat(ChatMessage::assistant(
+            FAILURE_TURN_SENTINEL.to_string(),
+        )));
+        messages
+    }
+
+    /// A restored message is the durable failed-turn boundary exactly when it
+    /// is an assistant message carrying the reserved, locale-independent
+    /// [`FAILURE_TURN_SENTINEL`]. Structural, never a localized comparison: the
+    /// sentinel is written by this module alone and reads back identically
+    /// under every locale.
+    fn is_failure_sentinel(message: &ConversationMessage) -> bool {
+        matches!(
+            message,
+            ConversationMessage::Chat(chat)
+                if chat.role == "assistant" && chat.content == FAILURE_TURN_SENTINEL
+        )
+    }
+
+    /// Project durable failed-turn boundaries to their localized marker for the
+    /// provider seed. Runs after `degrade_failed_turn_media`, which still needs
+    /// the sentinel to find the failed-turn spans; by the time the seed reaches
+    /// `seed_conversation_history_with_event` the model sees the human-readable
+    /// localized `[turn failed]` marker, exactly as it did when the boundary was
+    /// persisted inline. The stored transcript keeps the sentinel; client
+    /// replay projects it separately (`history_notifications_for_message`).
+    fn project_failure_sentinels(seed: &mut [SeededMessage]) {
+        let localized = kinetic_runtime::i18n::get_required_cli_string("turn-failed");
+        for (message, _) in seed {
+            if Self::is_failure_sentinel(message) {
+                *message = ConversationMessage::Chat(ChatMessage::assistant(localized.clone()));
+            }
+        }
+    }
+
+    /// Build the persisted transcript for a client-cancelled turn. The runtime
+    /// tags a cancelled turn with a generic `turn-interrupted-by-user` assistant
+    /// marker, but on ACP the actor is unverified and live cancellation reports
+    /// the distinct client-channel event instead. So drop that generic marker
+    /// (it must never seed provider history or replay as a user interruption)
+    /// and append a structured, replay-only cancellation event that
+    /// `session/load` renders through the same client-cancel update shape the
+    /// live turn produced (see `turn_cancelled_notification` /
+    /// `is_cancellation_event`). The visible transcript — prompt, completed tool
+    /// activity, partial assistant text — is preserved.
+    fn cancelled_turn_transcript(
+        mut messages: Vec<ConversationMessage>,
+    ) -> Vec<ConversationMessage> {
+        let interrupted =
+            kinetic_runtime::i18n::get_required_cli_string("turn-interrupted-by-user");
+        if let Some(ConversationMessage::Chat(chat)) = messages.last_mut()
+            && chat.role == "assistant"
+        {
+            if chat.content == interrupted {
+                messages.pop();
+            } else if let Some(prefix) = chat.content.strip_suffix(&format!("\n\n{interrupted}")) {
+                chat.content = prefix.to_string();
+            }
+        }
+        messages.push(Self::cancellation_event());
+        messages
+    }
+
+    /// Structured ACP cancellation event. Carried inside the existing
+    /// `AssistantToolCalls` variant as a single sentinel tool call so it
+    /// round-trips through the store without a new schema, is recognisable by
+    /// tool name (not by localized text), is excluded from provider history at
+    /// the `session/load` seed boundary, and replays as the client-cancel
+    /// `turn-cancelled` update.
+    fn cancellation_event() -> ConversationMessage {
+        ConversationMessage::AssistantToolCalls {
+            text: None,
+            tool_calls: vec![ToolCall {
+                id: CANCELLATION_EVENT_TOOL_ID.to_string(),
+                name: CANCELLATION_EVENT_TOOL_NAME.to_string(),
+                arguments: CANCELLATION_EVENT_TOOL_ARGS.to_string(),
+                extra_content: None,
+            }],
+            reasoning_content: None,
+        }
+    }
+
+    /// A restored message is the structured ACP cancellation event only when it
+    /// matches the sentinel's *full* shape: an `AssistantToolCalls` with no text
+    /// or reasoning carrying exactly one tool call whose reserved id, name, empty
+    /// arguments and absent extra content all match [`Self::cancellation_event`].
+    ///
+    /// Matching on the reserved id (not the name alone) keeps a real native,
+    /// custom or MCP tool call that merely shares the `turn-cancelled` name from
+    /// being stripped out of provider history and replayed as a client cancel.
+    fn is_cancellation_event(message: &ConversationMessage) -> bool {
+        let ConversationMessage::AssistantToolCalls {
+            text,
+            tool_calls,
+            reasoning_content,
+        } = message
+        else {
+            return false;
+        };
+        if text.is_some() || reasoning_content.is_some() {
+            return false;
+        }
+        let [call] = tool_calls.as_slice() else {
+            return false;
+        };
+        call.id == CANCELLATION_EVENT_TOOL_ID
+            && call.name == CANCELLATION_EVENT_TOOL_NAME
+            && call.arguments == CANCELLATION_EVENT_TOOL_ARGS
+            && call.extra_content.is_none()
+    }
+
+    /// Prepare a restored transcript (loaded from the store) for provider
+    /// seeding. Shared by `session/load` and `session/resume` so both live
+    /// restore paths get the same typed sanitization: drop system messages,
+    /// repair an interrupted native-tool exchange while the transcript is still
+    /// typed (see [`Self::repair_incomplete_tool_calls`]), and exclude the
+    /// replay-only cancellation sentinel so an unverified client-cancel never
+    /// re-enters the model's context. Returns the repaired transcript (which
+    /// `session/load` also replays to the client), the sentinel-free seed
+    /// messages for `seed_conversation_history_with_event`, and the count of
+    /// repaired assistant tool-call messages for logging.
+    fn sanitize_restored_history(
+        messages: Vec<ConversationMessage>,
+    ) -> (Vec<ConversationMessage>, Vec<SeededMessage>, usize) {
+        let stored: Vec<ConversationMessage> = messages
+            .into_iter()
+            .filter(|message| {
+                !matches!(message, ConversationMessage::Chat(chat) if chat.role == "system")
+            })
+            .collect();
+        // The two projections diverge on purpose. `stored` is what the client
+        // replays, so a tool call the turn never answered and an attachment the
+        // provider rejected both stay visible: that activity happened, and the
+        // durable transcript is expected to survive reload. `seed` is what the
+        // next provider request is built from, so it is the only one repaired.
+        // Every seed row carries the stored index it came from, so the
+        // retained provider boundary maps back onto client replay after
+        // repair and trimming have reshaped the seed.
+        let mut seed: Vec<SeededMessage> = stored
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| !Self::is_cancellation_event(message))
+            .map(|(original_index, message)| (message.clone(), original_index))
+            .collect();
+        let repaired = Self::repair_incomplete_tool_calls(&mut seed);
+        Self::degrade_failed_turn_media(&mut seed);
+        // Runs after the degradation because the failure sentinel is what
+        // delimits the failed-turn spans the degradation repairs.
+        Self::project_failure_sentinels(&mut seed);
+        (stored, seed, repaired)
+    }
+
+    /// Drop image references from the messages of a turn that ended in failure.
+    ///
+    /// Persisting a failed turn makes its prompt durable, and an image the
+    /// provider rejected is part of that prompt. `resolve_vision_provider`
+    /// keeps historical image markers whenever the active provider advertises
+    /// vision, so without this the concrete attachment that failed the turn is
+    /// attached to every later request on the session: one rejection becomes a
+    /// permanently poisoned transcript. The reference is replaced with a note
+    /// rather than deleted so the model still sees that something was attached.
+    ///
+    /// A failed turn is the run of messages ending at the durable failure
+    /// sentinel and beginning at the turn-opening user prompt that started it.
+    /// The opening prompt is found with the shared turn-opening predicate, so
+    /// a prompt-mode `[Tool results]` carrier between the prompt and the
+    /// failure does not cut the span short and leave the prompt's attachment
+    /// in the seed. Recognition is structural (`is_failure_sentinel`), so a
+    /// transcript persisted under one locale degrades correctly after a
+    /// restart under another. Only the provider seed is touched; the stored
+    /// transcript still replays the image to the client. Each sentinel is then
+    /// projected to its localized marker by `project_failure_sentinels` before
+    /// the seed reaches the agent.
+    fn degrade_failed_turn_media(seed: &mut [SeededMessage]) {
+        let is_turn_opening = kinetic_runtime::agent::is_turn_opening_user_message;
+
+        let failure_marks: Vec<usize> = seed
+            .iter()
+            .enumerate()
+            .filter(|(_, (message, _))| Self::is_failure_sentinel(message))
+            .map(|(index, _)| index)
+            .collect();
+
+        for end in failure_marks {
+            let start = seed[..end]
+                .iter()
+                .rposition(|(message, _)| is_turn_opening(message))
+                .unwrap_or_default();
+            for (message, _) in &mut seed[start..end] {
+                kinetic_runtime::agent::degrade_media_in_message(message);
+            }
+        }
+    }
+
+    /// Repair an interrupted native-tool exchange in a restored ACP transcript
+    /// while it is still typed `ConversationMessage` data. A turn that failed or
+    /// was cancelled after the model emitted a tool call but before its result
+    /// existed leaves an `AssistantToolCalls` whose call id no `ToolResults`
+    /// ever answered; seeding it into provider history (and replaying it to the
+    /// client) would carry an unmatched tool call into the next request.
+    ///
+    /// The repair runs here, on typed data, precisely because the shared flat
+    /// preflight cannot: a genuine native call is the `AssistantToolCalls`
+    /// variant, so an ordinary assistant `Chat` message whose text merely
+    /// contains a `tool_calls` array is never mistaken for one. Only unpaired
+    /// calls are dropped, preserving any accompanying assistant text as a plain
+    /// assistant message. Orphaned `ToolResults` (a result whose call was
+    /// dropped) are intentionally left to the provider adapters and
+    /// `remove_orphaned_tool_messages`, which keep their id-recovery contracts.
+    fn repair_incomplete_tool_calls(messages: &mut Vec<SeededMessage>) -> usize {
+        let resolved: std::collections::HashSet<String> = messages
+            .iter()
+            .filter_map(|(message, _)| match message {
+                ConversationMessage::ToolResults(results) => Some(results),
+                _ => None,
+            })
+            .flat_map(|results| results.iter().map(|result| result.tool_call_id.clone()))
+            .collect();
+
+        let mut repaired = 0usize;
+        let mut i = 0;
+        while i < messages.len() {
+            if Self::is_cancellation_event(&messages[i].0) {
+                // The structured cancellation sentinel is intentionally an
+                // unpaired call; it is replay-only and excluded from provider
+                // history elsewhere, so leave it intact here.
+                i += 1;
+                continue;
+            }
+            let ConversationMessage::AssistantToolCalls {
+                text, tool_calls, ..
+            } = &mut messages[i].0
+            else {
+                i += 1;
+                continue;
+            };
+            let before = tool_calls.len();
+            tool_calls.retain(|call| resolved.contains(&call.id));
+            if tool_calls.len() == before {
+                i += 1;
+                continue;
+            }
+            repaired += 1;
+            if !tool_calls.is_empty() {
+                i += 1;
+                continue;
+            }
+            // Every call was unpaired. Keep any salvageable assistant text as a
+            // plain message; otherwise drop the now-empty tool-call turn.
+            let salvaged = text
+                .as_deref()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(ToString::to_string);
+            match salvaged {
+                Some(text) => {
+                    messages[i].0 = ConversationMessage::Chat(ChatMessage::assistant(text));
+                    i += 1;
+                }
+                None => {
+                    messages.remove(i);
+                }
+            }
+        }
+        repaired
+    }
+
+    /// Durably append a turn's new messages to the ACP session store. Safe
+    /// exactly when the turn did not change the agent's history generation:
+    /// the existing durable rows are still the live agent's own
+    /// unmodified prefix (possibly with in-place content rewrites this
+    /// append does not touch), so appending the delta cannot resurrect
+    /// anything the agent actually dropped. Best-effort: an empty slice is a
+    /// no-op, and a store error is logged while the live session continues in
+    /// memory.
+    async fn append_transcript(
+        store: Option<Arc<AcpSessionStore>>,
+        session_id: String,
+        messages: Vec<ConversationMessage>,
+    ) -> Result<(), String> {
+        let Some(store) = store else {
+            return Ok(());
+        };
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let persisted =
+            tokio::task::spawn_blocking(move || store.append_turn(&session_id, &messages)).await;
+        let error = match persisted {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(e.to_string()),
+            Err(join) => Some(join.to_string()),
+        };
+        match error {
+            None => Ok(()),
+            Some(detail) => {
+                ::kinetic_log::record!(
+                    WARN,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                        .with_category(::kinetic_log::EventCategory::Channel)
+                        .with_outcome(::kinetic_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({
+                            "error": detail,
+                        })),
+                    "Failed to persist turn; session continues in memory"
+                );
+                Err(detail)
+            }
+        }
+    }
+
+    /// Durably replace the ACP session store's transcript and breadcrumb flag
+    /// with the agent's own authoritative post-turn state, as one atomic pair.
+    /// Takes an owned store handle rather than `&self` so terminal persistence
+    /// can run inside the per-session turn task while it still holds the
+    /// session lock. That ordering is what lets `session/close` and
+    /// `session/stop` — which await the same lock — observe the committed
+    /// terminal transcript before they return and before the session can be
+    /// reloaded from stale rows.
+    ///
+    /// A delta-append here would leave stale durable rows whenever the live
+    /// agent had already trimmed older turns before this turn was cancelled or
+    /// failed: the next `session/load` would then resurrect turns the client
+    /// was told had been discarded. Replacing the whole transcript and its
+    /// breadcrumb together — mirroring the RPC ACP bridge's
+    /// `replace_messages_and_breadcrumb` counterpart — keeps the durable state
+    /// and the live agent's committed history in agreement.
+    ///
+    /// Best-effort: a store error is logged while the live session continues
+    /// in memory. Shared by the successful, failed, and cancelled turn paths.
+    /// Returns `Ok(())` when the rows were committed, and `Err(detail)` when
+    /// the SQLite replace or its blocking task failed, so callers enforcing the
+    /// failed/cancelled durability contract can surface the loss instead of
+    /// reporting a clean terminal result.
+    async fn replace_transcript(
+        store: Option<Arc<AcpSessionStore>>,
+        session_id: String,
+        full_history: Vec<ConversationMessage>,
+        trim_breadcrumb: bool,
+    ) -> Result<(), String> {
+        let Some(store) = store else {
+            return Ok(());
+        };
+        let persisted = tokio::task::spawn_blocking(move || {
+            store.replace_messages_and_breadcrumb(&session_id, &full_history, trim_breadcrumb)
+        })
+        .await;
+        let error = match persisted {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(e.to_string()),
+            Err(join) => Some(join.to_string()),
+        };
+        match error {
+            None => Ok(()),
+            Some(detail) => {
+                ::kinetic_log::record!(
+                    WARN,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                        .with_category(::kinetic_log::EventCategory::Channel)
+                        .with_outcome(::kinetic_log::EventOutcome::Unknown)
+                        .with_attrs(::serde_json::json!({
+                            "error": detail,
+                        })),
+                    "Failed to persist turn; session continues in memory"
+                );
+                Err(detail)
+            }
+        }
+    }
+
+    fn prompt_result(session_id: String, stop_reason: &'static str, text: String) -> Value {
+        serde_json::json!({
+            "sessionId": session_id,
+            "stopReason": stop_reason,
+            "content": text,
+        })
+    }
+
+    fn cancelled_prompt_result(session_id: String, accumulated_text: &str) -> Value {
+        let marker = kinetic_runtime::i18n::get_required_cli_string("turn-cancelled-client-rpc");
+        let content = if accumulated_text.is_empty() {
+            marker
+        } else {
+            format!("{accumulated_text}\n\n{marker}")
+        };
+        Self::prompt_result(session_id, "cancelled", content)
+    }
+
+    fn turn_cancelled_notification(session_id: &str) -> JsonRpcNotification {
+        let marker = kinetic_runtime::i18n::get_required_cli_string("turn-cancelled-client-rpc");
+        JsonRpcNotification {
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": format!("turn-cancelled-{session_id}"),
+                    "name": "turn-cancelled",
+                    "title": "turn-cancelled",
+                    "kind": "think",
+                    "status": "completed",
+                    "content": [{
+                        "type": "content",
+                        "content": { "type": "text", "text": marker }
+                    }]
+                }
+            }),
+        }
+    }
+
+    /// Join prompt parts into a string. When `workspace_dir` is set, ACP
+    /// `resource.blob` parts are materialized under `{workspace}/uploads/`.
+    fn materialize_prompt(
+        params: &Value,
+        workspace_dir: Option<&Path>,
+    ) -> std::result::Result<String, RpcError> {
+        match params.get("prompt") {
+            Some(Value::String(s)) => Ok(s.clone()),
+            Some(Value::Array(arr)) => {
+                // Stage: validate every embedded blob (decode + size cap) before
+                // writing any, so an invalid later part cannot leave earlier parts
+                // already materialized in uploads/.
+                for part in arr {
+                    if let Some(blob) = part
+                        .get("resource")
+                        .and_then(|res| res.get("blob"))
+                        .and_then(|v| v.as_str())
+                    {
+                        if workspace_dir.is_none() {
+                            return Err(RpcError {
+                                code: INVALID_PARAMS,
+                                message: "resource.blob requires an active session workspace"
+                                    .to_string(),
+                                data: None,
+                            });
+                        }
+                        acp_embedded::decode_embedded_blob(blob).map_err(|e| RpcError {
+                            code: INVALID_PARAMS,
+                            message: e.0,
+                            data: None,
+                        })?;
+                    }
+                }
+
+                let mut joined = String::new();
+                for part in arr {
+                    let mut added = false;
+                    if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                        if !joined.is_empty() {
+                            joined.push_str("\n\n");
+                        }
+                        joined.push_str(text);
+                        added = true;
+                    }
+                    // Support ACP resource blocks for @-notation file attachments
+                    // (clients send {"type":"resource","resource":{"uri":"...","text":"..."}})
+                    // and embedded binary context via `resource.blob` (base64).
+                    if let Some(res) = part.get("resource") {
+                        if let Some(text) = res.get("text").and_then(|v| v.as_str()) {
+                            if added || !joined.is_empty() {
+                                joined.push_str("\n\n");
+                            }
+                            joined.push_str(text);
+                            added = true;
+                        }
+                        if let Some(blob) = res.get("blob").and_then(|v| v.as_str()) {
+                            let Some(ws) = workspace_dir else {
+                                return Err(RpcError {
+                                    code: INVALID_PARAMS,
+                                    message: "resource.blob requires an active session workspace"
+                                        .to_string(),
+                                    data: None,
+                                });
+                            };
+                            let uri = res.get("uri").and_then(|v| v.as_str());
+                            let mime = res.get("mimeType").and_then(|v| v.as_str());
+                            let materialized =
+                                acp_embedded::materialize_resource_blob(ws, uri, mime, blob)
+                                    .map_err(|e| RpcError {
+                                        code: INVALID_PARAMS,
+                                        message: e.0,
+                                        data: None,
+                                    })?;
+                            if added || !joined.is_empty() {
+                                joined.push_str("\n\n");
+                            }
+                            joined.push_str(&materialized.marker);
+                        }
+                    }
+                }
+                if joined.is_empty() {
+                    return Err(RpcError {
+                        code: INVALID_PARAMS,
+                        message: "Parameter 'prompt' array must contain at least one text part"
+                            .to_string(),
+                        data: None,
+                    });
+                }
+                Ok(joined)
+            }
+            _ => Err(RpcError {
+                code: INVALID_PARAMS,
+                message: "Missing required parameter: prompt (must be string or array of parts)"
+                    .to_string(),
+                data: None,
+            }),
+        }
+    }
+
+    async fn handle_session_stop(&self, params: &Value) -> RpcResult {
+        let session_id = params
+            .get("sessionId")
+            .or_else(|| params.get("session_id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: INVALID_PARAMS,
+                message: "Missing required parameter: sessionId".to_string(),
+                data: None,
+            })?;
+
+        // Cancel any in-flight or queued turn before removing the map entry, so a
+        // prompt admitted but still parked behind the finalization gate is stopped
+        // rather than left to run after this `session/stop` returns (parity with
+        // `session/close`).
+        let token = self
+            .cancel_tokens
+            .lock()
+            .expect("cancel_tokens lock poisoned — invariant: all guarded critical sections are short, infallible HashMap ops")
+            .get(session_id)
+            .cloned();
+        if let Some(token) = token {
+            token.cancel();
+            ::kinetic_log::record!(
+                INFO,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                    .with_category(::kinetic_log::EventCategory::Channel)
+                    .with_attrs(::serde_json::json!({"session_id": session_id})),
+                "ACP session/stop: cancelled active turn"
+            );
+        }
+
+        // Same lifecycle guard as `session/close`: wait out an admitted prompt
+        // that holds the finalization gate — including one whose turn task is
+        // spawned but has not yet acquired the session lock — so stop cannot
+        // return before that task has persisted its terminal outcome.
+        let finalize_gate = self.session_gate(session_id);
+        let finalize_guard = finalize_gate.lock().await;
+
+        let session_arc = {
+            let mut sessions = self.sessions.lock().await;
+            match sessions.remove(session_id) {
+                Some(arc) => arc,
+                None => {
+                    // `session_gate` created the entry on a miss, so release it
+                    // the same way a rejected restore does. Both owners we
+                    // added (guard + Arc clone) must be gone before reclaim.
+                    drop(finalize_guard);
+                    drop(finalize_gate);
+                    self.reclaim_session_gate(session_id);
+                    return Err(RpcError {
+                        code: SESSION_NOT_FOUND,
+                        message: format!("Session not found: {session_id}"),
+                        data: None,
+                    });
+                }
+            }
+        };
+
+        // Wait for any in-flight prompt turn to finish before cleaning up.
+        // The inner lock is held by the turn task; this blocks until it drops.
+        let session = session_arc.lock().await;
+        let agent_alias = session.agent_alias.clone();
+        let model_provider = session.model_provider.clone();
+        let model = session.model.clone();
+        // Drop the ACP back-channel from each tool's channel map so the
+        // session's RpcOutbound clone isn't kept alive by stale entries.
+        session.agent.channel_handles().unregister_channel("acp");
+        ::kinetic_log::record!(
+            INFO,
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Complete)
+                .with_category(::kinetic_log::EventCategory::Channel)
+                .with_outcome(::kinetic_log::EventOutcome::Success)
+                .with_attrs(::serde_json::json!({
+                    "session_id": session_id,
+                    "agent_alias": agent_alias,
+                    "model_provider": model_provider,
+                    "model": model,
+                })),
+            "ACP session stopped"
+        );
+        drop(session);
+        // Same reclaim ordering as `session/close`: both owners we added
+        // (guard + Arc clone) must be gone before reclamation.
+        drop(finalize_guard);
+        drop(finalize_gate);
+        self.reclaim_session_gate(session_id);
+        Ok(serde_json::json!({
+            "sessionId": session_id,
+            "stopped": true,
+        }))
+    }
+
+    async fn handle_session_cancel(&self, params: &Value) -> RpcResult {
+        let session_id = params
+            .get("sessionId")
+            .or_else(|| params.get("session_id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: INVALID_PARAMS,
+                message: "Missing required parameter: sessionId".to_string(),
+                data: None,
+            })?;
+
+        let token = self
+            .cancel_tokens
+            .lock()
+            .expect("cancel_tokens lock poisoned — invariant: all guarded critical sections are short, infallible HashMap ops")
+            .get(session_id)
+            .cloned();
+
+        if let Some(token) = token {
+            token.cancel();
+            ::kinetic_log::record!(
+                INFO,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                    .with_category(::kinetic_log::EventCategory::Channel)
+                    .with_attrs(::serde_json::json!({"session_id": session_id})),
+                "ACP session/cancel: fired cancel token for active turn"
+            );
+        }
+
+        Ok(serde_json::json!({}))
+    }
+
+    async fn handle_session_event(&self, params: &Value) -> RpcResult {
+        let session_id = params
+            .get("sessionId")
+            .or_else(|| params.get("session_id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: INVALID_PARAMS,
+                message: "Missing required parameter: sessionId".to_string(),
+                data: None,
+            })?
+            .to_string();
+
+        let event_type = params
+            .get("type")
+            .or_else(|| params.get("update").and_then(|u| u.get("sessionUpdate")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        ::kinetic_log::record!(
+            DEBUG,
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                .with_category(::kinetic_log::EventCategory::Channel)
+                .with_attrs(
+                    ::serde_json::json!({"event_type": event_type, "session_id": session_id})
+                ),
+            "Received session update (type=) for session"
+        );
+
+        let session_arc = {
+            let sessions = self.sessions.lock().await;
+            sessions.get(&session_id).cloned()
+        };
+
+        if let Some(session_arc) = session_arc {
+            // Best-effort last_active update. If the inner lock is held by an
+            // active turn, skip it — the turn itself updates last_active on completion.
+            if let Ok(mut session) = session_arc.try_lock() {
+                session.last_active = Instant::now();
+            }
+            Ok(serde_json::json!({
+                "sessionId": session_id,
+                "type": event_type,
+                "status": "processed"
+            }))
+        } else {
+            Err(RpcError {
+                code: SESSION_NOT_FOUND,
+                message: format!("Session not found: {session_id}"),
+                data: None,
+            })
+        }
+    }
+
+    // ── I/O helpers ──────────────────────────────────────────────
+
+    async fn write_result(&self, id: Value, result: Value) {
+        let response = JsonRpcResponse {
+            jsonrpc: "2.0",
+            result: Some(result),
+            error: None,
+            id,
+        };
+        self.write_json(&response).await;
+    }
+
+    async fn write_error(&self, id: Value, code: i32, message: &str) {
+        let response = JsonRpcResponse {
+            jsonrpc: "2.0",
+            result: None,
+            error: Some(JsonRpcError {
+                code,
+                message: message.to_string(),
+                data: None,
+            }),
+            id,
+        };
+        self.write_json(&response).await;
+    }
+
+    async fn write_notification(&self, notification: &JsonRpcNotification) {
+        self.write_json(notification).await;
+    }
+
+    async fn write_json<T: Serialize>(&self, value: &T) {
+        match serde_json::to_string(value) {
+            Ok(json) => {
+                if !self.rpc.send_raw(json).await {
+                    ::kinetic_log::record!(
+                        ERROR,
+                        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                            .with_category(::kinetic_log::EventCategory::Channel)
+                            .with_outcome(::kinetic_log::EventOutcome::Failure),
+                        "ACP writer task closed; dropping outbound message"
+                    );
+                }
+            }
+            Err(e) => {
+                ::kinetic_log::record!(
+                    ERROR,
+                    ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                        .with_category(::kinetic_log::EventCategory::Channel)
+                        .with_outcome(::kinetic_log::EventOutcome::Failure)
+                        .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                    "Failed to serialize JSON-RPC message"
+                );
+            }
+        }
+    }
+}
+
+/// Single writer task that owns stdout. All outbound JSON-RPC messages flow
+/// through here, so concurrent notifications and outbound requests don't
+/// interleave bytes.
+async fn writer_task(mut rx: mpsc::Receiver<String>) {
+    let mut stdout = tokio::io::stdout();
+    while let Some(line) = rx.recv().await {
+        if let Err(e) = stdout.write_all(line.as_bytes()).await {
+            ::kinetic_log::record!(
+                ERROR,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                    .with_category(::kinetic_log::EventCategory::Channel)
+                    .with_outcome(::kinetic_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                "Failed to write to stdout"
+            );
+            continue;
+        }
+        if let Err(e) = stdout.write_all(b"\n").await {
+            ::kinetic_log::record!(
+                ERROR,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                    .with_category(::kinetic_log::EventCategory::Channel)
+                    .with_outcome(::kinetic_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                "Failed to write newline to stdout"
+            );
+            continue;
+        }
+        if let Err(e) = stdout.flush().await {
+            ::kinetic_log::record!(
+                ERROR,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Fail)
+                    .with_category(::kinetic_log::EventCategory::Channel)
+                    .with_outcome(::kinetic_log::EventOutcome::Failure)
+                    .with_attrs(::serde_json::json!({"error": format!("{}", e)})),
+                "Failed to flush stdout"
+            );
+        }
+    }
+}
+
+fn to_acp_raw_input(name: &str, args: &Value) -> Value {
+    match name {
+        "file_edit" => {
+            let path = args.get("path").cloned().unwrap_or(Value::Null);
+            let old_text = args.get("old_string").cloned().unwrap_or(Value::Null);
+            let new_text = args.get("new_string").cloned().unwrap_or(Value::Null);
+            serde_json::json!({ "path": path, "oldText": old_text, "newText": new_text })
+        }
+        "file_write" => {
+            let path = args.get("path").cloned().unwrap_or(Value::Null);
+            let new_text = args.get("content").cloned().unwrap_or(Value::Null);
+            serde_json::json!({ "path": path, "newText": new_text })
+        }
+        _ => args.clone(),
+    }
+}
+
+fn to_acp_content(name: &str, args: &Value) -> Value {
+    match name {
+        "file_edit" => {
+            let path = args.get("path").cloned().unwrap_or(Value::Null);
+            let old_text = args.get("old_string").cloned().unwrap_or(Value::Null);
+            let new_text = args.get("new_string").cloned().unwrap_or(Value::Null);
+            serde_json::json!([{ "type": "diff", "path": path, "oldText": old_text, "newText": new_text }])
+        }
+        "file_write" => {
+            let path = args.get("path").cloned().unwrap_or(Value::Null);
+            let new_text = args.get("content").cloned().unwrap_or(Value::Null);
+            serde_json::json!([{ "type": "diff", "path": path, "newText": new_text }])
+        }
+        _ => serde_json::json!([]),
+    }
+}
+
+/// Build ACP `tool_call_update.content` with an embedded `resource`+`blob` for a
+/// delivered file, driven by the typed [`ToolArtifact`] carried on the event.
+///
+/// The path/uri/mime come from structured metadata, never from parsing `output`,
+/// so a crafted filename can no longer forge the delivered path. Returns `None`
+/// to fall back to text-only content (no artifact, wrong tool, IO error, or the
+/// defense-in-depth re-check failed).
+fn deliver_file_tool_result_content(
+    name: &str,
+    output: &str,
+    artifact: Option<&ToolArtifact>,
+) -> Option<Value> {
+    if name != "deliver_file" {
+        return None;
+    }
+    let artifact = artifact?;
+    let path = &artifact.path;
+    if path.is_empty() {
+        return None;
+    }
+    // Defense-in-depth: `deliver_file` already validated and size-capped the
+    // path, but we re-read it here. Open the materialized artifact once beneath its
+    // parent directory handle and bounded-read at most MAX_DELIVER_FILE_BYTES + 1
+    // from that single handle (no-follow), so a workspace writer that grows or
+    // replaces the content-addressed file between the tool's write and this read
+    // can never load an unbounded blob into memory, and a replacement symlink is
+    // refused, not followed. On any mismatch, fall back to text-only content.
+    let bytes = kinetic_runtime::tools::read_delivered_artifact_bounded(Path::new(path)).ok()?;
+    // The typed `uri` is a content hash the tool computed over the same file. Recompute
+    // it from the bytes we just read and require an exact match: if the file was swapped
+    // between the tool's validation and this read, the hash differs and we fall back to
+    // text-only rather than embedding unexpected content. This binds the embedded bytes
+    // to what `deliver_file` actually vetted.
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
+    let expected_uri = kinetic_runtime::tools::attachment_deliver_uri(
+        &acp_embedded::content_hash_name(&bytes, ext),
+    );
+    if artifact.uri != expected_uri {
+        return None;
+    }
+    let blob = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+    let uri = artifact.uri.clone();
+    let mime_type = artifact.mime.clone();
+    Some(serde_json::json!([
+        {
+            "type": "content",
+            "content": {
+                "type": "text",
+                "text": output
+            }
+        },
+        {
+            "type": "content",
+            "content": {
+                "type": "resource",
+                "resource": {
+                    "uri": uri,
+                    "mimeType": mime_type,
+                    "blob": blob
+                }
+            }
+        }
+    ]))
+}
+
+fn map_tool_kind(name: &str) -> &'static str {
+    match name {
+        "ask_user" | "calculator" | "delegate" | "escalate_to_human" | "execute_pipeline"
+        | "llm_task" | "schedule" | "shell" | "sop_advance" | "sop_approve" | "sop_execute" => {
+            "execute"
+        }
+        "backup" | "file_edit" | "file_write" | "memory_export" | "memory_store" => "edit",
+        "cron_add" | "poll" | "reaction" => "edit",
+        "memory_forget" | "memory_purge" => "delete",
+        // ACP clients often treat `read`/`search`/`fetch` calls as noisy
+        // background context gathering and keep their content collapsed. These
+        // KineticVM tools return user-visible text, so use `other` to keep the
+        // result content surfaced consistently across clients.
+        "content_search" | "glob_search" | "knowledge" | "search" | "tool_search"
+        | "web_search_tool" => "other",
+        "data_management"
+        | "deliver_file"
+        | "file_read"
+        | "hardware_board_info"
+        | "hardware_memory_map"
+        | "hardware_memory_read"
+        | "image_info"
+        | "model_routing_config"
+        | "model_switch"
+        | "proxy_config"
+        | "read_skill"
+        | "sessions_history"
+        | "sessions_list"
+        | "sop_list"
+        | "sop_status"
+        | "workspace" => "other",
+        "cron_list" | "cron_runs" | "memory_recall" => "other",
+        "http_request" | "web_fetch" => "other",
+        "cron_remove" => "delete",
+        "cron_run" => "execute",
+        "sessions_send" => "execute",
+        _ => "other",
+    }
+}
+
+/// Ordered, awaited durable write for one `TurnEvent::Usage`.
+///
+/// The ACP drain loop is sequential, so awaiting here preserves event order
+/// (accepted `Some` followed by accepted `None` clears) and guarantees
+/// completion before the prompt result. Rejected billing telemetry never
+/// touches the store; failures are best-effort WARN logs.
+async fn persist_acp_usage_snapshot_ordered(
+    store: &Arc<AcpSessionStore>,
+    session_id: &str,
+    input_tokens: Option<u64>,
+    accepted: bool,
+) {
+    let store = Arc::clone(store);
+    let sid = session_id.to_string();
+    let persisted = tokio::task::spawn_blocking(move || {
+        store.persist_usage_snapshot(&sid, input_tokens, accepted)
+    })
+    .await;
+    let error = match persisted {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => Some(e.to_string()),
+        Err(join) => Some(join.to_string()),
+    };
+    if let Some(error) = error {
+        ::kinetic_log::record!(
+            WARN,
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Write,)
+                .with_outcome(::kinetic_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({
+                    "input_tokens": input_tokens,
+                    "accepted": accepted,
+                    "error": error,
+                })),
+            "Failed to persist ACP session token_count"
+        );
+    }
+}
+
+fn notification_for_turn_event(session_id: &str, event: &TurnEvent) -> Option<JsonRpcNotification> {
+    Some(match event {
+        TurnEvent::Chunk { delta } => JsonRpcNotification {
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {
+                        "type": "text",
+                        "text": delta
+                    }
+                }
+            }),
+        },
+        TurnEvent::ToolCall { id, name, args } => {
+            let acp_content = to_acp_content(name, args);
+            let mut update = serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": id,
+                "name": name,
+                "title": name,
+                "kind": map_tool_kind(name),
+                "rawInput": to_acp_raw_input(name, args),
+                "status": "pending"
+            });
+            if acp_content
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+            {
+                update["content"] = acp_content;
+            }
+            JsonRpcNotification {
+                jsonrpc: "2.0",
+                method: "session/update",
+                params: serde_json::json!({
+                    "sessionId": session_id,
+                    "update": update
+                }),
+            }
+        }
+        TurnEvent::ToolResult {
+            id,
+            name,
+            output,
+            artifact,
+        } => {
+            let embedded = deliver_file_tool_result_content(name, output, artifact.as_ref());
+            // A `deliver_file` result that carried an artifact but could not be
+            // embedded (metadata/read/size/hash failure) is a FAILED delivery, not a
+            // silently completed update with the attachment missing.
+            let delivery_failed =
+                name == "deliver_file" && artifact.is_some() && embedded.is_none();
+            let content = embedded.unwrap_or_else(|| {
+                serde_json::json!([{
+                    "type": "content",
+                    "content": {
+                        "type": "text",
+                        "text": output
+                    }
+                }])
+            });
+            // `deliver_file` carries a caller-supplied chat label in its typed
+            // artifact; surface it as the standard ACP `title` so the client can
+            // render a human-readable name for the delivered file. Falls back to
+            // the tool name (which is what every other tool uses).
+            let title = artifact
+                .as_ref()
+                .filter(|_| name == "deliver_file")
+                .map(|a| a.title.clone())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| name.to_string());
+            let status = if delivery_failed {
+                "failed"
+            } else {
+                "completed"
+            };
+            JsonRpcNotification {
+                jsonrpc: "2.0",
+                method: "session/update",
+                params: serde_json::json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": id,
+                        "name": name,
+                        "title": title,
+                        "kind": map_tool_kind(name),
+                        "status": status,
+                        "rawOutput": output,
+                        "body": output,
+                        "content": content
+                    }
+                }),
+            }
+        }
+        TurnEvent::Thinking { delta } => JsonRpcNotification {
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "agent_thought_chunk",
+                    "content": {
+                        "type": "text",
+                        "text": delta
+                    }
+                }
+            }),
+        },
+        TurnEvent::ApprovalRequest { .. } => return None,
+        TurnEvent::HistoryTrimmed {
+            dropped_messages,
+            dropped_turns,
+            kept_turns,
+            reason,
+            token_budget,
+            tokens_before,
+            tokens_after,
+            tokens_before_source,
+            tokens_after_source,
+            unsatisfiable_floor,
+            retained_context: _,
+        } => {
+            let mut params = serde_json::json!({
+                "sessionId": session_id,
+                "droppedMessages": dropped_messages,
+                "droppedTurns": dropped_turns,
+                "keptTurns": kept_turns,
+                "reason": reason,
+            });
+            if let Some(token_budget) = token_budget {
+                params["tokenBudget"] = (*token_budget).into();
+            }
+            if let Some(tokens_before) = tokens_before {
+                params["tokensBefore"] = (*tokens_before).into();
+            }
+            if let Some(tokens_after) = tokens_after {
+                params["tokensAfter"] = (*tokens_after).into();
+            }
+            if let Some(tokens_before_source) = tokens_before_source {
+                params["tokensBeforeSource"] = tokens_before_source.as_str().into();
+            }
+            if let Some(tokens_after_source) = tokens_after_source {
+                params["tokensAfterSource"] = tokens_after_source.as_str().into();
+            }
+            if let Some(unsatisfiable_floor) = unsatisfiable_floor {
+                params["unsatisfiableFloor"] = (*unsatisfiable_floor).into();
+            }
+            JsonRpcNotification {
+                jsonrpc: "2.0",
+                // ACP's SessionUpdate union is closed. Custom notifications use
+                // underscore-prefixed methods so clients can safely ignore them.
+                method: "_kinetic/history_trimmed",
+                params,
+            }
+        }
+        TurnEvent::Plan { entries } => JsonRpcNotification {
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: serde_json::json!({
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "plan",
+                    // PlanEntry serializes to the ACP-faithful
+                    // { content, priority, status } shape (+ additive
+                    // activeForm when present, which strict ACP clients
+                    // ignore). Whole-list replace per the ACP plan spec.
+                    "entries": entries,
+                }
+            }),
+        },
+        // ACP has no `session/update` shape for usage; the cost tracker records
+        // it out-of-band. Keep this helper total even if a caller omits its
+        // fast-path filter.
+        TurnEvent::Usage { .. } => return None,
+        _ => return None,
+    })
+}
+
+fn history_notifications_for_message(
+    session_id: &str,
+    msg: &ConversationMessage,
+) -> Vec<JsonRpcNotification> {
+    match msg {
+        ConversationMessage::Chat(chat) => {
+            // The durable failed-turn boundary projects to its localized
+            // marker here, at the client replay boundary: the stored row is
+            // the reserved sentinel, so a transcript persisted under one
+            // locale replays with the current locale's `[turn failed]` text
+            // instead of leaking the raw sentinel to the client.
+            if AcpServer::is_failure_sentinel(msg) {
+                let localized = kinetic_runtime::i18n::get_required_cli_string("turn-failed");
+                return vec![JsonRpcNotification {
+                    jsonrpc: "2.0",
+                    method: "session/update",
+                    params: serde_json::json!({
+                        "sessionId": session_id,
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": { "type": "text", "text": localized }
+                        }
+                    }),
+                }];
+            }
+            let update_type = match chat.role.as_str() {
+                "user" => "user_message_chunk",
+                "assistant" => "agent_message_chunk",
+                _ => return vec![],
+            };
+            vec![JsonRpcNotification {
+                jsonrpc: "2.0",
+                method: "session/update",
+                params: serde_json::json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": update_type,
+                        "content": { "type": "text", "text": &chat.content }
+                    }
+                }),
+            }]
+        }
+        ConversationMessage::AssistantToolCalls {
+            text, tool_calls, ..
+        } => {
+            let mut notifications = Vec::new();
+            if let Some(t) = text
+                && !t.is_empty()
+            {
+                notifications.push(JsonRpcNotification {
+                    jsonrpc: "2.0",
+                    method: "session/update",
+                    params: serde_json::json!({
+                        "sessionId": session_id,
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": { "type": "text", "text": t }
+                        }
+                    }),
+                });
+            }
+            for tc in tool_calls {
+                let args: serde_json::Value =
+                    serde_json::from_str(&tc.arguments).unwrap_or(serde_json::Value::Null);
+                let acp_content = to_acp_content(&tc.name, &args);
+                let mut update = serde_json::json!({
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": &tc.id,
+                    "name": &tc.name,
+                    "title": &tc.name,
+                    "kind": map_tool_kind(&tc.name),
+                    "rawInput": to_acp_raw_input(&tc.name, &args),
+                    "status": "completed"
+                });
+                if acp_content
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty())
+                {
+                    update["content"] = acp_content;
+                }
+                notifications.push(JsonRpcNotification {
+                    jsonrpc: "2.0",
+                    method: "session/update",
+                    params: serde_json::json!({
+                        "sessionId": session_id,
+                        "update": update
+                    }),
+                });
+            }
+            notifications
+        }
+        ConversationMessage::ToolResults(results) => results
+            .iter()
+            .map(|r| JsonRpcNotification {
+                jsonrpc: "2.0",
+                method: "session/update",
+                params: serde_json::json!({
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": &r.tool_call_id,
+                        "status": "completed",
+                        "rawOutput": &r.content,
+                        "body": &r.content,
+                        "content": [{
+                            "type": "content",
+                            "content": { "type": "text", "text": &r.content }
+                        }]
+                    }
+                }),
+            })
+            .collect(),
+    }
+}
+
+// ── Error helper ─────────────────────────────────────────────────
+
+#[derive(Debug)]
+struct RpcError {
+    code: i32,
+    message: String,
+    /// Reserved for JSON-RPC structured error data. The ACP writer currently
+    /// deliberately omits it, so terminal-turn failures use it internally to
+    /// retain their stable diagnostic while `message` carries localized text.
+    data: Option<Value>,
+}
+
+impl RpcError {
+    fn diagnostic(&self) -> &str {
+        self.data
+            .as_ref()
+            .and_then(Value::as_str)
+            .unwrap_or(&self.message)
+    }
+}
+
+/// Keep the stable diagnostic used by logs separate from the localized text
+/// exposed through the ACP JSON-RPC boundary.
+fn acp_turn_failure(error: &anyhow::Error) -> (String, RpcError) {
+    let diagnostic = error.to_string();
+    let user_message = kinetic_runtime::agent::terminal_completion_error_message(error, None);
+    (
+        diagnostic.clone(),
+        acp_turn_failure_from_parts(&diagnostic, user_message.as_deref()),
+    )
+}
+
+fn acp_turn_failure_from_parts(diagnostic: &str, user_message: Option<&str>) -> RpcError {
+    RpcError {
+        code: INTERNAL_ERROR,
+        message: user_message
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Agent turn failed: {diagnostic}")),
+        data: Some(Value::String(diagnostic.to_owned())),
+    }
+}
+
+/// Reclaims a finalization-gate entry a restore created but never got to use.
+/// See [`AcpServer::restore_gate`].
+struct RestoreGate<'a> {
+    server: &'a AcpServer,
+    session_id: String,
+    armed: bool,
+}
+
+impl RestoreGate<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RestoreGate<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.server.reclaim_session_gate(&self.session_id);
+        }
+    }
+}
+
+type RpcResult = std::result::Result<Value, RpcError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    fn valid_1x1_png() -> Vec<u8> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([255, 0, 0, 255]),
+        ))
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .expect("test PNG encodes");
+        bytes.into_inner()
+    }
+
+    struct RecordingNativeProvider {
+        requests: Arc<parking_lot::Mutex<Vec<Vec<ChatMessage>>>>,
+    }
+
+    impl kinetic_api::attribution::Attributable for RecordingNativeProvider {
+        fn role(&self) -> kinetic_api::attribution::Role {
+            kinetic_api::attribution::Role::Provider(kinetic_api::attribution::ProviderKind::Model(
+                kinetic_api::attribution::ModelProviderKind::Custom,
+            ))
+        }
+
+        fn alias(&self) -> &str {
+            "RecordingNativeProvider"
+        }
+    }
+
+    #[async_trait]
+    impl kinetic_api::model_provider::ModelProvider for RecordingNativeProvider {
+        fn capabilities(&self) -> kinetic_api::model_provider::ProviderCapabilities {
+            kinetic_api::model_provider::ProviderCapabilities {
+                native_tool_calling: true,
+                ..Default::default()
+            }
+        }
+
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            Ok("recovered".to_string())
+        }
+
+        async fn chat(
+            &self,
+            request: kinetic_api::model_provider::ChatRequest<'_>,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<kinetic_api::model_provider::ChatResponse> {
+            self.requests.lock().push(request.messages.to_vec());
+            Ok(kinetic_api::model_provider::ChatResponse {
+                text: Some("recovered".to_string()),
+                tool_calls: Vec::new(),
+                usage: None,
+                reasoning_content: None,
+            })
+        }
+    }
+
+    use kinetic_api::model_provider::ModelProvider;
+
+    /// Like `RecordingNativeProvider` but advertises vision, so historical
+    /// image markers are *retained* on the way to the provider instead of
+    /// stripped by the text-only degrade path. A request recorded here
+    /// genuinely carries whatever media the seed still contains, which makes
+    /// the failed-media regressions discriminate: a resent rejected image
+    /// shows up as a `[IMAGE:data:...]` part, a degraded one as the omission
+    /// note only.
+    struct RecordingVisionProvider {
+        requests: Arc<parking_lot::Mutex<Vec<Vec<ChatMessage>>>>,
+    }
+
+    impl kinetic_api::attribution::Attributable for RecordingVisionProvider {
+        fn role(&self) -> kinetic_api::attribution::Role {
+            kinetic_api::attribution::Role::Provider(kinetic_api::attribution::ProviderKind::Model(
+                kinetic_api::attribution::ModelProviderKind::Custom,
+            ))
+        }
+
+        fn alias(&self) -> &str {
+            "RecordingVisionProvider"
+        }
+    }
+
+    #[async_trait]
+    impl ModelProvider for RecordingVisionProvider {
+        fn capabilities(&self) -> kinetic_api::model_provider::ProviderCapabilities {
+            kinetic_api::model_provider::ProviderCapabilities {
+                native_tool_calling: true,
+                vision: true,
+                ..Default::default()
+            }
+        }
+
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            Ok("recovered".to_string())
+        }
+
+        async fn chat(
+            &self,
+            request: kinetic_api::model_provider::ChatRequest<'_>,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<kinetic_api::model_provider::ChatResponse> {
+            self.requests.lock().push(request.messages.to_vec());
+            Ok(kinetic_api::model_provider::ChatResponse {
+                text: Some("recovered".to_string()),
+                tool_calls: Vec::new(),
+                usage: None,
+                reasoning_content: None,
+            })
+        }
+    }
+
+    #[test]
+    fn usage_event_has_no_acp_notification() {
+        let event = TurnEvent::Usage {
+            input_tokens: Some(10),
+            cached_input_tokens: Some(2),
+            output_tokens: Some(3),
+            cost_usd: Some(0.01),
+            // This test asserts only that a Usage event produces no ACP
+            // notification; the resolved context limits play no part in that
+            // filtering, so the unresolved variant is the honest fixture here.
+            context_token_budget: None,
+            model_context_window: None,
+            provider_ref: "stub".into(),
+            model: "stub-model".into(),
+            accepted: true,
+        };
+
+        assert!(notification_for_turn_event("session", &event).is_none());
+    }
+
+    #[tokio::test]
+    async fn acp_usage_snapshots_persist_in_event_order_before_result() {
+        // Accepted Some followed by accepted None must clear, not resurrect.
+        // The ordered drain awaits each write, so the clear is durable before
+        // the prompt result is returned and an immediate load/resume sees it.
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "sess-acp-usage-order";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+
+        persist_acp_usage_snapshot_ordered(&store, session_id, Some(1000), true).await;
+        persist_acp_usage_snapshot_ordered(&store, session_id, None, true).await;
+
+        assert_eq!(
+            store.load_session(session_id).unwrap().unwrap().token_count,
+            0,
+            "accepted usage-less event must clear stale count immediately"
+        );
+
+        // Rejected billing telemetry must not touch the accepted snapshot.
+        persist_acp_usage_snapshot_ordered(&store, session_id, Some(1000), true).await;
+        persist_acp_usage_snapshot_ordered(&store, session_id, Some(5000), false).await;
+        assert_eq!(
+            store.load_session(session_id).unwrap().unwrap().token_count,
+            1000,
+            "rejected usage is billing-only"
+        );
+    }
+
+    struct EmptyTerminalProvider;
+
+    #[async_trait]
+    impl ModelProvider for EmptyTerminalProvider {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: Option<f64>,
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    impl ::kinetic_api::attribution::Attributable for EmptyTerminalProvider {
+        fn role(&self) -> ::kinetic_api::attribution::Role {
+            ::kinetic_api::attribution::Role::Provider(
+                ::kinetic_api::attribution::ProviderKind::Model(
+                    ::kinetic_api::attribution::ModelProviderKind::Custom,
+                ),
+            )
+        }
+
+        fn alias(&self) -> &str {
+            "EmptyTerminalProvider"
+        }
+    }
+
+    fn acp_test_agent(workspace_dir: std::path::PathBuf) -> Agent {
+        Agent::builder()
+            .model_provider(Box::new(EmptyTerminalProvider))
+            .tools(
+                kinetic_runtime::tools::scoped::ScopedToolRegistry::from_raw_for_test(Vec::new()),
+            )
+            .observer(Arc::from(kinetic_runtime::observability::NoopObserver {}))
+            .tool_dispatcher(Box::new(
+                kinetic_runtime::agent::dispatcher::NativeToolDispatcher,
+            ))
+            .workspace_dir(workspace_dir)
+            .exclude_memory(true)
+            .build()
+            .expect("test agent must build")
+    }
+
+    #[test]
+    fn acp_terminal_failure_keeps_diagnostic_out_of_localized_delivery() {
+        let diagnostic = "provider completed without final text or tool calls";
+        let localized = "Réponse terminale invalide.";
+
+        let error = acp_turn_failure_from_parts(diagnostic, Some(localized));
+
+        assert_eq!(error.code, INTERNAL_ERROR);
+        assert_eq!(error.message, "Réponse terminale invalide.");
+        assert!(
+            !error.message.contains(diagnostic),
+            "ACP must not expose the stable diagnostic when Fluent supplies delivery text"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_prompt_projects_a_terminal_failure_through_acp_rpc() {
+        let cwd = tempfile::tempdir().unwrap();
+        let server = Arc::new(AcpServer::new(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+        ));
+        let session = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("session/new must succeed");
+        let session_id = session["sessionId"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+        let session = server
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+            .expect("session must be registered");
+        session.lock().await.agent = acp_test_agent(cwd.path().to_path_buf());
+
+        let error = server
+            .handle_session_prompt(
+                &serde_json::json!({"sessionId": session_id, "prompt": "hello"}),
+                &serde_json::json!(1),
+            )
+            .await
+            .expect_err("a terminal empty completion must become an ACP error");
+
+        assert_eq!(error.code, INTERNAL_ERROR);
+        assert_eq!(
+            error.message,
+            kinetic_runtime::agent::semantic_empty_terminal_completion_message(None)
+        );
+        assert_ne!(
+            error.message, "provider completed without final text or tool calls",
+            "ACP wire delivery must not expose the stable diagnostic"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_line_serializes_terminal_failure_without_relogging_localized_text() {
+        let cwd = tempfile::tempdir().unwrap();
+        let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<String>(8);
+        let server = Arc::new(AcpServer::new_with_writer(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            writer_tx,
+        ));
+        let session = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("session/new must succeed");
+        let session_id = session["sessionId"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+        let session = server
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+            .expect("session must be registered");
+        session.lock().await.agent = acp_test_agent(cwd.path().to_path_buf());
+
+        server
+            .process_line(
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "session/prompt",
+                    "params": {"sessionId": session_id, "prompt": "hello"}
+                })
+                .to_string(),
+            )
+            .await;
+        let wire = tokio::time::timeout(Duration::from_secs(5), writer_rx.recv())
+            .await
+            .expect("serialized ACP response deadline")
+            .expect("serialized ACP response");
+        let response: Value = serde_json::from_str(&wire).expect("valid JSON-RPC");
+        let error = &response["error"];
+
+        assert_eq!(error["code"], INTERNAL_ERROR);
+        assert_eq!(
+            error["message"],
+            kinetic_runtime::agent::semantic_empty_terminal_completion_message(None)
+        );
+        assert_ne!(
+            error["message"], "provider completed without final text or tool calls",
+            "only the localized delivery projection may reach the ACP wire"
+        );
+
+        let error = acp_turn_failure_from_parts(
+            "provider completed without final text or tool calls",
+            Some("Réponse terminale invalide."),
+        );
+        assert_eq!(
+            error.diagnostic(),
+            "provider completed without final text or tool calls"
+        );
+        assert_eq!(error.message, "Réponse terminale invalide.");
+    }
+
+    /// Upper bound for "this must not deadlock" waits in these tests.
+    ///
+    /// These guards exist to fail a genuine hang, not to assert how fast
+    /// `session/new` is. `scripts/ci/parallel_runtime_test_gate.sh` runs the
+    /// suite at 16 threads, where the previous 2s budget stopped being a
+    /// deadlock guard and became a scheduling assertion: a loaded runner blew
+    /// it while the behaviour under test was correct.
+    ///
+    /// The operations guarded here are sub-second when they are not hung, so
+    /// 30s cannot be reached by ordinary contention.
+    const DEADLOCK_GUARD: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn acp_server_config_defaults() {
+        let cfg = AcpServerConfig::default();
+        assert_eq!(cfg.max_sessions, 10);
+        assert_eq!(cfg.session_timeout_secs, 3600);
+    }
+
+    #[test]
+    fn acp_server_config_deserialize() {
+        let json = r#"{"max_sessions": 5, "session_timeout_secs": 1800}"#;
+        let cfg: AcpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.max_sessions, 5);
+        assert_eq!(cfg.session_timeout_secs, 1800);
+    }
+
+    #[test]
+    fn acp_server_config_deserialize_partial() {
+        let json = r#"{"max_sessions": 3}"#;
+        let cfg: AcpServerConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.max_sessions, 3);
+        assert_eq!(cfg.session_timeout_secs, 3600);
+    }
+
+    #[test]
+    fn json_rpc_request_parse() {
+        let json = r#"{"jsonrpc":"2.0","method":"initialize","params":{},"id":1}"#;
+        let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "initialize");
+        assert_eq!(req.id, Some(Value::Number(1.into())));
+    }
+
+    #[test]
+    fn json_rpc_request_parse_notification() {
+        let json = r#"{"jsonrpc":"2.0","method":"session/update","params":{}}"#;
+        let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "session/update");
+        assert!(req.id.is_none());
+    }
+
+    #[test]
+    fn json_rpc_response_serialize() {
+        let resp = JsonRpcResponse {
+            jsonrpc: "2.0",
+            result: Some(serde_json::json!({"status": "ok"})),
+            error: None,
+            id: Value::Number(1.into()),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0");
+        assert!(parsed.get("result").is_some());
+        assert!(parsed.get("error").is_none());
+        assert_eq!(parsed["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn rpc_request_timeout_drop_removes_pending_responder() {
+        let (tx, mut rx) = mpsc::channel::<String>(16);
+        let rpc = RpcOutbound::new(tx);
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(10),
+            rpc.request("session/request_permission", serde_json::json!({})),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(rx.recv().await.is_some());
+        assert_eq!(rpc.pending_count(), 0);
+    }
+
+    #[test]
+    fn initialize_response_uses_acp_v1_shape() {
+        let server = AcpServer::new(Config::default(), AcpServerConfig::default());
+        let result = server
+            .handle_initialize(&serde_json::json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {},
+                "clientInfo": {
+                    "name": "test-client",
+                    "version": "1.0.0"
+                }
+            }))
+            .unwrap();
+
+        assert_eq!(result["protocolVersion"], 1);
+        assert_eq!(result["agentInfo"]["name"], "kinetic-acp");
+        assert_eq!(result["agentInfo"]["title"], "KineticVM ACP");
+        assert_eq!(result["agentInfo"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(result["authMethods"], serde_json::json!([]));
+        assert_eq!(result["agentCapabilities"]["loadSession"], false);
+        assert_eq!(
+            result["agentCapabilities"]["promptCapabilities"]["image"],
+            false
+        );
+        assert_eq!(
+            result["agentCapabilities"]["promptCapabilities"]["embeddedContext"],
+            true
+        );
+        assert_eq!(
+            result["agentCapabilities"]["mcpCapabilities"]["http"],
+            false
+        );
+        assert!(result.get("serverInfo").is_none());
+        assert!(result.get("capabilities").is_none());
+    }
+
+    #[test]
+    fn initialize_caches_client_elicitation_capabilities() {
+        let server = AcpServer::new(Config::default(), AcpServerConfig::default());
+        let _ = server
+            .handle_initialize(&serde_json::json!({
+                "protocolVersion": "1.0",
+                "clientCapabilities": {
+                    "elicitation": { "form": {} }
+                }
+            }))
+            .unwrap();
+        let caps = *server.client_elicitation_caps.read().unwrap();
+        assert!(caps.form);
+        assert!(!caps.url);
+    }
+
+    #[test]
+    fn initialize_without_elicitation_leaves_default_caps() {
+        let server = AcpServer::new(Config::default(), AcpServerConfig::default());
+        let _ = server
+            .handle_initialize(&serde_json::json!({
+                "protocolVersion": "1.0",
+                "clientCapabilities": {}
+            }))
+            .unwrap();
+        let caps = *server.client_elicitation_caps.read().unwrap();
+        assert!(!caps.form);
+        assert!(!caps.url);
+    }
+
+    #[test]
+    fn initialize_advertises_load_session_when_store_present() {
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let server = AcpServer::new_with_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            store,
+        );
+        let result = server.handle_initialize(&serde_json::json!({})).unwrap();
+        assert_eq!(result["agentCapabilities"]["loadSession"], true);
+        assert_eq!(
+            result["agentCapabilities"]["sessionCapabilities"]["resume"],
+            serde_json::json!({})
+        );
+        assert_eq!(
+            result["agentCapabilities"]["sessionCapabilities"]["close"],
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn session_new_omits_cwd_when_client_does_not_specify() {
+        let config = Config {
+            data_dir: PathBuf::from("/not/the/project"),
+            ..Default::default()
+        };
+        let server = AcpServer::new(config, AcpServerConfig::default());
+
+        assert_eq!(server.requested_session_cwd(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn session_new_respects_client_cwd_when_present() {
+        let server = AcpServer::new(Config::default(), AcpServerConfig::default());
+        let cwd = std::env::current_dir().unwrap();
+
+        assert_eq!(
+            server.requested_session_cwd(&serde_json::json!({"cwd": cwd})),
+            Some(cwd),
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_ignores_cwd_when_equal_to_install_root() {
+        // When a client passes cwd = '.' (resolved to the install root), the
+        // session must still use the per-agent workspace — not the daemon cwd.
+        let cwd = tempfile::tempdir().unwrap();
+        // A fully-wired config (valid `anthropic.default` provider + `test-agent`)
+        // so agent construction succeeds. A failing construction would emit the
+        // shared "ACP session/new failed" log line and race the attribution test
+        // that matches events by message text alone.
+        let mut config = make_test_config(cwd.path());
+        // Pin the install root to the temp dir (parent of config_path) so
+        // install_root_dir() resolves to a real, canonicalizable directory.
+        config.config_path = cwd.path().join("config.toml");
+        let server = AcpServer::new(config, AcpServerConfig::default());
+        let snapshot = server.config_snapshot();
+        let install_root = snapshot.install_root_dir();
+        let expected_workspace = snapshot.agent_workspace_dir("test-agent");
+
+        // Pass install_root as cwd — simulates what Thunderbolt does with cwd: '.'
+        let result = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": install_root.to_string_lossy(),
+                "agentAlias": "test-agent",
+            }))
+            .await
+            .expect("session/new must succeed");
+
+        let session_workspace = result["workspaceDir"].as_str().unwrap();
+
+        // Positive contract: workspaceDir is exactly the per-agent workspace.
+        // Asserting the concrete value (not merely "!= install_root") is what
+        // makes this a real regression test — the per-agent workspace is a
+        // subdirectory of the install root, so an inequality check passes even
+        // when the guard is removed and cannot detect the regression.
+        assert_eq!(
+            session_workspace,
+            expected_workspace.to_string_lossy(),
+            "cwd equal to install_root must resolve to the per-agent workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_pins_explicit_subdir_under_install_root() {
+        // A client that explicitly narrows the session to a subdirectory under
+        // the install root must have that exact directory honored as the
+        // file-access boundary. Only a cwd equal to the install root itself is
+        // treated as the '.' placeholder; anything narrower must NOT be widened
+        // back to the whole per-agent workspace.
+        let cwd = tempfile::tempdir().unwrap();
+        let mut config = make_test_config(cwd.path());
+        config.config_path = cwd.path().join("config.toml");
+        let server = AcpServer::new(config, AcpServerConfig::default());
+        let snapshot = server.config_snapshot();
+        let install_root = snapshot.install_root_dir();
+        let agent_workspace = snapshot.agent_workspace_dir("test-agent");
+
+        // A real, canonicalizable subdirectory under the install root that is
+        // NOT the per-agent workspace, so the two outcomes are distinguishable.
+        let explicit_subdir = install_root.join("project-subdir");
+        std::fs::create_dir_all(&explicit_subdir).unwrap();
+        let expected = std::fs::canonicalize(&explicit_subdir).unwrap();
+        assert_ne!(
+            expected,
+            std::fs::canonicalize(&agent_workspace).unwrap_or(agent_workspace),
+            "test setup: the explicit subdir must differ from the agent workspace"
+        );
+
+        let result = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": explicit_subdir.to_string_lossy(),
+                "agentAlias": "test-agent",
+            }))
+            .await
+            .expect("session/new must succeed");
+
+        let session_workspace = result["workspaceDir"].as_str().unwrap();
+        assert_eq!(
+            session_workspace,
+            expected.to_string_lossy(),
+            "an explicit subdirectory under the install root must be honored \
+             exactly, not widened to the per-agent workspace"
+        );
+    }
+
+    /// Front-door proof for the CLI stdio surface. The tests above call
+    /// `handle_session_new` directly; this one drives the real stdio serve loop
+    /// (`serve_reader`, the exact framing loop `run()` uses for `kinetic acp`)
+    /// through an in-memory pipe, feeding newline-delimited JSON-RPC just as an
+    /// editor/IDE ACP client would over the process's stdin. An omitted-`cwd`
+    /// `session/new` must return the per-agent workspace — the behavior this PR
+    /// introduces — not the daemon process CWD.
+    #[tokio::test]
+    async fn stdio_front_door_omitted_cwd_uses_agent_workspace() {
+        use tokio::io::AsyncWriteExt;
+
+        let cwd = tempfile::tempdir().unwrap();
+        let mut config = make_test_config(cwd.path());
+        // Pin config_path so `agent_workspace_dir` resolves under a real,
+        // canonicalizable install root.
+        config.config_path = cwd.path().join("config.toml");
+        let expected_ws = config
+            .agent_workspace_dir("test-agent")
+            .to_string_lossy()
+            .into_owned();
+
+        // The server writes response frames to `writer_rx`; no store, so
+        // `session/new` skips persistence.
+        let (writer_tx, mut writer_rx) = mpsc::channel::<String>(64);
+        let server = Arc::new(AcpServer::new_with_writer(
+            config,
+            AcpServerConfig::default(),
+            writer_tx,
+        ));
+
+        // In-memory stdin: the server reads `server_stdin`; the test writes
+        // framed JSON-RPC to `client`.
+        let (mut client, server_stdin) = tokio::io::duplex(4096);
+        let reader = Arc::clone(&server);
+        let reader_task =
+            kinetic_spawn::spawn!(async move { reader.serve_reader(server_stdin).await });
+
+        client
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n")
+            .await
+            .unwrap();
+        client
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/new\",\
+                  \"params\":{\"agentAlias\":\"test-agent\"}}\n",
+            )
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+
+        let workspace_dir = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(frame) = writer_rx.recv().await {
+                let value: Value = match serde_json::from_str(&frame) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if value.get("id").and_then(|i| i.as_i64()) == Some(2) {
+                    if let Some(err) = value.get("error") {
+                        panic!("session/new returned an error: {err}");
+                    }
+                    return value["result"]["workspaceDir"].as_str().map(String::from);
+                }
+            }
+            None
+        })
+        .await
+        .expect("session/new response should arrive before timeout");
+
+        drop(client); // EOF → serve_reader returns
+        let _ = reader_task.await;
+
+        assert_eq!(
+            workspace_dir.as_deref(),
+            Some(expected_ws.as_str()),
+            "omitted-cwd session/new over the real stdio serve loop must return \
+             the per-agent workspace, not the daemon CWD"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn session_new_agent_init_failure_log_is_attributed_and_redacted() {
+        let _writer_guard = kinetic_log::__private_test_writer_lock();
+        let _hook_guard = kinetic_log::__private_test_hook_lock();
+        kinetic_log::try_install_capture_subscriber();
+        let mut rx = kinetic_log::subscribe_or_install();
+        while rx.try_recv().is_ok() {}
+
+        const EXPOSED_PREFIX: &str = "sk-ant-z";
+        let cwd = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            data_dir: cwd.path().to_path_buf(),
+            providers: {
+                let mut providers = kinetic_config::providers::Providers::default();
+                providers.models.openrouter.insert(
+                    "default".to_string(),
+                    kinetic_config::schema::OpenRouterModelProviderConfig {
+                        base: kinetic_config::schema::ModelProviderConfig {
+                            api_key: Some("sk-ant-kinetic_test_credential".to_string()),
+                            model: Some("test-model".to_string()),
+                            ..Default::default()
+                        },
+                    },
+                );
+                providers
+            },
+            ..Default::default()
+        };
+        config.risk_profiles.insert(
+            "default".to_string(),
+            kinetic_config::schema::RiskProfileConfig::default(),
+        );
+        config.agents.insert(
+            "test-agent".to_string(),
+            dispatchable_test_agent("openrouter.default"),
+        );
+        let server = AcpServer::new(config, AcpServerConfig::default());
+
+        let error = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent",
+            }))
+            .await
+            .expect_err("the mismatched credential must fail agent construction");
+        assert!(
+            error.message.contains("API key prefix mismatch"),
+            "the RPC error must retain the agent construction failure: {}",
+            error.message
+        );
+        assert!(error.message.contains("[REDACTED]"));
+        assert!(
+            !error.message.contains(EXPOSED_PREFIX),
+            "the RPC error must not expose the credential fragment: {}",
+            error.message
+        );
+
+        let deadline = std::time::Instant::now() + DEADLOCK_GUARD;
+        let event = loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "agent init failure event was not emitted"
+            );
+            match tokio::time::timeout(remaining.min(Duration::from_millis(50)), rx.recv()).await {
+                Ok(Ok(value))
+                    if value.get("message").and_then(Value::as_str)
+                        == Some("ACP session/new failed: agent init error") =>
+                {
+                    break value;
+                }
+                Ok(Ok(_)) | Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {}
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                    panic!("log broadcast closed before the agent init failure event")
+                }
+                Err(_elapsed) => {}
+            }
+        };
+
+        assert_eq!(event["severity_text"], "ERROR");
+        assert_eq!(event["event"]["category"], "channel");
+        assert_eq!(event["event"]["action"], "fail");
+        assert_eq!(event["event"]["outcome"], "failure");
+        assert_eq!(event["kinetic"]["channel_type"], "acp");
+        assert_eq!(event["kinetic"]["agent_alias"], "test-agent");
+        assert_eq!(event["kinetic"]["model_provider"], "openrouter.default");
+        assert_eq!(event["kinetic"]["model"], "test-model");
+        assert!(
+            event["kinetic"]["session_key"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+            "the generated session key must be harvested as attribution: {event}"
+        );
+        assert_eq!(
+            event["attributes"]["workspace_dir"],
+            std::fs::canonicalize(cwd.path())
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        );
+        let logged_error = event["attributes"]["error"]
+            .as_str()
+            .expect("the failure event must retain sanitized error detail");
+        assert!(logged_error.contains("API key prefix mismatch"));
+        assert!(logged_error.contains("openrouter"));
+        assert!(logged_error.contains("[REDACTED]"));
+        assert!(
+            !logged_error.contains(EXPOSED_PREFIX),
+            "the persisted event must not contain the credential fragment: {logged_error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_auto_selects_sole_configured_agent_when_alias_omitted() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            data_dir: cwd.path().to_path_buf(),
+            providers: {
+                let mut p = kinetic_config::providers::Providers::default();
+                p.models.openrouter.insert(
+                    "default".to_string(),
+                    kinetic_config::schema::OpenRouterModelProviderConfig {
+                        base: kinetic_config::schema::ModelProviderConfig {
+                            api_key: Some("test-key".to_string()),
+                            model: Some("test-model".to_string()),
+                            ..Default::default()
+                        },
+                    },
+                );
+                p
+            },
+            ..Default::default()
+        };
+        config.risk_profiles.insert(
+            "default".to_string(),
+            kinetic_config::schema::RiskProfileConfig::default(),
+        );
+        config.runtime_profiles.insert(
+            "default".to_string(),
+            kinetic_config::schema::RuntimeProfileConfig::default(),
+        );
+        config.agents.insert(
+            "only-agent".to_string(),
+            dispatchable_test_agent("openrouter.default"),
+        );
+        let server = AcpServer::new(config, AcpServerConfig::default());
+
+        let result = tokio::time::timeout(
+            DEADLOCK_GUARD,
+            server.handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "mcpServers": []
+            })),
+        )
+        .await
+        .expect("session/new should not block")
+        .expect("session/new should auto-select the sole configured agent");
+
+        assert!(result["sessionId"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn session_new_requires_alias_when_multiple_agents_configured() {
+        let mut config = Config::default();
+        config.agents.insert(
+            "agent-one".to_string(),
+            kinetic_config::schema::AliasedAgentConfig::default(),
+        );
+        config.agents.insert(
+            "agent-two".to_string(),
+            kinetic_config::schema::AliasedAgentConfig::default(),
+        );
+        let server = AcpServer::new(config, AcpServerConfig::default());
+
+        let err = server
+            .handle_session_new(&serde_json::json!({"mcpServers": []}))
+            .await
+            .expect_err("session/new without agentAlias should fail when multiple agents exist");
+
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert!(
+            err.message.contains("agentAlias"),
+            "error should mention agentAlias, got: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_uses_config_default_agent_when_alias_omitted_and_multiple_agents() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            data_dir: cwd.path().to_path_buf(),
+            providers: {
+                let mut p = kinetic_config::providers::Providers::default();
+                p.models.openrouter.insert(
+                    "default".to_string(),
+                    kinetic_config::schema::OpenRouterModelProviderConfig {
+                        base: kinetic_config::schema::ModelProviderConfig {
+                            api_key: Some("test-key".to_string()),
+                            model: Some("test-model".to_string()),
+                            ..Default::default()
+                        },
+                    },
+                );
+                p
+            },
+            ..Default::default()
+        };
+        config.risk_profiles.insert(
+            "default".to_string(),
+            kinetic_config::schema::RiskProfileConfig::default(),
+        );
+        config.runtime_profiles.insert(
+            "default".to_string(),
+            kinetic_config::schema::RuntimeProfileConfig::default(),
+        );
+        config.agents.insert(
+            "agent-alpha".to_string(),
+            dispatchable_test_agent("openrouter.default"),
+        );
+        config.agents.insert(
+            "agent-beta".to_string(),
+            dispatchable_test_agent("openrouter.default"),
+        );
+        config.acp.default_agent = Some("agent-alpha".to_string());
+        let server = AcpServer::new(config, AcpServerConfig::default());
+
+        let result = tokio::time::timeout(
+            DEADLOCK_GUARD,
+            server.handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "mcpServers": []
+            })),
+        )
+        .await
+        .expect("should not block")
+        .expect("should select agent-alpha from config.acp.default_agent");
+
+        assert!(result["sessionId"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn session_new_explicit_alias_overrides_config_default_agent() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut config = Config {
+            data_dir: cwd.path().to_path_buf(),
+            providers: {
+                let mut p = kinetic_config::providers::Providers::default();
+                p.models.openrouter.insert(
+                    "default".to_string(),
+                    kinetic_config::schema::OpenRouterModelProviderConfig {
+                        base: kinetic_config::schema::ModelProviderConfig {
+                            api_key: Some("test-key".to_string()),
+                            model: Some("test-model".to_string()),
+                            ..Default::default()
+                        },
+                    },
+                );
+                p
+            },
+            ..Default::default()
+        };
+        config.risk_profiles.insert(
+            "default".to_string(),
+            kinetic_config::schema::RiskProfileConfig::default(),
+        );
+        config.runtime_profiles.insert(
+            "default".to_string(),
+            kinetic_config::schema::RuntimeProfileConfig::default(),
+        );
+        config.agents.insert(
+            "agent-alpha".to_string(),
+            dispatchable_test_agent("openrouter.default"),
+        );
+        config.agents.insert(
+            "agent-beta".to_string(),
+            dispatchable_test_agent("openrouter.default"),
+        );
+        config.acp.default_agent = Some("agent-alpha".to_string());
+        let server = AcpServer::new(config, AcpServerConfig::default());
+
+        // Explicit alias should win over config default
+        let result = tokio::time::timeout(
+            DEADLOCK_GUARD,
+            server.handle_session_new(&serde_json::json!({
+                "agentAlias": "agent-beta",
+                "cwd": cwd.path().to_string_lossy(),
+                "mcpServers": []
+            })),
+        )
+        .await
+        .expect("should not block")
+        .expect("should use agent-beta despite default_agent = agent-alpha");
+
+        assert!(result["sessionId"].as_str().is_some());
+    }
+
+    /// `make_test_config` plus `agent-alpha`/`agent-beta`, for exercising the
+    /// connection-default slot of the `session/new` alias precedence chain.
+    fn dispatchable_test_agent(model_provider: &str) -> kinetic_config::schema::AliasedAgentConfig {
+        kinetic_config::schema::AliasedAgentConfig {
+            model_provider: model_provider.into(),
+            risk_profile: "default".into(),
+            runtime_profile: "default".into(),
+            ..Default::default()
+        }
+    }
+
+    fn two_agent_config(cwd: &std::path::Path) -> Config {
+        let mut cfg = make_test_config(cwd);
+        for alias in ["agent-alpha", "agent-beta"] {
+            cfg.agents.insert(
+                alias.to_string(),
+                dispatchable_test_agent("anthropic.default"),
+            );
+        }
+        cfg
+    }
+
+    async fn session_agent_alias(server: &AcpServer, session_id: &str) -> String {
+        let sessions = server.sessions.lock().await;
+        let session = sessions.get(session_id).expect("session must exist");
+        let session = session.lock().await;
+        session.agent_alias.clone()
+    }
+
+    #[tokio::test]
+    async fn session_new_uses_connection_default_agent_when_alias_omitted() {
+        let cwd = tempfile::tempdir().unwrap();
+        let server = AcpServer::new(two_agent_config(cwd.path()), AcpServerConfig::default())
+            .with_connection_default_agent(Some("agent-beta".to_string()));
+
+        let result = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "mcpServers": []
+            }))
+            .await
+            .expect("session/new should use the connection default agent");
+
+        let session_id = result["sessionId"].as_str().unwrap();
+        assert_eq!(session_agent_alias(&server, session_id).await, "agent-beta");
+    }
+
+    #[tokio::test]
+    async fn session_new_explicit_alias_overrides_connection_default_agent() {
+        let cwd = tempfile::tempdir().unwrap();
+        let server = AcpServer::new(two_agent_config(cwd.path()), AcpServerConfig::default())
+            .with_connection_default_agent(Some("agent-beta".to_string()));
+
+        let result = server
+            .handle_session_new(&serde_json::json!({
+                "agentAlias": "agent-alpha",
+                "cwd": cwd.path().to_string_lossy(),
+                "mcpServers": []
+            }))
+            .await
+            .expect("explicit agentAlias should win over the connection default");
+
+        let session_id = result["sessionId"].as_str().unwrap();
+        assert_eq!(
+            session_agent_alias(&server, session_id).await,
+            "agent-alpha"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_connection_default_agent_overrides_config_default_agent() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut config = two_agent_config(cwd.path());
+        config.acp.default_agent = Some("agent-alpha".to_string());
+        let server = AcpServer::new(config, AcpServerConfig::default())
+            .with_connection_default_agent(Some("agent-beta".to_string()));
+
+        let result = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "mcpServers": []
+            }))
+            .await
+            .expect("connection default should win over [acp].default_agent");
+
+        let session_id = result["sessionId"].as_str().unwrap();
+        assert_eq!(session_agent_alias(&server, session_id).await, "agent-beta");
+    }
+
+    #[tokio::test]
+    async fn session_new_unknown_connection_default_agent_errors_like_explicit_alias() {
+        let cwd = tempfile::tempdir().unwrap();
+        let server = AcpServer::new(two_agent_config(cwd.path()), AcpServerConfig::default())
+            .with_connection_default_agent(Some("ghost".to_string()));
+
+        let err = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "mcpServers": []
+            }))
+            .await
+            .expect_err("an unconfigured connection default must fail session/new");
+
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert!(
+            err.message.contains("Unknown agent"),
+            "error should reuse the explicit-alias validation message, got: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_blank_connection_default_agent_is_treated_as_absent() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut config = two_agent_config(cwd.path());
+        config.acp.default_agent = Some("agent-alpha".to_string());
+        let server = AcpServer::new(config, AcpServerConfig::default())
+            .with_connection_default_agent(Some("  ".to_string()));
+
+        let result = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "mcpServers": []
+            }))
+            .await
+            .expect("blank connection default should fall through to config default");
+
+        let session_id = result["sessionId"].as_str().unwrap();
+        assert_eq!(
+            session_agent_alias(&server, session_id).await,
+            "agent-alpha"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_load_restore_ignores_connection_default_when_persisted_agent_deleted() {
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+
+        let session_id = "sess-restore-ignores-conn-default";
+        store
+            .create_session(
+                session_id,
+                "ghost-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+
+        let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let mut config = two_agent_config(cwd.path());
+        config.acp.default_agent = Some("agent-alpha".to_string());
+        let server = AcpServer::new_with_writer_and_store(
+            config,
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        )
+        .with_connection_default_agent(Some("agent-beta".to_string()));
+
+        server
+            .handle_session_load(&serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/load must succeed for a deleted persisted agent");
+
+        // Operator `[acp].default_agent` wins; `?agent=` must not rebind restore.
+        assert_eq!(
+            session_agent_alias(&server, session_id).await,
+            "agent-alpha"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_disabled_connection_default_agent_errors_like_explicit_alias() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut config = two_agent_config(cwd.path());
+        config.agents.get_mut("agent-beta").unwrap().enabled = false;
+        let server = AcpServer::new(config, AcpServerConfig::default())
+            .with_connection_default_agent(Some("agent-beta".to_string()));
+
+        let err = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "mcpServers": []
+            }))
+            .await
+            .expect_err("a disabled connection default must fail session/new");
+
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert!(
+            err.message.contains("not enabled for dispatch"),
+            "expected disabled-agent error, got: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_disabled_explicit_alias_errors() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut config = two_agent_config(cwd.path());
+        config.agents.get_mut("agent-beta").unwrap().enabled = false;
+        let server = AcpServer::new(config, AcpServerConfig::default());
+
+        let err = server
+            .handle_session_new(&serde_json::json!({
+                "agentAlias": "agent-beta",
+                "cwd": cwd.path().to_string_lossy(),
+                "mcpServers": []
+            }))
+            .await
+            .expect_err("explicit disabled alias must fail session/new");
+
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert!(err.message.contains("not enabled for dispatch"));
+    }
+
+    #[tokio::test]
+    async fn session_load_restore_skips_missing_config_default_to_sole_agent() {
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+
+        let session_id = "sess-restore-missing-config-default";
+        store
+            .create_session(
+                session_id,
+                "ghost-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+
+        let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let mut config = make_test_config(cwd.path());
+        config.agents.clear();
+        config.agents.insert(
+            "agent-beta".to_string(),
+            dispatchable_test_agent("anthropic.default"),
+        );
+        // Missing config default is skipped; sole configured agent applies.
+        // Connection default stays out of the restore chain.
+        config.acp.default_agent = Some("agent-alpha".to_string());
+        let server = AcpServer::new_with_writer_and_store(
+            config,
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        )
+        .with_connection_default_agent(Some("ghost".to_string()));
+
+        server
+            .handle_session_load(&serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/load must skip a missing config default");
+
+        assert_eq!(session_agent_alias(&server, session_id).await, "agent-beta");
+    }
+
+    #[tokio::test]
+    async fn session_resume_restore_skips_disabled_persisted_owner() {
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+
+        let session_id = "sess-resume-disabled-owner";
+        store
+            .create_session(
+                session_id,
+                "agent-alpha",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+
+        let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let mut config = two_agent_config(cwd.path());
+        config.agents.insert(
+            "agent-gamma".to_string(),
+            dispatchable_test_agent("anthropic.default"),
+        );
+        config.agents.get_mut("agent-alpha").unwrap().enabled = false;
+        config.acp.default_agent = Some("agent-beta".to_string());
+        let server = AcpServer::new_with_writer_and_store(
+            config,
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        )
+        // Tempting transport rebind — must lose to operator default.
+        .with_connection_default_agent(Some("agent-gamma".to_string()));
+
+        server
+            .handle_session_resume(&serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/resume must skip a disabled persisted owner");
+
+        assert_eq!(session_agent_alias(&server, session_id).await, "agent-beta");
+    }
+
+    #[tokio::test]
+    async fn session_resume_restore_ignores_connection_default_when_persisted_agent_deleted() {
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+
+        let session_id = "sess-resume-ignores-conn-default";
+        store
+            .create_session(
+                session_id,
+                "ghost-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+
+        let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let mut config = two_agent_config(cwd.path());
+        config.acp.default_agent = Some("agent-alpha".to_string());
+        let server = AcpServer::new_with_writer_and_store(
+            config,
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        )
+        .with_connection_default_agent(Some("agent-beta".to_string()));
+
+        server
+            .handle_session_resume(&serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/resume must succeed for a deleted persisted agent");
+
+        assert_eq!(
+            session_agent_alias(&server, session_id).await,
+            "agent-alpha"
+        );
+    }
+
+    #[test]
+    fn json_rpc_error_response_serialize() {
+        let resp = JsonRpcResponse {
+            jsonrpc: "2.0",
+            result: None,
+            error: Some(JsonRpcError {
+                code: METHOD_NOT_FOUND,
+                message: "Method not found".to_string(),
+                data: None,
+            }),
+            id: Value::Number(1.into()),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let parsed: Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed.get("error").is_some());
+        assert_eq!(parsed["error"]["code"], -32601);
+        assert!(parsed.get("result").is_none());
+    }
+
+    #[test]
+    fn json_rpc_notification_serialize() {
+        let notif = JsonRpcNotification {
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: serde_json::json!({
+                "sessionId": "test-sid",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "type": "text", "text": "hello" }
+                }
+            }),
+        };
+        let json = serde_json::to_string(&notif).unwrap();
+        assert!(json.contains(r#""method":"session/update""#));
+        assert!(json.contains(r#""sessionUpdate":"agent_message_chunk""#));
+        assert!(json.contains(r#""text":"hello""#));
+    }
+
+    #[tokio::test]
+    async fn acp_smoke_transcript_initialize_inbound_blob_outbound_delivery() {
+        struct ScriptedDeliverFileProvider {
+            requests: Arc<parking_lot::Mutex<Vec<Vec<ChatMessage>>>>,
+            calls: std::sync::atomic::AtomicUsize,
+            forbidden_blobs: [String; 2],
+        }
+
+        impl kinetic_api::attribution::Attributable for ScriptedDeliverFileProvider {
+            fn role(&self) -> kinetic_api::attribution::Role {
+                kinetic_api::attribution::Role::Provider(
+                    kinetic_api::attribution::ProviderKind::Model(
+                        kinetic_api::attribution::ModelProviderKind::Custom,
+                    ),
+                )
+            }
+
+            fn alias(&self) -> &str {
+                "ScriptedDeliverFileProvider"
+            }
+        }
+
+        #[async_trait]
+        impl ModelProvider for ScriptedDeliverFileProvider {
+            fn capabilities(&self) -> kinetic_api::model_provider::ProviderCapabilities {
+                kinetic_api::model_provider::ProviderCapabilities {
+                    native_tool_calling: true,
+                    ..Default::default()
+                }
+            }
+
+            async fn chat_with_system(
+                &self,
+                _system_prompt: Option<&str>,
+                _message: &str,
+                _model: &str,
+                _temperature: Option<f64>,
+            ) -> anyhow::Result<String> {
+                anyhow::bail!("the ACP smoke must use structured native tool calling")
+            }
+
+            async fn chat(
+                &self,
+                request: kinetic_api::model_provider::ChatRequest<'_>,
+                _model: &str,
+                _temperature: Option<f64>,
+            ) -> anyhow::Result<kinetic_api::model_provider::ChatResponse> {
+                self.requests.lock().push(request.messages.to_vec());
+                match self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+                    0 => {
+                        let deliver_file = request
+                            .tools
+                            .and_then(|tools| tools.iter().find(|tool| tool.name == "deliver_file"))
+                            .ok_or_else(|| anyhow::Error::msg("deliver_file was not offered"))?;
+                        anyhow::ensure!(
+                            deliver_file.parameters["required"].as_array().is_some_and(
+                                |required| required.iter().any(|value| value == "path")
+                            ),
+                            "deliver_file path requirement was not exposed"
+                        );
+                        Ok(kinetic_api::model_provider::ChatResponse {
+                            text: None,
+                            tool_calls: vec![ToolCall {
+                                id: "tc-deliver".to_string(),
+                                name: "deliver_file".to_string(),
+                                arguments: serde_json::json!({
+                                    "path": "out.pdf",
+                                    "mimeType": "application/pdf"
+                                })
+                                .to_string(),
+                                extra_content: None,
+                            }],
+                            usage: None,
+                            reasoning_content: None,
+                        })
+                    }
+                    1 => {
+                        let correlated_result = request.messages.iter().find(|message| {
+                            if message.role != "tool" {
+                                return false;
+                            }
+                            let Ok(value) = serde_json::from_str::<Value>(&message.content) else {
+                                return false;
+                            };
+                            value["tool_call_id"] == "tc-deliver"
+                                && value["content"].as_str().is_some_and(|content| {
+                                    content.contains("Delivered out.pdf")
+                                        && content.contains("attachment://deliver/")
+                                })
+                        });
+                        anyhow::ensure!(
+                            correlated_result.is_some(),
+                            "the correlated deliver_file result was not returned to the provider"
+                        );
+                        anyhow::ensure!(
+                            request.messages.iter().all(|message| self
+                                .forbidden_blobs
+                                .iter()
+                                .all(|blob| !message.content.contains(blob))),
+                            "base64 leaked into the provider-visible tool round"
+                        );
+                        Ok(kinetic_api::model_provider::ChatResponse {
+                            text: Some("Delivered the requested file.".to_string()),
+                            tool_calls: Vec::new(),
+                            usage: None,
+                            reasoning_content: None,
+                        })
+                    }
+                    _ => anyhow::bail!("unexpected extra provider request"),
+                }
+            }
+        }
+
+        async fn response_for_id(
+            writer_rx: &mut tokio::sync::mpsc::Receiver<String>,
+            id: i64,
+        ) -> Value {
+            tokio::time::timeout(DEADLOCK_GUARD, async {
+                loop {
+                    let wire = writer_rx.recv().await.expect("ACP writer must remain open");
+                    let value: Value = serde_json::from_str(&wire).expect("valid JSON-RPC frame");
+                    if value.get("id").and_then(Value::as_i64) == Some(id) {
+                        return value;
+                    }
+                }
+            })
+            .await
+            .expect("ACP response deadline")
+        }
+
+        let workspace = tempfile::tempdir().unwrap();
+        let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<String>(32);
+        let mut config = make_test_config(workspace.path());
+        config
+            .risk_profiles
+            .get_mut("default")
+            .expect("default risk profile")
+            .auto_approve
+            .push("deliver_file".to_string());
+        let server = Arc::new(AcpServer::new_with_writer(
+            config,
+            AcpServerConfig::default(),
+            writer_tx,
+        ));
+
+        server
+            .process_line(
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": 1,
+                        "clientCapabilities": {},
+                        "clientInfo": { "name": "smoke-client", "version": "1.0.0" }
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+        let init = response_for_id(&mut writer_rx, 1).await;
+        assert_eq!(init["result"]["protocolVersion"], 1);
+        assert_eq!(
+            init["result"]["agentCapabilities"]["promptCapabilities"]["embeddedContext"],
+            true
+        );
+
+        server
+            .process_line(
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "session/new",
+                    "params": {
+                        "cwd": workspace.path().to_string_lossy(),
+                        "agentAlias": "test-agent"
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+        let new_session = response_for_id(&mut writer_rx, 2).await;
+        let session_id = new_session["result"]["sessionId"]
+            .as_str()
+            .expect("session/new response must contain a session id")
+            .to_string();
+
+        let outbound = b"%PDF-outbound-doc";
+        let outbound_b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, outbound);
+        let inbound = b"%PDF-inbound-doc";
+        let inbound_b64 =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, inbound);
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let session = server
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+            .expect("session/new must register the session");
+        {
+            let mut session = session.lock().await;
+            session
+                .agent
+                .set_model_provider(Box::new(ScriptedDeliverFileProvider {
+                    requests: Arc::clone(&requests),
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                    forbidden_blobs: [inbound_b64.clone(), outbound_b64.clone()],
+                }));
+        }
+
+        std::fs::write(workspace.path().join("out.pdf"), outbound).unwrap();
+        assert!(
+            !workspace.path().join("uploads").exists(),
+            "the smoke must not preload the inbound resource"
+        );
+
+        server
+            .process_line(
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "session/prompt",
+                    "params": {
+                        "sessionId": session_id,
+                        "prompt": [{
+                            "type": "resource",
+                            "resource": {
+                                "uri": "file:///docs/in.pdf",
+                                "mimeType": "application/pdf",
+                                "blob": inbound_b64
+                            }
+                        }]
+                    }
+                })
+                .to_string(),
+            )
+            .await;
+
+        let frames = tokio::time::timeout(DEADLOCK_GUARD, async {
+            let mut frames = Vec::new();
+            loop {
+                let wire = writer_rx.recv().await.expect("ACP writer must remain open");
+                let value: Value = serde_json::from_str(&wire).expect("valid JSON-RPC frame");
+                let is_prompt_response = value.get("id").and_then(Value::as_i64) == Some(3);
+                frames.push(value);
+                if is_prompt_response {
+                    return frames;
+                }
+            }
+        })
+        .await
+        .expect("session/prompt response deadline");
+
+        let prompt_response = frames
+            .iter()
+            .find(|frame| frame.get("id").and_then(Value::as_i64) == Some(3))
+            .expect("session/prompt response");
+        assert_eq!(prompt_response["result"]["stopReason"], "end_turn");
+        assert_eq!(
+            prompt_response["result"]["content"],
+            "Delivered the requested file."
+        );
+
+        let tool_call = frames
+            .iter()
+            .find(|frame| {
+                frame
+                    .pointer("/params/update/sessionUpdate")
+                    .and_then(Value::as_str)
+                    == Some("tool_call")
+            })
+            .expect("wire-visible tool_call notification");
+        let tool_update = frames
+            .iter()
+            .find(|frame| {
+                frame
+                    .pointer("/params/update/sessionUpdate")
+                    .and_then(Value::as_str)
+                    == Some("tool_call_update")
+            })
+            .expect("wire-visible tool_call_update notification");
+        assert_eq!(tool_call["params"]["update"]["toolCallId"], "tc-deliver");
+        assert_eq!(tool_update["params"]["update"]["toolCallId"], "tc-deliver");
+
+        let resource = tool_update["params"]["update"]["content"]
+            .as_array()
+            .expect("tool update content")
+            .iter()
+            .find_map(|content| content.pointer("/content/resource"))
+            .expect("outbound resource blob");
+        let expected_uri = kinetic_runtime::tools::attachment_deliver_uri(
+            &acp_embedded::content_hash_name(outbound, "pdf"),
+        );
+        assert_eq!(resource["uri"], expected_uri);
+        let wire_outbound_b64 = resource["blob"].as_str().expect("outbound blob");
+        assert_eq!(
+            base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                wire_outbound_b64
+            )
+            .unwrap(),
+            outbound
+        );
+        assert!(
+            !tool_update["params"]["update"]["rawOutput"]
+                .as_str()
+                .expect("model-facing rawOutput")
+                .contains(wire_outbound_b64),
+            "rawOutput must not contain the delivered base64"
+        );
+
+        let uploads: Vec<Vec<u8>> = std::fs::read_dir(workspace.path().join("uploads"))
+            .unwrap()
+            .map(|entry| std::fs::read(entry.unwrap().path()).unwrap())
+            .collect();
+        assert!(
+            uploads.iter().any(|bytes| bytes == inbound),
+            "session/prompt must materialize the inbound resource"
+        );
+        assert!(
+            uploads.iter().any(|bytes| bytes == outbound),
+            "deliver_file must materialize the outbound resource"
+        );
+
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 2, "one tool round plus one terminal round");
+        assert!(
+            requests[0]
+                .iter()
+                .any(|message| message.content.contains("[Document: in.pdf]"))
+        );
+        for request in requests.iter() {
+            for message in request {
+                assert!(!message.content.contains(&inbound_b64));
+                assert!(!message.content.contains(&outbound_b64));
+            }
+        }
+    }
+
+    #[test]
+    fn materialize_prompt_writes_blob_and_returns_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"pdf-bytes";
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes);
+        let params = serde_json::json!({
+            "prompt": [{
+                "type": "resource",
+                "resource": {
+                    "uri": "file:///docs/a.pdf",
+                    "mimeType": "application/pdf",
+                    "blob": b64
+                }
+            }]
+        });
+        let result = AcpServer::materialize_prompt(&params, Some(dir.path())).unwrap();
+        assert!(result.contains("[Document: a.pdf]"));
+        assert!(result.contains("uploads"));
+        let uploads = dir.path().join("uploads");
+        assert!(uploads.exists());
+        let written: Vec<_> = std::fs::read_dir(&uploads).unwrap().collect();
+        assert_eq!(written.len(), 1);
+        assert_eq!(
+            std::fs::read(written[0].as_ref().unwrap().path()).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn materialize_prompt_blob_without_workspace_is_invalid() {
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"x");
+        let params = serde_json::json!({
+            "prompt": [{
+                "type": "resource",
+                "resource": { "uri": "file:///x.bin", "blob": b64 }
+            }]
+        });
+        let err = AcpServer::materialize_prompt(&params, None).unwrap_err();
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert!(err.message.contains("workspace"));
+    }
+
+    #[test]
+    fn materialize_prompt_rejects_bad_blob_base64() {
+        let dir = tempfile::tempdir().unwrap();
+        let params = serde_json::json!({
+            "prompt": [{
+                "type": "resource",
+                "resource": { "uri": "file:///x.bin", "blob": "%%%" }
+            }]
+        });
+        let err = AcpServer::materialize_prompt(&params, Some(dir.path())).unwrap_err();
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert!(err.message.to_lowercase().contains("base64"));
+    }
+
+    #[test]
+    fn materialize_prompt_stages_parts_and_writes_nothing_when_a_later_part_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let good =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"first-part");
+        let params = serde_json::json!({
+            "prompt": [
+                { "type": "resource", "resource": { "uri": "file:///a.bin", "blob": good } },
+                { "type": "resource", "resource": { "uri": "file:///b.bin", "blob": "%%%" } }
+            ]
+        });
+        let err = AcpServer::materialize_prompt(&params, Some(dir.path())).unwrap_err();
+        assert_eq!(err.code, INVALID_PARAMS);
+        // Staging validates every part before committing any, so the first (valid)
+        // blob must not have been written when the second part is invalid.
+        let uploads = dir.path().join("uploads");
+        let wrote_any = std::fs::read_dir(&uploads)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .any(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            })
+            .unwrap_or(false);
+        assert!(
+            !wrote_any,
+            "an invalid later part must leave no earlier file materialized"
+        );
+    }
+
+    #[test]
+    fn handle_initialize_default_model_absent_when_unconfigured() {
+        let server = AcpServer::new(Config::default(), AcpServerConfig::default());
+        let result = server.handle_initialize(&serde_json::json!({})).unwrap();
+        assert!(
+            result["_meta"]["kinetic"].get("defaultModel").is_none(),
+            "defaultModel must be absent when no model_provider is configured, got: {}",
+            result["_meta"]["kinetic"]["defaultModel"]
+        );
+    }
+
+    #[test]
+    fn handle_initialize_default_model_reflects_configured_provider() {
+        use kinetic_config::schema::{ModelProviderConfig, OllamaModelProviderConfig};
+        let mut config = Config::default();
+        config.providers.models.ollama.insert(
+            "default".to_string(),
+            OllamaModelProviderConfig {
+                base: ModelProviderConfig {
+                    model: Some("llama3.2".to_string()),
+                    ..Default::default()
+                },
+                ..OllamaModelProviderConfig::default()
+            },
+        );
+        let server = AcpServer::new(config, AcpServerConfig::default());
+        let result = server.handle_initialize(&serde_json::json!({})).unwrap();
+        assert_eq!(result["_meta"]["kinetic"]["defaultModel"], "llama3.2");
+    }
+
+    #[test]
+    fn handle_initialize_default_model_prefers_default_session_agent() {
+        use kinetic_config::schema::{
+            ModelProviderConfig, OllamaModelProviderConfig, OpenAIModelProviderConfig,
+        };
+        let mut config = Config::default();
+        // The install-wide first configured model (the openai slot precedes
+        // ollama in slot order) differs from the default agent's entry, so the
+        // assertion proves the agent binding wins over the install-wide pick.
+        config.providers.models.openai.insert(
+            "install".to_string(),
+            OpenAIModelProviderConfig {
+                base: ModelProviderConfig {
+                    model: Some("install-wide-model".to_string()),
+                    ..Default::default()
+                },
+            },
+        );
+        config.providers.models.ollama.insert(
+            "secondary".to_string(),
+            OllamaModelProviderConfig {
+                base: ModelProviderConfig {
+                    model: Some("default-agent-model".to_string()),
+                    ..Default::default()
+                },
+                ..OllamaModelProviderConfig::default()
+            },
+        );
+        config.agents.insert(
+            "first".to_string(),
+            dispatchable_test_agent("openai.install"),
+        );
+        config.agents.insert(
+            "second".to_string(),
+            dispatchable_test_agent("ollama.secondary"),
+        );
+        config.acp.default_agent = Some("second".to_string());
+
+        let server = AcpServer::new(config, AcpServerConfig::default());
+        let result = server.handle_initialize(&serde_json::json!({})).unwrap();
+        assert_eq!(
+            result["_meta"]["kinetic"]["defaultModel"], "default-agent-model",
+            "defaultModel must follow [acp].default_agent's entry, not the install-wide \
+             first entry"
+        );
+    }
+
+    #[test]
+    fn handle_initialize_omits_default_model_for_unknown_connection_default() {
+        use kinetic_config::schema::{ModelProviderConfig, OpenAIModelProviderConfig};
+        let mut config = Config::default();
+        config.providers.models.openai.insert(
+            "install".to_string(),
+            OpenAIModelProviderConfig {
+                base: ModelProviderConfig {
+                    model: Some("install-wide-model".to_string()),
+                    ..Default::default()
+                },
+            },
+        );
+
+        let server = AcpServer::new(config, AcpServerConfig::default())
+            .with_connection_default_agent(Some("missing-agent".to_string()));
+        let result = server.handle_initialize(&serde_json::json!({})).unwrap();
+        assert!(
+            result["_meta"]["kinetic"].get("defaultModel").is_none(),
+            "an unknown connection default must not advertise the unrelated install-wide model"
+        );
+    }
+
+    #[test]
+    fn handle_initialize_omits_default_model_for_disabled_config_default() {
+        use kinetic_config::schema::{ModelProviderConfig, OpenAIModelProviderConfig};
+        let mut config = Config::default();
+        config.providers.models.openai.insert(
+            "install".to_string(),
+            OpenAIModelProviderConfig {
+                base: ModelProviderConfig {
+                    model: Some("install-wide-model".to_string()),
+                    ..Default::default()
+                },
+            },
+        );
+        let mut disabled = dispatchable_test_agent("openai.install");
+        disabled.enabled = false;
+        config.agents.insert("disabled".to_string(), disabled);
+        config.acp.default_agent = Some("disabled".to_string());
+
+        let server = AcpServer::new(config, AcpServerConfig::default());
+        let result = server.handle_initialize(&serde_json::json!({})).unwrap();
+        assert!(
+            result["_meta"]["kinetic"].get("defaultModel").is_none(),
+            "a disabled configured default must not advertise a model it cannot dispatch"
+        );
+    }
+
+    #[test]
+    fn prompt_result_preserves_content_string_shape() {
+        let result = AcpServer::prompt_result("test-sid".to_string(), "end_turn", "hello".into());
+        assert_eq!(result["sessionId"], "test-sid");
+        assert_eq!(result["stopReason"], "end_turn");
+        assert_eq!(result["content"], "hello");
+    }
+
+    #[test]
+    fn cancelled_prompt_result_preserves_content_string_shape() {
+        let with_partial =
+            AcpServer::cancelled_prompt_result("test-sid".to_string(), "partial text");
+        assert_eq!(with_partial["sessionId"], "test-sid");
+        assert_eq!(with_partial["stopReason"], "cancelled");
+        assert_eq!(
+            with_partial["content"],
+            format!(
+                "partial text\n\n{}",
+                kinetic_runtime::i18n::get_required_cli_string("turn-cancelled-client-rpc")
+            )
+        );
+
+        let marker_only = AcpServer::cancelled_prompt_result("test-sid".to_string(), "");
+        assert_eq!(
+            marker_only["content"],
+            kinetic_runtime::i18n::get_required_cli_string("turn-cancelled-client-rpc")
+        );
+    }
+
+    #[test]
+    fn test_tool_call_and_update_serialization() {
+        // Test tool_call (initial pending event)
+        let tool_call_notif = JsonRpcNotification {
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: serde_json::json!({
+                "sessionId": "test-sid",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "tc-12345",
+                    "name": "shell",
+                    "title": "shell",
+                    "kind": "execute",
+                    "rawInput": {"command": "ls -la"},
+                    "status": "pending"
+                }
+            }),
+        };
+        let json1 = serde_json::to_string(&tool_call_notif).unwrap();
+        assert!(json1.contains("\"sessionUpdate\":\"tool_call\""));
+        assert!(json1.contains("\"toolCallId\":\"tc-12345\""));
+        assert!(json1.contains("\"name\":\"shell\""));
+        assert!(json1.contains("\"title\":\"shell\""));
+        assert!(json1.contains("\"kind\":\"execute\""));
+        assert!(json1.contains("\"status\":\"pending\""));
+        assert!(json1.contains("\"rawInput\""));
+
+        // Test tool_call_update completion payload
+        let tool_update_notif = JsonRpcNotification {
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: serde_json::json!({
+                "sessionId": "test-sid",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "tc-12345",
+                    "name": "shell",
+                    "title": "shell",
+                    "kind": "execute",
+                    "status": "completed",
+                    "rawOutput": "file1.txt\nfile2.txt",
+                    "body": "file1.txt\nfile2.txt",
+                    "content": [{
+                        "type": "content",
+                        "content": {
+                            "type": "text",
+                            "text": "file1.txt\nfile2.txt"
+                        }
+                    }]
+                }
+            }),
+        };
+        let json2 = serde_json::to_string(&tool_update_notif).unwrap();
+        assert!(json2.contains("\"sessionUpdate\":\"tool_call_update\""));
+        assert!(json2.contains("\"toolCallId\":\"tc-12345\""));
+        assert!(json2.contains("\"name\":\"shell\""));
+        assert!(json2.contains("\"status\":\"completed\""));
+        assert!(json2.contains("\"rawOutput\""));
+        assert!(json2.contains("\"body\""));
+        assert!(json2.contains("\"content\""));
+        assert!(json2.contains("\"type\":\"content\""));
+        assert!(json2.contains("file1.txt"));
+        // Verify matching toolCallId across events
+        assert!(json1.contains("tc-12345") && json2.contains("tc-12345"));
+    }
+
+    #[test]
+    fn file_edit_raw_input_uses_acp_diff_field_names() {
+        let call = notification_for_turn_event(
+            "sid",
+            &TurnEvent::ToolCall {
+                id: "tc-1".to_string(),
+                name: "file_edit".to_string(),
+                args: serde_json::json!({
+                    "path": "src/foo.rs",
+                    "old_string": "let x = 1;",
+                    "new_string": "let x = 2;"
+                }),
+            },
+        );
+        let v = serde_json::to_value(call.unwrap()).unwrap();
+        let raw = &v["params"]["update"]["rawInput"];
+        assert_eq!(raw["path"], "src/foo.rs");
+        assert_eq!(raw["oldText"], "let x = 1;");
+        assert_eq!(raw["newText"], "let x = 2;");
+        assert!(
+            raw.get("old_string").is_none(),
+            "old_string must not appear in rawInput"
+        );
+        assert!(
+            raw.get("new_string").is_none(),
+            "new_string must not appear in rawInput"
+        );
+
+        let content = &v["params"]["update"]["content"];
+        assert!(content.is_array(), "file_edit must emit a content array");
+        let diff = &content[0];
+        assert_eq!(diff["type"], "diff");
+        assert_eq!(diff["path"], "src/foo.rs");
+        assert_eq!(diff["oldText"], "let x = 1;");
+        assert_eq!(diff["newText"], "let x = 2;");
+    }
+
+    #[test]
+    fn file_write_raw_input_uses_acp_diff_field_names() {
+        let call = notification_for_turn_event(
+            "sid",
+            &TurnEvent::ToolCall {
+                id: "tc-2".to_string(),
+                name: "file_write".to_string(),
+                args: serde_json::json!({
+                    "path": "src/new.rs",
+                    "content": "fn main() {}"
+                }),
+            },
+        );
+        let v = serde_json::to_value(call.unwrap()).unwrap();
+        let raw = &v["params"]["update"]["rawInput"];
+        assert_eq!(raw["path"], "src/new.rs");
+        assert_eq!(raw["newText"], "fn main() {}");
+        assert!(
+            raw.get("oldText").is_none(),
+            "oldText must not appear in file_write rawInput"
+        );
+        assert!(
+            raw.get("content").is_none(),
+            "content must not appear in rawInput"
+        );
+
+        let content = &v["params"]["update"]["content"];
+        assert!(content.is_array(), "file_write must emit a content array");
+        let diff = &content[0];
+        assert_eq!(diff["type"], "diff");
+        assert_eq!(diff["path"], "src/new.rs");
+        assert_eq!(diff["newText"], "fn main() {}");
+        assert!(
+            diff.get("oldText").is_none(),
+            "oldText must be absent for file_write diff"
+        );
+    }
+
+    #[test]
+    fn map_tool_kind_uses_explicit_tool_names() {
+        assert_eq!(map_tool_kind("memory_forget"), "delete");
+        assert_eq!(map_tool_kind("memory_purge"), "delete");
+        assert_eq!(map_tool_kind("cron_run"), "execute");
+        assert_eq!(map_tool_kind("file_read"), "other");
+        assert_eq!(map_tool_kind("deliver_file"), "other");
+        assert_eq!(map_tool_kind("knowledge"), "other");
+        assert_eq!(map_tool_kind("web_fetch"), "other");
+        assert_eq!(map_tool_kind("file_write"), "edit");
+        assert_eq!(map_tool_kind("unknown_tool"), "other");
+    }
+
+    #[test]
+    fn restore_trim_event_maps_to_extension_notification() {
+        let notification = notification_for_turn_event(
+            "restored-session",
+            &TurnEvent::HistoryTrimmed {
+                dropped_messages: 12,
+                dropped_turns: 4,
+                kept_turns: 3,
+                reason: "message limit".to_string(),
+                token_budget: Some(500_000),
+                tokens_before: Some(612_000),
+                tokens_after: Some(117_000),
+                tokens_before_source: Some(kinetic_api::agent::TokenCountSource::Provider),
+                tokens_after_source: Some(kinetic_api::agent::TokenCountSource::Calibrated),
+                unsatisfiable_floor: None,
+                retained_context: None,
+            },
+        )
+        .expect("history trim must produce an ACP notification");
+        let value = serde_json::to_value(notification).unwrap();
+
+        assert_eq!(value["method"], "_kinetic/history_trimmed");
+        assert_eq!(
+            value["params"],
+            serde_json::json!({
+                "sessionId": "restored-session",
+                "droppedMessages": 12,
+                "droppedTurns": 4,
+                "keptTurns": 3,
+                "reason": "message limit",
+                "tokenBudget": 500_000,
+                "tokensBefore": 612_000,
+                "tokensAfter": 117_000,
+                "tokensBeforeSource": "provider",
+                "tokensAfterSource": "calibrated",
+            })
+        );
+        assert!(value["params"].get("update").is_none());
+        assert!(!value.to_string().contains("sessionUpdate"));
+    }
+
+    #[test]
+    fn turn_tool_events_include_client_visible_tool_fields() {
+        let call = notification_for_turn_event(
+            "test-sid",
+            &TurnEvent::ToolCall {
+                id: "tc-12345".to_string(),
+                name: "shell".to_string(),
+                args: serde_json::json!({"command": "ls -la"}),
+            },
+        );
+        let call_value =
+            serde_json::to_value(call.expect("ToolCall maps to a notification")).unwrap();
+        assert_eq!(call_value["method"], "session/update");
+        assert_eq!(call_value["params"]["update"]["sessionUpdate"], "tool_call");
+        assert_eq!(call_value["params"]["update"]["toolCallId"], "tc-12345");
+        assert_eq!(call_value["params"]["update"]["name"], "shell");
+        assert_eq!(call_value["params"]["update"]["title"], "shell");
+        assert_eq!(call_value["params"]["update"]["kind"], "execute");
+        assert_eq!(
+            call_value["params"]["update"]["rawInput"],
+            serde_json::json!({"command": "ls -la"})
+        );
+
+        let result = notification_for_turn_event(
+            "test-sid",
+            &TurnEvent::ToolResult {
+                id: "tc-12345".to_string(),
+                name: "shell".to_string(),
+                output: "file1.txt\nfile2.txt".to_string(),
+                artifact: None,
+            },
+        );
+        let result_value =
+            serde_json::to_value(result.expect("ToolResult maps to a notification")).unwrap();
+        assert_eq!(
+            result_value["params"]["update"]["sessionUpdate"],
+            "tool_call_update"
+        );
+        assert_eq!(result_value["params"]["update"]["toolCallId"], "tc-12345");
+        assert_eq!(result_value["params"]["update"]["name"], "shell");
+        assert_eq!(result_value["params"]["update"]["title"], "shell");
+        assert_eq!(result_value["params"]["update"]["kind"], "execute");
+        assert_eq!(result_value["params"]["update"]["status"], "completed");
+        assert_eq!(
+            result_value["params"]["update"]["rawOutput"],
+            "file1.txt\nfile2.txt"
+        );
+        assert_eq!(
+            result_value["params"]["update"]["body"],
+            "file1.txt\nfile2.txt"
+        );
+        assert_eq!(
+            result_value["params"]["update"]["content"][0]["content"]["text"],
+            "file1.txt\nfile2.txt"
+        );
+    }
+
+    fn deliver_artifact(
+        path: &std::path::Path,
+        mime: &str,
+        uri: &str,
+        title: &str,
+    ) -> ToolArtifact {
+        // Empty `uri` means "use the real content-hash uri the tool would emit",
+        // so the ACP-side hash verification passes for the file's actual bytes.
+        let uri = if uri.is_empty() {
+            let bytes = std::fs::read(path).unwrap_or_default();
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default();
+            kinetic_runtime::tools::attachment_deliver_uri(&acp_embedded::content_hash_name(
+                &bytes, ext,
+            ))
+        } else {
+            uri.to_string()
+        };
+        ToolArtifact {
+            path: path.to_string_lossy().into_owned(),
+            uri,
+            filename: path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file")
+                .to_string(),
+            title: title.to_string(),
+            mime: mime.to_string(),
+            size: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+        }
+    }
+
+    #[test]
+    fn deliver_file_tool_result_drops_blob_when_file_is_swapped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.pdf");
+        std::fs::write(&path, b"%PDF").unwrap();
+        // Artifact carries the content-hash uri for the ORIGINAL bytes.
+        let artifact = deliver_artifact(&path, "application/pdf", "", "");
+        // Swap the file's content after deliver_file validated it (TOCTOU).
+        std::fs::write(&path, b"SWAPPED-DIFFERENT-CONTENT").unwrap();
+        let event = TurnEvent::ToolResult {
+            id: "tc1".into(),
+            name: "deliver_file".into(),
+            output: "Delivered x.pdf".into(),
+            artifact: Some(artifact),
+        };
+        let n = notification_for_turn_event("s1", &event).unwrap();
+        let content = n.params["update"]["content"].as_array().unwrap();
+        // Hash mismatch => no resource blob embedded; text-only fallback.
+        assert!(
+            content
+                .iter()
+                .all(|c| c.pointer("/content/type").and_then(|v| v.as_str()) != Some("resource")),
+            "swapped content must not be embedded"
+        );
+    }
+
+    #[test]
+    fn deliver_file_failed_embed_reports_failed_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.pdf");
+        std::fs::write(&path, b"%PDF").unwrap();
+        let artifact = deliver_artifact(&path, "application/pdf", "", "");
+        // Remove the file so the ACP-side embed read fails.
+        std::fs::remove_file(&path).unwrap();
+        let event = TurnEvent::ToolResult {
+            id: "tc1".into(),
+            name: "deliver_file".into(),
+            output: "Delivered x.pdf".into(),
+            artifact: Some(artifact),
+        };
+        let n = notification_for_turn_event("s1", &event).unwrap();
+        assert_eq!(
+            n.params["update"]["status"], "failed",
+            "a deliver_file result whose attachment cannot be embedded must report failed"
+        );
+    }
+
+    #[test]
+    fn deliver_file_tool_result_includes_resource_blob_not_in_raw_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.pdf");
+        std::fs::write(&path, b"%PDF").unwrap();
+        let output = "Delivered x.pdf (4 bytes)".to_string();
+
+        let event = TurnEvent::ToolResult {
+            id: "tc1".into(),
+            name: "deliver_file".into(),
+            output: output.clone(),
+            artifact: Some(deliver_artifact(&path, "application/pdf", "", "")),
+        };
+        let n = notification_for_turn_event("s1", &event).unwrap();
+        let update = &n.params["update"];
+        assert_eq!(update["rawOutput"], output);
+        let content = update["content"].as_array().unwrap();
+        assert!(content.iter().any(|c| {
+            c.pointer("/content/type").and_then(|v| v.as_str()) == Some("resource")
+                && c.pointer("/content/resource/blob")
+                    .and_then(|v| v.as_str())
+                    .is_some()
+                && c.pointer("/content/resource/mimeType")
+                    .and_then(|v| v.as_str())
+                    == Some("application/pdf")
+        }));
+        let raw = update["rawOutput"].as_str().unwrap();
+        assert!(!raw.contains("JVBE") && raw.len() < 10_000);
+        let blob = content
+            .iter()
+            .find_map(|c| c.pointer("/content/resource/blob").and_then(|v| v.as_str()))
+            .unwrap();
+        let decoded =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, blob).unwrap();
+        assert_eq!(decoded, b"%PDF");
+    }
+
+    #[test]
+    fn deliver_file_tool_call_update_title_uses_artifact_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.pdf");
+        std::fs::write(&path, b"%PDF").unwrap();
+        let event = TurnEvent::ToolResult {
+            id: "tc1".into(),
+            name: "deliver_file".into(),
+            output: "Delivered report.pdf (4 bytes)".into(),
+            artifact: Some(deliver_artifact(
+                &path,
+                "application/pdf",
+                "attachment://deliver/report.pdf",
+                "Quarterly report",
+            )),
+        };
+        let n = notification_for_turn_event("s1", &event).unwrap();
+        // The caller-supplied prose label (with its space) becomes the ACP title.
+        assert_eq!(n.params["update"]["title"], "Quarterly report");
+    }
+
+    #[test]
+    fn deliver_file_tool_call_update_title_falls_back_to_name_without_artifact_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.pdf");
+        std::fs::write(&path, b"%PDF").unwrap();
+        // No title on the artifact: fall back to the tool name.
+        let event = TurnEvent::ToolResult {
+            id: "tc1".into(),
+            name: "deliver_file".into(),
+            output: "Delivered x.pdf (4 bytes)".into(),
+            artifact: Some(deliver_artifact(&path, "application/pdf", "", "")),
+        };
+        let n = notification_for_turn_event("s1", &event).unwrap();
+        assert_eq!(n.params["update"]["title"], "deliver_file");
+    }
+
+    #[test]
+    fn deliver_file_resource_uri_is_the_content_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        // Filename looks hash-like on purpose; the resource uri must still be the
+        // opaque content hash, never the filename stem.
+        let path = dir.path().join("a1b2c3d4e5f6.pdf");
+        std::fs::write(&path, b"%PDF").unwrap();
+        let expected = kinetic_runtime::tools::attachment_deliver_uri(
+            &acp_embedded::content_hash_name(b"%PDF", "pdf"),
+        );
+
+        let event = TurnEvent::ToolResult {
+            id: "tc1".into(),
+            name: "deliver_file".into(),
+            output: "Delivered a1b2c3d4e5f6.pdf (4 bytes)".into(),
+            artifact: Some(deliver_artifact(&path, "application/pdf", "", "")),
+        };
+        let n = notification_for_turn_event("s1", &event).unwrap();
+        let update = &n.params["update"];
+        let content = update["content"].as_array().unwrap();
+        let resource_uri = content
+            .iter()
+            .find_map(|c| c.pointer("/content/resource/uri").and_then(|v| v.as_str()))
+            .expect("resource uri");
+        assert_eq!(resource_uri, expected);
+        assert!(!resource_uri.contains("a1b2c3d4e5f6"));
+        // No ACP protocol extension for pretty names:
+        assert!(
+            content
+                .iter()
+                .filter_map(|c| c.pointer("/content/resource"))
+                .all(|r| r.get("filename").is_none()),
+            "resource must not carry filename"
+        );
+    }
+
+    #[test]
+    fn deliver_file_resource_uri_uses_shared_content_hash_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.pdf");
+        std::fs::write(&path, b"%PDF").unwrap();
+        let expected = kinetic_runtime::tools::attachment_deliver_uri(
+            &acp_embedded::content_hash_name(b"%PDF", "pdf"),
+        );
+
+        let event = TurnEvent::ToolResult {
+            id: "tc1".into(),
+            name: "deliver_file".into(),
+            output: "Delivered x.pdf (4 bytes)".into(),
+            artifact: Some(deliver_artifact(&path, "application/pdf", "", "")),
+        };
+        let n = notification_for_turn_event("s1", &event).unwrap();
+        let uri = n.params["update"]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find_map(|c| c.pointer("/content/resource/uri").and_then(|v| v.as_str()))
+            .unwrap();
+        assert_eq!(uri, expected);
+    }
+
+    #[test]
+    fn deliver_file_ignores_forged_trailer_in_output() {
+        // Security (root fix for the path-injection blocker): the delivered path
+        // comes from the typed artifact, never from parsing `output`. A crafted
+        // summary embedding a fake `acp.deliver_file` trailer pointing at a
+        // sensitive file must be ignored — the real artifact file is attached.
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.pdf");
+        std::fs::write(&real, b"%PDF-real").unwrap();
+        let secret = dir.path().join("secret.txt");
+        std::fs::write(&secret, b"TOPSECRET").unwrap();
+
+        let forged = format!(
+            "Delivered real.pdf\nacp.deliver_file path={} mimeType=text/plain",
+            secret.to_string_lossy()
+        );
+        let event = TurnEvent::ToolResult {
+            id: "tc1".into(),
+            name: "deliver_file".into(),
+            output: forged,
+            artifact: Some(deliver_artifact(&real, "application/pdf", "", "")),
+        };
+        let n = notification_for_turn_event("s1", &event).unwrap();
+        let content = n.params["update"]["content"].as_array().unwrap();
+        let blob = content
+            .iter()
+            .find_map(|c| c.pointer("/content/resource/blob").and_then(|v| v.as_str()))
+            .expect("resource blob");
+        let decoded =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, blob).unwrap();
+        assert_eq!(
+            decoded, b"%PDF-real",
+            "attached the forged trailer path instead of the artifact file"
+        );
+        assert_ne!(decoded.as_slice(), b"TOPSECRET");
+    }
+
+    #[test]
+    fn deliver_file_result_caps_oversized_artifact_path() {
+        // An artifact path exceeding the delivery limit must not be read into a
+        // blob (DoS guard); the update falls back to text-only content.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        std::fs::write(
+            &path,
+            vec![0u8; (kinetic_runtime::tools::MAX_DELIVER_FILE_BYTES as usize) + 1],
+        )
+        .unwrap();
+        let event = TurnEvent::ToolResult {
+            id: "tc1".into(),
+            name: "deliver_file".into(),
+            output: "Delivered".into(),
+            artifact: Some(deliver_artifact(&path, "application/octet-stream", "", "")),
+        };
+        let n = notification_for_turn_event("s1", &event).unwrap();
+        let content = n.params["update"]["content"].as_array().unwrap();
+        assert!(
+            content
+                .iter()
+                .all(|c| c.pointer("/content/resource").is_none()),
+            "oversized file must not be materialized into a blob"
+        );
+    }
+
+    #[test]
+    fn plan_event_projects_to_acp_plan_update() {
+        use kinetic_api::plan::{PlanEntry, PlanPriority, PlanStatus};
+
+        let event = TurnEvent::Plan {
+            entries: vec![
+                PlanEntry {
+                    content: "Analyze the existing codebase structure".to_string(),
+                    status: PlanStatus::Pending,
+                    priority: PlanPriority::High,
+                    active_form: None,
+                },
+                PlanEntry {
+                    content: "Create unit tests".to_string(),
+                    status: PlanStatus::InProgress,
+                    priority: PlanPriority::Medium,
+                    active_form: Some("Creating unit tests".to_string()),
+                },
+            ],
+        };
+        let notif =
+            notification_for_turn_event("sess_abc", &event).expect("plan yields a notification");
+        let v = serde_json::to_value(&notif).unwrap();
+
+        assert_eq!(v["method"], "session/update");
+        assert_eq!(v["params"]["sessionId"], "sess_abc");
+        assert_eq!(v["params"]["update"]["sessionUpdate"], "plan");
+        let entries = v["params"]["update"]["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0]["content"],
+            "Analyze the existing codebase structure"
+        );
+        assert_eq!(entries[0]["priority"], "high");
+        assert_eq!(entries[0]["status"], "pending");
+        // ACP-required fields always present on every entry:
+        assert!(entries[1]["priority"].is_string());
+        assert_eq!(entries[1]["status"], "in_progress");
+        // KineticVM extension carried but additive:
+        assert_eq!(entries[1]["activeForm"], "Creating unit tests");
+    }
+
+    #[tokio::test]
+    async fn session_stop_finds_session_during_active_prompt_turn() {
+        let cwd = tempfile::tempdir().unwrap();
+        let server = Arc::new(AcpServer::new(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+        ));
+
+        // Create a real session via the normal path.
+        let new_result = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("session/new must succeed");
+        let session_id = new_result["sessionId"].as_str().unwrap().to_string();
+
+        // Grab the inner lock to simulate an in-flight prompt turn.
+        let session_arc = {
+            let sessions = server.sessions.lock().await;
+            sessions.get(&session_id).cloned().unwrap()
+        };
+        let _guard = session_arc.lock().await;
+
+        // session/stop should find the session in the outer map.  With the
+        // inner lock held it blocks — confirm it does NOT immediately return
+        // SESSION_NOT_FOUND.
+        let server_clone = Arc::clone(&server);
+        let sid_clone = session_id.clone();
+        let stop_result = tokio::time::timeout(Duration::from_millis(100), async move {
+            server_clone
+                .handle_session_stop(&serde_json::json!({ "sessionId": sid_clone }))
+                .await
+        })
+        .await;
+
+        match stop_result {
+            Err(_timeout) => {} // expected — blocked waiting for the inner lock
+            Ok(Ok(_)) => panic!("stop returned Ok without the lock being released"),
+            Ok(Err(e)) => {
+                assert_ne!(
+                    e.code, SESSION_NOT_FOUND,
+                    "session/stop must not return SESSION_NOT_FOUND while a turn is in flight"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn session_new_persists_to_store() {
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let server = Arc::new(AcpServer::new_with_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            Arc::clone(&store),
+        ));
+
+        let result = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/new must succeed");
+
+        let session_id = result["sessionId"].as_str().unwrap();
+
+        // Session must appear in the store
+        let data = store.load_session(session_id).unwrap();
+        assert!(
+            data.is_some(),
+            "session/new must persist to AcpSessionStore"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_new_without_store_still_works() {
+        let cwd = tempfile::tempdir().unwrap();
+        let server = Arc::new(AcpServer::new(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+        ));
+
+        let result = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/new must succeed without a store");
+
+        let session_id = result["sessionId"].as_str().unwrap();
+        assert!(server.sessions.lock().await.contains_key(session_id));
+    }
+
+    #[tokio::test]
+    async fn published_session_blocks_delete_until_close_releases_lease() {
+        let cwd = tempfile::tempdir().unwrap();
+        let server = Arc::new(AcpServer::new(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+        ));
+        let lifecycle = server.agent_lifecycle.clone();
+
+        let result = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("session/new must publish");
+        let session_id = result["sessionId"].as_str().unwrap();
+
+        assert_eq!(lifecycle.live_session_count("test-agent"), 1);
+        assert!(matches!(
+            lifecycle.begin_delete("test-agent"),
+            Err(
+                kinetic_runtime::live_config_authority::AgentDeleteBlocker::LiveSessions {
+                    count: 1,
+                    ..
+                }
+            )
+        ));
+
+        server
+            .handle_session_close(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect("session/close must release lifecycle lease");
+        assert_eq!(lifecycle.live_session_count("test-agent"), 0);
+        assert!(lifecycle.begin_delete("test-agent").is_ok());
+    }
+
+    fn make_test_config(cwd: &std::path::Path) -> Config {
+        let mut cfg = Config {
+            data_dir: cwd.to_path_buf(),
+            ..Default::default()
+        };
+        cfg.providers.models.anthropic.insert(
+            "default".to_string(),
+            kinetic_config::schema::AnthropicModelProviderConfig {
+                base: kinetic_config::schema::ModelProviderConfig {
+                    model: Some("claude-haiku-4-5".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        cfg.risk_profiles.insert(
+            "default".to_string(),
+            kinetic_config::schema::RiskProfileConfig::default(),
+        );
+        cfg.runtime_profiles.insert(
+            "default".to_string(),
+            kinetic_config::schema::RuntimeProfileConfig::default(),
+        );
+        cfg.agents.insert(
+            "test-agent".to_string(),
+            dispatchable_test_agent("anthropic.default"),
+        );
+        cfg
+    }
+
+    #[test]
+    fn gateway_backed_server_initialize_uses_reloaded_config() {
+        let cwd = tempfile::tempdir().unwrap();
+        let config = Arc::new(parking_lot::RwLock::new(make_test_config(cwd.path())));
+        let (writer_tx, _writer_rx) = mpsc::channel::<String>(1);
+        let server = AcpServer::new_with_live_config_and_writer(
+            Arc::clone(&config),
+            Default::default(),
+            AcpServerConfig::default(),
+            writer_tx,
+        );
+
+        config
+            .write()
+            .providers
+            .models
+            .anthropic
+            .get_mut("default")
+            .unwrap()
+            .base
+            .model = Some("reloaded-model".to_string());
+
+        assert_eq!(
+            server.handle_initialize(&serde_json::json!({})).unwrap()["_meta"]["kinetic"]["defaultModel"],
+            "reloaded-model"
+        );
+    }
+
+    /// `session/cancel` on an idle session (no active turn) must succeed silently.
+    #[tokio::test]
+    async fn session_cancel_idle_session_is_noop() {
+        let cwd = tempfile::tempdir().unwrap();
+        let server = Arc::new(AcpServer::new(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+        ));
+
+        let new_result = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("session/new must succeed");
+        let session_id = new_result["sessionId"].as_str().unwrap().to_string();
+
+        // No active turn — cancel must not error.
+        let result = server
+            .handle_session_cancel(&serde_json::json!({ "sessionId": session_id }))
+            .await;
+        assert!(result.is_ok(), "idle cancel must succeed: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn session_cancel_unknown_session_is_noop() {
+        let cwd = tempfile::tempdir().unwrap();
+        let server = Arc::new(AcpServer::new(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+        ));
+
+        let result = server
+            .handle_session_cancel(&serde_json::json!({ "sessionId": "sess_does_not_exist" }))
+            .await;
+        assert!(
+            result.is_ok(),
+            "unknown-session cancel must succeed: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_cancel_accepts_snake_case_session_id() {
+        let cwd = tempfile::tempdir().unwrap();
+        let server = Arc::new(AcpServer::new(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+        ));
+
+        let session_id = "sess_snake_case_cancel";
+        let active_token = tokio_util::sync::CancellationToken::new();
+        server
+            .register_cancel_token(session_id, active_token.clone())
+            .expect("active turn should register token");
+
+        server
+            .handle_session_cancel(&serde_json::json!({ "session_id": session_id }))
+            .await
+            .expect("snake_case session_id should cancel the active turn");
+
+        assert!(active_token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn register_cancel_token_rejects_concurrent_prompt_for_session() {
+        let cwd = tempfile::tempdir().unwrap();
+        let server = Arc::new(AcpServer::new(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+        ));
+
+        let session_id = "sess_active_turn";
+        let active_token = tokio_util::sync::CancellationToken::new();
+        let queued_token = tokio_util::sync::CancellationToken::new();
+
+        server
+            .register_cancel_token(session_id, active_token.clone())
+            .expect("first prompt should register its token");
+        let err = server
+            .register_cancel_token(session_id, queued_token.clone())
+            .expect_err("second prompt must not overwrite active token");
+
+        assert_eq!(err.code, SESSION_BUSY);
+        assert!(
+            err.message.contains("active prompt turn"),
+            "error should explain why prompt was rejected: {}",
+            err.message
+        );
+
+        server
+            .handle_session_cancel(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect("cancel should still target active token");
+
+        assert!(active_token.is_cancelled());
+        assert!(
+            !queued_token.is_cancelled(),
+            "rejected prompt's token must not become the active cancel target"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_prompt_rejects_concurrent_turn_before_agent_starts() {
+        let cwd = tempfile::tempdir().unwrap();
+        let server = Arc::new(AcpServer::new(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+        ));
+
+        let new_result = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("session/new must succeed");
+        let session_id = new_result["sessionId"].as_str().unwrap().to_string();
+        let active_token = tokio_util::sync::CancellationToken::new();
+        server
+            .register_cancel_token(&session_id, active_token.clone())
+            .expect("simulated active turn should register token");
+
+        let err = server
+            .handle_session_prompt(
+                &serde_json::json!({
+                    "sessionId": session_id.clone(),
+                    "prompt": "queued prompt"
+                }),
+                &serde_json::json!(2),
+            )
+            .await
+            .expect_err("concurrent prompt must be rejected before model_provider work starts");
+
+        assert_eq!(err.code, SESSION_BUSY);
+        server
+            .handle_session_cancel(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect("cancel should still target the original active token");
+        assert!(active_token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn session_prompt_rejects_concurrent_blob_without_writing_it() {
+        let cwd = tempfile::tempdir().unwrap();
+        let server = Arc::new(AcpServer::new(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+        ));
+
+        let new_result = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("session/new must succeed");
+        let session_id = new_result["sessionId"].as_str().unwrap().to_string();
+
+        // Simulate an in-flight turn already holding the session reservation.
+        let active_token = tokio_util::sync::CancellationToken::new();
+        server
+            .register_cancel_token(&session_id, active_token.clone())
+            .expect("simulated active turn should register token");
+
+        let b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            b"concurrent blob bytes",
+        );
+        let err = server
+            .handle_session_prompt(
+                &serde_json::json!({
+                    "sessionId": session_id.clone(),
+                    "prompt": [{
+                        "type": "resource",
+                        "resource": { "uri": "file:///race.bin", "blob": b64 }
+                    }]
+                }),
+                &serde_json::json!(3),
+            )
+            .await
+            .expect_err("concurrent prompt must be rejected before its blob is materialized");
+
+        assert_eq!(err.code, SESSION_BUSY);
+
+        // The turn must be reserved BEFORE any side effect: a rejected prompt must
+        // not have written its attachment into the workspace.
+        let uploads = cwd.path().join("uploads");
+        let wrote_any = std::fs::read_dir(&uploads)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .any(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            })
+            .unwrap_or(false);
+        assert!(
+            !wrote_any,
+            "blob was materialized before the turn was admitted (SESSION_BUSY)"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_tokens_map_remove_works() {
+        let cwd = tempfile::tempdir().unwrap();
+        let config = Config {
+            data_dir: cwd.path().to_path_buf(),
+            ..Default::default()
+        };
+        let server = Arc::new(AcpServer::new(config, AcpServerConfig::default()));
+
+        // Insert and remove a token directly.
+        let session_id = "sess_token_leak_test".to_string();
+        let token = tokio_util::sync::CancellationToken::new();
+        server
+            .cancel_tokens
+            .lock()
+            .expect("cancel_tokens lock poisoned")
+            .insert(session_id.clone(), token);
+
+        // Remove the token.
+        server
+            .cancel_tokens
+            .lock()
+            .expect("cancel_tokens lock poisoned")
+            .remove(&session_id);
+
+        let remaining = server
+            .cancel_tokens
+            .lock()
+            .expect("cancel_tokens lock poisoned")
+            .len();
+        assert_eq!(remaining, 0, "cancel token must be removed after turn ends");
+    }
+
+    #[tokio::test]
+    async fn session_load_restores_history_and_streams_notifications() {
+        use kinetic_api::model_provider::{ChatMessage, ConversationMessage};
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+
+        let session_id = "sess-load-test";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        store
+            .append_turn(
+                session_id,
+                &[
+                    ConversationMessage::Chat(ChatMessage::user("hello")),
+                    ConversationMessage::Chat(ChatMessage::assistant("hi there")),
+                ],
+            )
+            .unwrap();
+
+        let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let server = Arc::new(AcpServer::new_with_writer_and_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        ));
+
+        let result = server
+            .handle_session_load(&serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/load must succeed");
+
+        assert_eq!(result, serde_json::json!({}));
+
+        // Session must now be in the in-memory map
+        assert!(server.sessions.lock().await.contains_key(session_id));
+
+        // Collect notifications (non-blocking drain)
+        let mut notifications = Vec::new();
+        while let Ok(msg) = writer_rx.try_recv() {
+            notifications.push(msg);
+        }
+
+        // Expect two session/update notifications: user then assistant
+        assert_eq!(
+            notifications.len(),
+            2,
+            "expected 2 notifications, got: {notifications:?}"
+        );
+        let n0: serde_json::Value = serde_json::from_str(&notifications[0]).unwrap();
+        assert_eq!(
+            n0["params"]["update"]["sessionUpdate"],
+            "user_message_chunk"
+        );
+        assert_eq!(n0["params"]["update"]["content"]["text"], "hello");
+        let n1: serde_json::Value = serde_json::from_str(&notifications[1]).unwrap();
+        assert_eq!(
+            n1["params"]["update"]["sessionUpdate"],
+            "agent_message_chunk"
+        );
+        assert_eq!(n1["params"]["update"]["content"]["text"], "hi there");
+    }
+
+    #[tokio::test]
+    async fn session_load_replays_only_history_retained_after_restore_trim() {
+        use kinetic_api::model_provider::{ChatMessage, ConversationMessage};
+
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "sess-load-trimmed-test";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        store
+            .append_turn(
+                session_id,
+                &[
+                    ConversationMessage::Chat(ChatMessage::user("old request")),
+                    ConversationMessage::Chat(ChatMessage::assistant("old answer")),
+                ],
+            )
+            .unwrap();
+        store
+            .append_turn(
+                session_id,
+                &[
+                    ConversationMessage::Chat(ChatMessage::user("new request")),
+                    ConversationMessage::Chat(ChatMessage::assistant("new answer")),
+                ],
+            )
+            .unwrap();
+
+        let mut config = make_test_config(cwd.path());
+        config
+            .runtime_profiles
+            .get_mut("default")
+            .unwrap()
+            .max_history_messages = Some(1);
+        let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let server = Arc::new(AcpServer::new_with_writer_and_store(
+            config,
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        ));
+
+        server
+            .handle_session_load(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect("session/load must succeed");
+
+        let mut notifications = Vec::new();
+        while let Ok(message) = writer_rx.try_recv() {
+            notifications.push(serde_json::from_str::<serde_json::Value>(&message).unwrap());
+        }
+
+        assert_eq!(
+            notifications.len(),
+            3,
+            "unexpected replay: {notifications:?}"
+        );
+        assert_eq!(notifications[0]["method"], "_kinetic/history_trimmed");
+        assert_eq!(
+            notifications[1]["params"]["update"]["content"]["text"],
+            "new request"
+        );
+        assert_eq!(
+            notifications[2]["params"]["update"]["content"]["text"],
+            "new answer"
+        );
+        assert!(
+            !notifications.iter().any(|notification| {
+                let text = &notification["params"]["update"]["content"]["text"];
+                text == "old request" || text == "old answer"
+            }),
+            "trimmed messages must not be replayed to the client"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_load_replays_the_retained_turn_when_a_persisted_crumb_leads_the_seed() {
+        use kinetic_api::model_provider::{ChatMessage, ConversationMessage};
+
+        // `dropped_messages` from the crumb-aware restore trim counts only
+        // real messages, but the persisted leading breadcrumb is still a row
+        // of the seed vector. The replay offset must skip that crumb row too:
+        // with [crumb, old turn, new turn], a one-turn cap drops the old
+        // turn whole, and replay must begin at the new turn, not at the old
+        // turn's assistant reply.
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "sess-load-crumb-replay";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        let crumb = ConversationMessage::Chat(ChatMessage::user(
+            kinetic_runtime::agent::history::HISTORY_TRIM_BREADCRUMB_CANONICAL.to_string(),
+        ));
+        store
+            .append_turn(session_id, std::slice::from_ref(&crumb))
+            .unwrap();
+        store
+            .append_turn(
+                session_id,
+                &[
+                    ConversationMessage::Chat(ChatMessage::user("old request")),
+                    ConversationMessage::Chat(ChatMessage::assistant("old answer")),
+                ],
+            )
+            .unwrap();
+        store
+            .append_turn(
+                session_id,
+                &[
+                    ConversationMessage::Chat(ChatMessage::user("new request")),
+                    ConversationMessage::Chat(ChatMessage::assistant("new answer")),
+                ],
+            )
+            .unwrap();
+        store.set_trim_breadcrumb(session_id, true).unwrap();
+
+        let mut config = make_test_config(cwd.path());
+        config
+            .runtime_profiles
+            .get_mut("default")
+            .unwrap()
+            .max_history_messages = Some(1);
+        let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let server = Arc::new(AcpServer::new_with_writer_and_store(
+            config,
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        ));
+
+        server
+            .handle_session_load(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect("session/load must succeed");
+
+        let mut notifications = Vec::new();
+        while let Ok(message) = writer_rx.try_recv() {
+            notifications.push(serde_json::from_str::<serde_json::Value>(&message).unwrap());
+        }
+
+        let replayed_texts: Vec<String> = notifications
+            .iter()
+            .filter_map(|notification| {
+                notification["params"]["update"]["content"]["text"]
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .collect();
+        assert_eq!(
+            replayed_texts,
+            vec!["new request".to_string(), "new answer".to_string()],
+            "replay must begin at the first retained real turn, aligned with the provider seed: \
+             {replayed_texts:?}"
+        );
+        assert_eq!(
+            notifications[0]["method"], "_kinetic/history_trimmed",
+            "the restore trim event must still be emitted first"
+        );
+        assert!(
+            !replayed_texts
+                .iter()
+                .any(|text| text.contains("old request") || text.contains("old answer")),
+            "rows from the dropped turn must not be replayed"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_turn_transcript_persists_visible_work_and_reloads() {
+        use kinetic_api::model_provider::{
+            ChatMessage, ConversationMessage, ToolCall, ToolResultMessage,
+        };
+
+        // A non-retryable provider failure after visible tool activity used to
+        // discard the whole turn (success-only persistence). The handler
+        // now routes the failed turn's `new_messages` through the same store
+        // path as a success, plus a trailing failure marker. Simulate that
+        // failed-turn transcript and confirm it survives `load_session`.
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "sess-failed-turn-persist";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+
+        // User prompt + a completed tool call/result that was already shown to
+        // the user before the turn errored out — exactly what the streaming
+        // loop leaves on `StreamedTurnError::new_messages`.
+        let failed_turn = vec![
+            ConversationMessage::Chat(ChatMessage::user("read the config file")),
+            ConversationMessage::AssistantToolCalls {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "toolu_read_1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: "{\"path\":\"config.toml\"}".to_string(),
+                    extra_content: None,
+                }],
+                reasoning_content: None,
+            },
+            ConversationMessage::ToolResults(vec![ToolResultMessage {
+                tool_call_id: "toolu_read_1".to_string(),
+                content: "port = 8080".to_string(),
+                tool_name: "read_file".to_string(),
+            }]),
+        ];
+
+        AcpServer::replace_transcript(
+            Some(Arc::clone(&store)),
+            session_id.to_string(),
+            AcpServer::failed_turn_transcript(failed_turn),
+            false,
+        )
+        .await
+        .expect("failed-turn transcript must persist to a healthy store");
+
+        let data = store
+            .load_session(session_id)
+            .unwrap()
+            .expect("session record must exist after a failed turn");
+
+        // User prompt preserved.
+        assert!(
+            data.messages.iter().any(|m| matches!(
+                m,
+                ConversationMessage::Chat(chat)
+                    if chat.role == "user" && chat.content == "read the config file"
+            )),
+            "failed turn must retain the user prompt: {:?}",
+            data.messages
+        );
+        // Completed tool activity preserved.
+        assert!(
+            data.messages
+                .iter()
+                .any(|m| matches!(m, ConversationMessage::AssistantToolCalls { .. })),
+            "failed turn must retain the assistant tool call"
+        );
+        assert!(
+            data.messages
+                .iter()
+                .any(|m| matches!(m, ConversationMessage::ToolResults(_))),
+            "failed turn must retain the tool result"
+        );
+        // Failure boundary appended as the final message. The stored row is
+        // the reserved, locale-independent sentinel — NOT the localized
+        // marker — so restore recognizes the failed turn under any locale.
+        match data.messages.last() {
+            Some(ConversationMessage::Chat(chat)) => {
+                assert_eq!(chat.role, "assistant");
+                assert_eq!(
+                    chat.content, FAILURE_TURN_SENTINEL,
+                    "trailing message must be the durable failure sentinel"
+                );
+                assert_ne!(
+                    chat.content,
+                    kinetic_runtime::i18n::get_required_cli_string("turn-failed"),
+                    "the durable boundary must not be the localized rendering"
+                );
+            }
+            other => panic!("expected trailing failure sentinel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repair_incomplete_tool_calls_strips_unpaired_native_calls_only() {
+        use kinetic_api::model_provider::{ConversationMessage, ToolCall, ToolResultMessage};
+
+        fn call(id: &str) -> ToolCall {
+            ToolCall {
+                id: id.to_string(),
+                name: "shell".to_string(),
+                arguments: "{}".to_string(),
+                extra_content: None,
+            }
+        }
+
+        fn seed_row(message: ConversationMessage) -> SeededMessage {
+            (message, 0)
+        }
+
+        // Paired call + its result: left untouched, provenance kept.
+        let mut paired = vec![
+            seed_row(ConversationMessage::AssistantToolCalls {
+                text: None,
+                tool_calls: vec![call("toolu_ok")],
+                reasoning_content: None,
+            }),
+            seed_row(ConversationMessage::ToolResults(vec![ToolResultMessage {
+                tool_call_id: "toolu_ok".to_string(),
+                content: "done".to_string(),
+                tool_name: "shell".to_string(),
+            }])),
+        ];
+        assert_eq!(AcpServer::repair_incomplete_tool_calls(&mut paired), 0);
+        assert_eq!(paired.len(), 2);
+        assert_eq!(paired[0].1, 0);
+
+        // Partial: keep the paired call, drop the unpaired one.
+        let mut partial = vec![seed_row(ConversationMessage::AssistantToolCalls {
+            text: Some("working".to_string()),
+            tool_calls: vec![call("toolu_ok"), call("toolu_orphan")],
+            reasoning_content: None,
+        })];
+        partial.push(seed_row(ConversationMessage::ToolResults(vec![
+            ToolResultMessage {
+                tool_call_id: "toolu_ok".to_string(),
+                content: "done".to_string(),
+                tool_name: "shell".to_string(),
+            },
+        ])));
+        assert_eq!(AcpServer::repair_incomplete_tool_calls(&mut partial), 1);
+        match &partial[0].0 {
+            ConversationMessage::AssistantToolCalls { tool_calls, .. } => {
+                assert_eq!(tool_calls.len(), 1);
+                assert_eq!(tool_calls[0].id, "toolu_ok");
+            }
+            other => panic!("expected surviving paired call, got {other:?}"),
+        }
+        assert_eq!(partial[0].1, 0);
+
+        // Fully unpaired with salvageable text: becomes a plain assistant
+        // message in the same provenance row.
+        let mut salvage = vec![seed_row(ConversationMessage::AssistantToolCalls {
+            text: Some("let me check".to_string()),
+            tool_calls: vec![call("toolu_orphan")],
+            reasoning_content: None,
+        })];
+        assert_eq!(AcpServer::repair_incomplete_tool_calls(&mut salvage), 1);
+        match &salvage[0].0 {
+            ConversationMessage::Chat(chat) => {
+                assert_eq!(chat.role, "assistant");
+                assert_eq!(chat.content, "let me check");
+            }
+            other => panic!("expected salvaged assistant text, got {other:?}"),
+        }
+        assert_eq!(salvage[0].1, 0);
+
+        // Fully unpaired with no text: message dropped entirely, and the
+        // unrelated provenance row around it keeps its original index.
+        let mut dropped = vec![
+            seed_row(ConversationMessage::Chat(ChatMessage::user("q"))),
+            seed_row(ConversationMessage::AssistantToolCalls {
+                text: None,
+                tool_calls: vec![call("toolu_orphan")],
+                reasoning_content: None,
+            }),
+        ];
+        assert_eq!(AcpServer::repair_incomplete_tool_calls(&mut dropped), 1);
+        assert_eq!(dropped.len(), 1);
+        assert!(matches!(&dropped[0].0, ConversationMessage::Chat(c) if c.role == "user"));
+        assert_eq!(dropped[0].1, 0);
+    }
+
+    #[tokio::test]
+    async fn restored_failed_turn_repairs_incomplete_tool_call_before_next_prompt() {
+        use kinetic_api::model_provider::{ConversationMessage, ToolCall};
+
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "sess-failed-turn-incomplete-tool";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+
+        // This is the durable shape left by a failure after the model emitted
+        // a native tool call but before its result existed.
+        store
+            .append_turn(
+                session_id,
+                &AcpServer::failed_turn_transcript(vec![
+                    ConversationMessage::Chat(ChatMessage::user("inspect the workspace")),
+                    ConversationMessage::AssistantToolCalls {
+                        text: None,
+                        tool_calls: vec![ToolCall {
+                            id: "toolu_incomplete".to_string(),
+                            name: "shell".to_string(),
+                            arguments: "{\"command\":\"pwd\"}".to_string(),
+                            extra_content: None,
+                        }],
+                        reasoning_content: None,
+                    },
+                ]),
+            )
+            .unwrap();
+
+        let server = Arc::new(AcpServer::new_with_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            Arc::clone(&store),
+        ));
+        server
+            .handle_session_load(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect("failed transcript must reload");
+
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let session = server
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .expect("loaded session must be active");
+        session
+            .lock()
+            .await
+            .agent
+            .set_model_provider(Box::new(RecordingNativeProvider {
+                requests: Arc::clone(&requests),
+            }));
+
+        let result = server
+            .handle_session_prompt(
+                &serde_json::json!({
+                    "sessionId": session_id,
+                    "prompt": "continue safely"
+                }),
+                &serde_json::json!(2),
+            )
+            .await
+            .expect("the next prompt must reach the provider");
+        assert_eq!(result["stopReason"], "end_turn");
+
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 1, "expected exactly one provider request");
+        assert!(
+            !requests[0]
+                .iter()
+                .any(|message| message.content.contains("toolu_incomplete")),
+            "provider request retained an unmatched tool call: {:?}",
+            requests[0]
+        );
+        assert!(
+            requests[0].iter().any(
+                |message| message.role == "user" && message.content.contains("continue safely")
+            ),
+            "provider request must include the post-reload prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_failure_persists_transcript_through_the_handler() {
+        use kinetic_api::model_provider::ConversationMessage;
+
+        // Drive a populated, non-retryable provider failure through the real
+        // `session/prompt` handler (not the `replace_transcript`/
+        // `failed_turn_transcript` helpers directly), so the `TerminalOutcome`
+        // routing and the production replace path are exercised: a regression in
+        // the handler match would surface here.
+        struct FailingProvider;
+        impl kinetic_api::attribution::Attributable for FailingProvider {
+            fn role(&self) -> kinetic_api::attribution::Role {
+                kinetic_api::attribution::Role::Provider(
+                    kinetic_api::attribution::ProviderKind::Model(
+                        kinetic_api::attribution::ModelProviderKind::Custom,
+                    ),
+                )
+            }
+            fn alias(&self) -> &str {
+                "FailingProvider"
+            }
+        }
+        #[async_trait::async_trait]
+        impl kinetic_api::model_provider::ModelProvider for FailingProvider {
+            async fn chat_with_system(
+                &self,
+                _system_prompt: Option<&str>,
+                _message: &str,
+                _model: &str,
+                _temperature: Option<f64>,
+            ) -> anyhow::Result<String> {
+                anyhow::bail!("provider rejected the request")
+            }
+            async fn chat(
+                &self,
+                _request: kinetic_api::model_provider::ChatRequest<'_>,
+                _model: &str,
+                _temperature: Option<f64>,
+            ) -> anyhow::Result<kinetic_api::model_provider::ChatResponse> {
+                anyhow::bail!("provider rejected the request")
+            }
+        }
+
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let server = Arc::new(AcpServer::new_with_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            Arc::clone(&store),
+        ));
+        let session_id = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("session/new must succeed")["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        {
+            let session = server
+                .sessions
+                .lock()
+                .await
+                .get(&session_id)
+                .cloned()
+                .expect("new session must be active");
+            session
+                .lock()
+                .await
+                .agent
+                .set_model_provider(Box::new(FailingProvider));
+        }
+
+        server
+            .handle_session_prompt(
+                &serde_json::json!({ "sessionId": session_id, "prompt": "summarize the repo" }),
+                &serde_json::json!(1),
+            )
+            .await
+            .expect_err("a non-retryable provider failure must surface as an RPC error");
+
+        // The failed turn's visible transcript (the user prompt) plus a trailing
+        // failure boundary must have been persisted via the production path.
+        let data = store
+            .load_session(&session_id)
+            .unwrap()
+            .expect("session record exists");
+        assert!(
+            data.messages.iter().any(|message| matches!(
+                message,
+                ConversationMessage::Chat(chat)
+                    if chat.role == "user" && chat.content.contains("summarize the repo")
+            )),
+            "failed turn must persist the user prompt: {:?}",
+            data.messages
+        );
+        assert!(
+            matches!(
+                data.messages.last(),
+                Some(ConversationMessage::Chat(chat)) if chat.content == FAILURE_TURN_SENTINEL
+            ),
+            "failed turn must end with the durable failure sentinel: {:?}",
+            data.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn replace_transcript_surfaces_persistence_failure() {
+        use kinetic_api::model_provider::{ChatMessage, ConversationMessage};
+
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+
+        // `replace_messages_and_breadcrumb` errors for a session with no
+        // record. `replace_transcript` must propagate that as `Err` so a
+        // failed/cancelled turn can surface the lost transcript instead of
+        // reporting a clean terminal result. Unlike the old append helper,
+        // an empty message list is not a special-cased no-op here: the
+        // decision to skip persistence when a turn produced no visible work
+        // belongs to the caller, before it builds the full-history payload.
+        let failed = AcpServer::replace_transcript(
+            Some(Arc::clone(&store)),
+            "no-such-session".to_string(),
+            vec![ConversationMessage::Chat(ChatMessage::user("hi"))],
+            false,
+        )
+        .await;
+        assert!(
+            failed.is_err(),
+            "a failed store replace must surface as Err, not a silent success"
+        );
+
+        let empty = AcpServer::replace_transcript(
+            Some(store),
+            "no-such-session".to_string(),
+            Vec::new(),
+            false,
+        )
+        .await;
+        assert!(
+            empty.is_err(),
+            "an unknown session must still surface Err even with an empty transcript"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_persistence_replaces_same_shape_trimmed_history() {
+        let cwd = tempfile::tempdir().unwrap();
+        let store = Arc::new(AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "same-shape-trim";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        let before = vec![
+            ConversationMessage::Chat(ChatMessage::user(
+                kinetic_runtime::agent::history::HISTORY_TRIM_BREADCRUMB_CANONICAL,
+            )),
+            ConversationMessage::Chat(ChatMessage::user("old request")),
+            ConversationMessage::Chat(ChatMessage::assistant("old answer")),
+        ];
+        store
+            .replace_messages_and_breadcrumb(session_id, &before, true)
+            .unwrap();
+        // A one-turn cap: the new prompt's turn displaces the old turn whole,
+        // leaving the breadcrumb and the new exchange.
+        let mut config = make_test_config(cwd.path());
+        config
+            .runtime_profiles
+            .get_mut("default")
+            .unwrap()
+            .max_history_messages = Some(1);
+        let server = Arc::new(AcpServer::new_with_store(
+            config,
+            AcpServerConfig::default(),
+            Arc::clone(&store),
+        ));
+        server
+            .handle_session_load(&serde_json::json!({"sessionId": session_id}))
+            .await
+            .unwrap();
+        let session = server
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap();
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        session
+            .lock()
+            .await
+            .agent
+            .set_model_provider(Box::new(RecordingNativeProvider { requests }));
+        server
+            .handle_session_prompt(
+                &serde_json::json!({"sessionId": session_id, "prompt": "new request"}),
+                &serde_json::json!(1),
+            )
+            .await
+            .unwrap();
+        let session = session.lock().await;
+        assert_eq!(session.agent.history().len(), before.len() + 1);
+        assert!(!session.agent.history().iter().any(|message| matches!(
+            message, ConversationMessage::Chat(chat) if chat.content == "old request"
+        )));
+        let stored = store.load_session(session_id).unwrap().unwrap();
+        assert!(stored.trim_breadcrumb);
+        assert!(!stored.messages.iter().any(|message| matches!(
+            message, ConversationMessage::Chat(chat) if chat.content == "old request" || chat.content == "old answer"
+        )));
+    }
+
+    #[tokio::test]
+    async fn session_load_persists_a_restore_time_trim_before_going_live() {
+        // An over-cap restored transcript trims in memory as soon as it is
+        // seeded (`seed_conversation_history_with_event`), before the
+        // session ever goes live. That retained projection and its
+        // corrected breadcrumb must already be durable at that point: if the
+        // process restarts or the client closes the session without another
+        // prompt, the next `session/load` must see the already-capped
+        // transcript, not the untrimmed rows that produced it.
+        let cwd = tempfile::tempdir().unwrap();
+        let store = Arc::new(AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "session-load-restore-trim";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        let over_cap = vec![
+            ConversationMessage::Chat(ChatMessage::user("turn one request")),
+            ConversationMessage::Chat(ChatMessage::assistant("turn one answer")),
+            ConversationMessage::Chat(ChatMessage::user("turn two request")),
+            ConversationMessage::Chat(ChatMessage::assistant("turn two answer")),
+            ConversationMessage::Chat(ChatMessage::user("turn three request")),
+            ConversationMessage::Chat(ChatMessage::assistant("turn three answer")),
+        ];
+        store
+            .replace_messages_and_breadcrumb(session_id, &over_cap, false)
+            .unwrap();
+
+        let mut config = make_test_config(cwd.path());
+        config
+            .runtime_profiles
+            .get_mut("default")
+            .unwrap()
+            .max_history_messages = Some(2);
+        let server = Arc::new(AcpServer::new_with_store(
+            config,
+            AcpServerConfig::default(),
+            Arc::clone(&store),
+        ));
+
+        server
+            .handle_session_load(&serde_json::json!({"sessionId": session_id}))
+            .await
+            .expect("session/load must succeed");
+
+        // No further prompt is issued: the durable record must already
+        // reflect the restore-time trim.
+        let stored = store
+            .load_session(session_id)
+            .unwrap()
+            .expect("session record must still exist");
+        assert!(
+            stored.trim_breadcrumb,
+            "restore-time trim must persist the corrected breadcrumb"
+        );
+        assert!(
+            stored.messages.len() < over_cap.len(),
+            "restore-time trim must persist the retained (capped) transcript, not the \
+             untrimmed rows it was seeded from: {:?}",
+            stored.messages
+        );
+        assert!(
+            !stored.messages.iter().any(|message| matches!(
+                message, ConversationMessage::Chat(chat) if chat.content == "turn one request"
+            )),
+            "the oldest trimmed turn must not survive in the durable store: {:?}",
+            stored.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn session_resume_persists_a_restore_time_trim_before_going_live() {
+        // Same contract as `session_load_persists_a_restore_time_trim_before_going_live`
+        // but for `session/resume`, which seeds the agent's history the same
+        // way `session/load` does.
+        let cwd = tempfile::tempdir().unwrap();
+        let store = Arc::new(AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "session-resume-restore-trim";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        let over_cap = vec![
+            ConversationMessage::Chat(ChatMessage::user("turn one request")),
+            ConversationMessage::Chat(ChatMessage::assistant("turn one answer")),
+            ConversationMessage::Chat(ChatMessage::user("turn two request")),
+            ConversationMessage::Chat(ChatMessage::assistant("turn two answer")),
+            ConversationMessage::Chat(ChatMessage::user("turn three request")),
+            ConversationMessage::Chat(ChatMessage::assistant("turn three answer")),
+        ];
+        store
+            .replace_messages_and_breadcrumb(session_id, &over_cap, false)
+            .unwrap();
+
+        let mut config = make_test_config(cwd.path());
+        config
+            .runtime_profiles
+            .get_mut("default")
+            .unwrap()
+            .max_history_messages = Some(2);
+        let server = Arc::new(AcpServer::new_with_store(
+            config,
+            AcpServerConfig::default(),
+            Arc::clone(&store),
+        ));
+
+        server
+            .handle_session_resume(&serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/resume must succeed");
+
+        // No further prompt is issued: the durable record must already
+        // reflect the restore-time trim.
+        let stored = store
+            .load_session(session_id)
+            .unwrap()
+            .expect("session record must still exist");
+        assert!(
+            stored.trim_breadcrumb,
+            "restore-time trim must persist the corrected breadcrumb"
+        );
+        assert!(
+            stored.messages.len() < over_cap.len(),
+            "restore-time trim must persist the retained (capped) transcript, not the \
+             untrimmed rows it was seeded from: {:?}",
+            stored.messages
+        );
+        assert!(
+            !stored.messages.iter().any(|message| matches!(
+                message, ConversationMessage::Chat(chat) if chat.content == "turn one request"
+            )),
+            "the oldest trimmed turn must not survive in the durable store: {:?}",
+            stored.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn replace_transcript_does_not_resurrect_a_turn_the_agent_already_trimmed() {
+        use kinetic_api::model_provider::{ChatMessage, ConversationMessage};
+
+        // Simulate a prior terminal write that persisted an older turn, then a
+        // later terminal write for a turn during which the live agent had
+        // already dropped that older turn via history-trim. The durable
+        // transcript must end up matching the agent's authoritative
+        // post-trim history, not the union of both writes: a delta-append
+        // here would leave the discarded turn in the store for the next
+        // `session/load` to resurrect.
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "sess-replace-not-append";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+
+        let old_turn = vec![
+            ConversationMessage::Chat(ChatMessage::user("old request")),
+            ConversationMessage::Chat(ChatMessage::assistant("old answer")),
+        ];
+        AcpServer::replace_transcript(
+            Some(Arc::clone(&store)),
+            session_id.to_string(),
+            old_turn,
+            false,
+        )
+        .await
+        .expect("first terminal write must persist");
+
+        // The live agent trimmed the old turn before this next terminal write,
+        // so its authoritative history contains only the new turn plus the
+        // trim breadcrumb, never the old rows.
+        let post_trim_history = vec![
+            ConversationMessage::Chat(ChatMessage::assistant(
+                "[earlier conversation history was trimmed]",
+            )),
+            ConversationMessage::Chat(ChatMessage::user("new request")),
+            ConversationMessage::Chat(ChatMessage::assistant("new answer")),
+        ];
+        AcpServer::replace_transcript(
+            Some(Arc::clone(&store)),
+            session_id.to_string(),
+            post_trim_history,
+            true,
+        )
+        .await
+        .expect("second terminal write must persist the authoritative post-trim history");
+
+        let data = store
+            .load_session(session_id)
+            .unwrap()
+            .expect("session record must exist");
+
+        assert!(
+            !data
+                .messages
+                .iter()
+                .any(|m| matches!(m, ConversationMessage::Chat(chat) if chat.content.contains("old request") || chat.content.contains("old answer"))),
+            "the discarded turn must not survive as stale durable rows: {:?}",
+            data.messages
+        );
+        assert!(
+            data.messages
+                .iter()
+                .any(|m| matches!(m, ConversationMessage::Chat(chat) if chat.content.contains("new request"))),
+            "the retained turn must be present: {:?}",
+            data.messages
+        );
+        assert!(
+            data.trim_breadcrumb,
+            "the breadcrumb flag must be persisted together with the trimmed transcript"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_then_next_prompt_does_not_resend_interruption_marker() {
+        use std::sync::Arc as StdArc;
+
+        use kinetic_api::model_provider::ChatMessage;
+        use tokio::sync::Notify;
+
+        // A provider that parks inside `chat` so the first turn is in flight and
+        // can be cancelled mid-turn.
+        struct BarrierProvider {
+            entered: StdArc<Notify>,
+            release: StdArc<Notify>,
+        }
+        impl kinetic_api::attribution::Attributable for BarrierProvider {
+            fn role(&self) -> kinetic_api::attribution::Role {
+                kinetic_api::attribution::Role::Provider(
+                    kinetic_api::attribution::ProviderKind::Model(
+                        kinetic_api::attribution::ModelProviderKind::Custom,
+                    ),
+                )
+            }
+            fn alias(&self) -> &str {
+                "BarrierProvider"
+            }
+        }
+        #[async_trait]
+        impl kinetic_api::model_provider::ModelProvider for BarrierProvider {
+            async fn chat_with_system(
+                &self,
+                _system_prompt: Option<&str>,
+                _message: &str,
+                _model: &str,
+                _temperature: Option<f64>,
+            ) -> anyhow::Result<String> {
+                Ok("done".to_string())
+            }
+            async fn chat(
+                &self,
+                _request: kinetic_api::model_provider::ChatRequest<'_>,
+                _model: &str,
+                _temperature: Option<f64>,
+            ) -> anyhow::Result<kinetic_api::model_provider::ChatResponse> {
+                self.entered.notify_one();
+                self.release.notified().await;
+                Ok(kinetic_api::model_provider::ChatResponse {
+                    text: Some("done".to_string()),
+                    tool_calls: Vec::new(),
+                    usage: None,
+                    reasoning_content: None,
+                })
+            }
+        }
+
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let server = Arc::new(AcpServer::new_with_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            Arc::clone(&store),
+        ));
+        let session_id = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("session/new must succeed")["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let entered = StdArc::new(Notify::new());
+        let release = StdArc::new(Notify::new());
+        {
+            let session = server
+                .sessions
+                .lock()
+                .await
+                .get(&session_id)
+                .cloned()
+                .expect("new session must be active");
+            session
+                .lock()
+                .await
+                .agent
+                .set_model_provider(Box::new(BarrierProvider {
+                    entered: StdArc::clone(&entered),
+                    release: StdArc::clone(&release),
+                }));
+        }
+
+        // First turn: park it in the provider, then cancel it mid-turn.
+        let prompt_server = Arc::clone(&server);
+        let prompt_sid = session_id.clone();
+        let prompt = kinetic_spawn::spawn!(async move {
+            prompt_server
+                .handle_session_prompt(
+                    &serde_json::json!({ "sessionId": prompt_sid, "prompt": "first prompt" }),
+                    &serde_json::json!(1),
+                )
+                .await
+        });
+        entered.notified().await;
+        server
+            .handle_session_cancel(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect("cancel resolves");
+        release.notify_one();
+        prompt
+            .await
+            .unwrap()
+            .expect("a cancelled turn is a terminal outcome, not an error");
+
+        // Swap in a provider that records the request it receives.
+        let requests: Arc<parking_lot::Mutex<Vec<Vec<ChatMessage>>>> =
+            Arc::new(parking_lot::Mutex::new(Vec::new()));
+        {
+            let session = server
+                .sessions
+                .lock()
+                .await
+                .get(&session_id)
+                .cloned()
+                .expect("session must still be active after cancel");
+            session
+                .lock()
+                .await
+                .agent
+                .set_model_provider(Box::new(RecordingNativeProvider {
+                    requests: Arc::clone(&requests),
+                }));
+        }
+
+        // Second turn on the SAME active session must not resend the generic
+        // interruption marker to the provider.
+        server
+            .handle_session_prompt(
+                &serde_json::json!({ "sessionId": session_id, "prompt": "second prompt" }),
+                &serde_json::json!(2),
+            )
+            .await
+            .expect("the next prompt must reach the provider");
+
+        let marker = kinetic_runtime::i18n::get_required_cli_string("turn-interrupted-by-user");
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 1, "expected exactly one provider request");
+        assert!(
+            !requests[0].iter().any(|m| m.content == marker),
+            "the interruption marker must not be re-sent to the next provider: {:?}",
+            requests[0]
+        );
+        assert!(
+            requests[0]
+                .iter()
+                .any(|m| m.role == "user" && m.content.contains("first prompt")),
+            "the earlier user prompt should still be present (only the marker is stripped): {:?}",
+            requests[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn resumed_session_sanitizes_incomplete_call_and_cancellation_sentinel() {
+        use kinetic_api::model_provider::{ConversationMessage, ToolCall};
+
+        // `session/resume` seeds provider history without client replay, so it
+        // must apply the same typed restore sanitization as `session/load`: an
+        // incomplete native call and a cancellation sentinel restored here must
+        // not reach the next provider request.
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "sess-resume-sanitize";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        // A failed turn left an unmatched native call...
+        store
+            .append_turn(
+                session_id,
+                &AcpServer::failed_turn_transcript(vec![
+                    ConversationMessage::Chat(ChatMessage::user("inspect the workspace")),
+                    ConversationMessage::AssistantToolCalls {
+                        text: None,
+                        tool_calls: vec![ToolCall {
+                            id: "toolu_incomplete".to_string(),
+                            name: "shell".to_string(),
+                            arguments: "{}".to_string(),
+                            extra_content: None,
+                        }],
+                        reasoning_content: None,
+                    },
+                ]),
+            )
+            .unwrap();
+        // ...and a later turn was client-cancelled (structured sentinel stored).
+        let interrupted =
+            kinetic_runtime::i18n::get_required_cli_string("turn-interrupted-by-user");
+        store
+            .append_turn(
+                session_id,
+                &AcpServer::cancelled_turn_transcript(vec![
+                    ConversationMessage::Chat(ChatMessage::user("do a thing")),
+                    ConversationMessage::Chat(ChatMessage::assistant(interrupted.clone())),
+                ]),
+            )
+            .unwrap();
+
+        let server = Arc::new(AcpServer::new_with_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            Arc::clone(&store),
+        ));
+        server
+            .handle_session_resume(&serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/resume must succeed");
+
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let session = server
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .expect("resumed session must be active");
+        session
+            .lock()
+            .await
+            .agent
+            .set_model_provider(Box::new(RecordingNativeProvider {
+                requests: Arc::clone(&requests),
+            }));
+
+        server
+            .handle_session_prompt(
+                &serde_json::json!({ "sessionId": session_id, "prompt": "continue" }),
+                &serde_json::json!(2),
+            )
+            .await
+            .expect("the next prompt must reach the provider");
+
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 1, "expected exactly one provider request");
+        for message in &requests[0] {
+            assert!(
+                !message.content.contains("toolu_incomplete")
+                    && !message.content.contains(&interrupted)
+                    && !message.content.contains(CANCELLATION_EVENT_TOOL_NAME),
+                "resumed provider history leaked an unmatched call / cancellation: {message:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_load_replays_incomplete_call_but_seeds_repaired_history() {
+        use kinetic_api::model_provider::{ChatMessage, ConversationMessage, ToolCall};
+
+        // The two projections are split: the failed turn's visible activity must
+        // survive reload for the client, while only provider-facing history
+        // drops the unsafe partial exchange. Repairing the replay source too
+        // would delete the tool call the user already saw.
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "sess-replay-vs-seed";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        store
+            .append_turn(
+                session_id,
+                &AcpServer::failed_turn_transcript(vec![
+                    ConversationMessage::Chat(ChatMessage::user("inspect the workspace")),
+                    ConversationMessage::AssistantToolCalls {
+                        text: None,
+                        tool_calls: vec![ToolCall {
+                            id: "toolu_incomplete".to_string(),
+                            name: "shell".to_string(),
+                            arguments: "{}".to_string(),
+                            extra_content: None,
+                        }],
+                        reasoning_content: None,
+                    },
+                ]),
+            )
+            .unwrap();
+
+        let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let server = Arc::new(AcpServer::new_with_writer_and_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        ));
+        server
+            .handle_session_load(&serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/load must succeed");
+
+        let mut notifications = Vec::new();
+        while let Ok(msg) = writer_rx.try_recv() {
+            notifications.push(msg);
+        }
+        assert!(
+            notifications.iter().any(|n| n.contains("toolu_incomplete")),
+            "the client must still see the tool call the failed turn produced: {notifications:?}"
+        );
+
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let session = server
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .expect("loaded session must be active");
+        session
+            .lock()
+            .await
+            .agent
+            .set_model_provider(Box::new(RecordingNativeProvider {
+                requests: Arc::clone(&requests),
+            }));
+        server
+            .handle_session_prompt(
+                &serde_json::json!({ "sessionId": session_id, "prompt": "continue" }),
+                &serde_json::json!(2),
+            )
+            .await
+            .expect("the next prompt must reach the provider");
+
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 1, "expected exactly one provider request");
+        for message in &requests[0] {
+            assert!(
+                !message.content.contains("toolu_incomplete"),
+                "the provider seed must not carry the unmatched call: {message:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_load_replays_rejected_image_but_keeps_it_out_of_the_seed() {
+        use kinetic_api::model_provider::{ChatMessage, ConversationMessage};
+
+        // A turn whose image the provider rejected is now durable. If the seed
+        // keeps the marker, a vision-capable provider re-attaches that same
+        // image to every later prompt and the session stays broken.
+        let cwd = tempfile::tempdir().unwrap();
+        let image_path = cwd.path().join("rejected.png");
+        std::fs::write(&image_path, b"not really a png").unwrap();
+        let marker = format!("look at this [IMAGE:{}]", image_path.display());
+
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "sess-rejected-image";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        store
+            .append_turn(
+                session_id,
+                &AcpServer::failed_turn_transcript(vec![ConversationMessage::Chat(
+                    ChatMessage::user(marker.clone()),
+                )]),
+            )
+            .unwrap();
+
+        let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let server = Arc::new(AcpServer::new_with_writer_and_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        ));
+        server
+            .handle_session_load(&serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/load must succeed");
+
+        let mut notifications = Vec::new();
+        while let Ok(msg) = writer_rx.try_recv() {
+            notifications.push(msg);
+        }
+        assert!(
+            notifications.iter().any(|n| n.contains("rejected.png")),
+            "the client must still replay the attachment the user sent: {notifications:?}"
+        );
+
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let session = server
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .expect("loaded session must be active");
+        session
+            .lock()
+            .await
+            .agent
+            .set_model_provider(Box::new(RecordingNativeProvider {
+                requests: Arc::clone(&requests),
+            }));
+        server
+            .handle_session_prompt(
+                &serde_json::json!({ "sessionId": session_id, "prompt": "just text now" }),
+                &serde_json::json!(2),
+            )
+            .await
+            .expect("the next prompt must reach the provider");
+
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 1, "expected exactly one provider request");
+        for message in &requests[0] {
+            assert!(
+                !message.content.contains("rejected.png"),
+                "the rejected attachment must not be resent: {message:?}"
+            );
+        }
+        let omitted =
+            kinetic_runtime::i18n::get_required_cli_string("turn-failed-attachment-omitted");
+        assert!(
+            requests[0]
+                .iter()
+                .any(|message| message.content.contains(&omitted)),
+            "the seed should say an attachment was dropped, not silently lose it: {:?}",
+            requests[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn restored_failed_turn_is_recognized_across_locales() {
+        use kinetic_api::model_provider::{ChatMessage, ConversationMessage};
+
+        // A failed image turn is persisted through the production boundary and
+        // reloaded by a process that did not render its marker. Durable
+        // identity is the reserved sentinel, not the localized `[turn failed]`
+        // text, so recognition cannot depend on the locale: the provider seed
+        // omits the rejected attachment while the client replay keeps the
+        // attachment and renders the marker localized at projection time.
+        let cwd = tempfile::tempdir().unwrap();
+        let image_path = cwd.path().join("cross-locale.png");
+        std::fs::write(&image_path, valid_1x1_png()).unwrap();
+        let marker = format!("look at this [IMAGE:{}]", image_path.display());
+
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "sess-cross-locale-failed-turn";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        store
+            .append_turn(
+                session_id,
+                &AcpServer::failed_turn_transcript(vec![ConversationMessage::Chat(
+                    ChatMessage::user(marker.clone()),
+                )]),
+            )
+            .unwrap();
+
+        // The whole invariant: the durable boundary reads back as the
+        // sentinel, not as whichever rendering the active locale produces.
+        // Persisting the localized string instead would make a transcript
+        // saved under one locale unrecognizable after a restart under another.
+        let stored_marker = match store
+            .load_session(session_id)
+            .unwrap()
+            .expect("session record exists")
+            .messages
+            .pop()
+        {
+            Some(ConversationMessage::Chat(chat)) => chat.content,
+            other => panic!("expected a trailing chat message, got {other:?}"),
+        };
+        assert_eq!(
+            stored_marker, FAILURE_TURN_SENTINEL,
+            "the durable failure boundary must be the locale-independent sentinel"
+        );
+        assert_ne!(
+            stored_marker,
+            kinetic_runtime::i18n::get_required_cli_string("turn-failed"),
+            "the durable boundary must not be the active locale's rendering"
+        );
+
+        let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let server = Arc::new(AcpServer::new_with_writer_and_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        ));
+        server
+            .handle_session_load(&serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/load must succeed");
+
+        let mut notifications = Vec::new();
+        while let Ok(msg) = writer_rx.try_recv() {
+            notifications.push(msg);
+        }
+        let localized = kinetic_runtime::i18n::get_required_cli_string("turn-failed");
+        assert!(
+            notifications.iter().any(|n| n.contains("cross-locale.png")),
+            "the client must still replay the attachment the user sent: {notifications:?}"
+        );
+        assert!(
+            notifications.iter().any(|n| n.contains(&localized)),
+            "the client must see the failure marker localized at projection time: {notifications:?}"
+        );
+        assert!(
+            !notifications
+                .iter()
+                .any(|n| n.contains(FAILURE_TURN_SENTINEL)),
+            "the raw durable sentinel must never reach the client: {notifications:?}"
+        );
+
+        // Vision-capable: historical image markers are retained, not stripped,
+        // so the only way the request stays clean is the seed degradation.
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let session = server
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .expect("loaded session must be active");
+        session
+            .lock()
+            .await
+            .agent
+            .set_model_provider(Box::new(RecordingVisionProvider {
+                requests: Arc::clone(&requests),
+            }));
+        server
+            .handle_session_prompt(
+                &serde_json::json!({ "sessionId": session_id, "prompt": "just text now" }),
+                &serde_json::json!(2),
+            )
+            .await
+            .expect("the next prompt must reach the provider");
+
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 1, "expected exactly one provider request");
+        for message in &requests[0] {
+            assert!(
+                !message.content.contains("data:image"),
+                "the rejected attachment must not be re-attached to the provider request: {message:?}"
+            );
+        }
+        let omitted =
+            kinetic_runtime::i18n::get_required_cli_string("turn-failed-attachment-omitted");
+        assert!(
+            requests[0]
+                .iter()
+                .any(|message| message.content.contains(&omitted)),
+            "the seed should say an attachment was dropped: {:?}",
+            requests[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_image_turn_degrades_media_on_the_active_session() {
+        use std::sync::Arc as StdArc;
+
+        use kinetic_api::model_provider::{ChatMessage, ConversationMessage};
+
+        // The restore path is not the only poisoned path. The failed turn is
+        // also the trailing span of the LIVE agent history, and a
+        // vision-capable provider retains historical image markers: without a
+        // live correction the same rejected attachment is re-attached to the
+        // very next prompt of the same still-active session. The first
+        // provider call rejects the image (non-retryable); the second prompt
+        // must go out without it while the durable transcript keeps it.
+        struct RejectingVisionProvider {
+            requests: Arc<parking_lot::Mutex<Vec<Vec<ChatMessage>>>>,
+            first_call_done: StdArc<std::sync::atomic::AtomicBool>,
+        }
+
+        impl kinetic_api::attribution::Attributable for RejectingVisionProvider {
+            fn role(&self) -> kinetic_api::attribution::Role {
+                kinetic_api::attribution::Role::Provider(
+                    kinetic_api::attribution::ProviderKind::Model(
+                        kinetic_api::attribution::ModelProviderKind::Custom,
+                    ),
+                )
+            }
+
+            fn alias(&self) -> &str {
+                "RejectingVisionProvider"
+            }
+        }
+
+        #[async_trait]
+        impl ModelProvider for RejectingVisionProvider {
+            fn capabilities(&self) -> kinetic_api::model_provider::ProviderCapabilities {
+                kinetic_api::model_provider::ProviderCapabilities {
+                    native_tool_calling: true,
+                    vision: true,
+                    ..Default::default()
+                }
+            }
+
+            async fn chat_with_system(
+                &self,
+                _system_prompt: Option<&str>,
+                _message: &str,
+                _model: &str,
+                _temperature: Option<f64>,
+            ) -> anyhow::Result<String> {
+                anyhow::bail!("provider rejected the request")
+            }
+
+            async fn chat(
+                &self,
+                request: kinetic_api::model_provider::ChatRequest<'_>,
+                _model: &str,
+                _temperature: Option<f64>,
+            ) -> anyhow::Result<kinetic_api::model_provider::ChatResponse> {
+                self.requests.lock().push(request.messages.to_vec());
+                if !self
+                    .first_call_done
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+                {
+                    // A 4xx-shaped message classifies non-retryable, so the
+                    // first prompt fails after exactly one provider request.
+                    anyhow::bail!("400 Bad Request: provider rejected the request");
+                }
+                Ok(kinetic_api::model_provider::ChatResponse {
+                    text: Some("recovered".to_string()),
+                    tool_calls: Vec::new(),
+                    usage: None,
+                    reasoning_content: None,
+                })
+            }
+        }
+
+        let cwd = tempfile::tempdir().unwrap();
+        let image_path = cwd.path().join("rejected-live.png");
+        std::fs::write(&image_path, valid_1x1_png()).unwrap();
+        let marker = format!("look at this [IMAGE:{}]", image_path.display());
+
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let server = Arc::new(AcpServer::new_with_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            Arc::clone(&store),
+        ));
+        let session_id = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("session/new must succeed")["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        {
+            let session = server
+                .sessions
+                .lock()
+                .await
+                .get(&session_id)
+                .cloned()
+                .expect("new session must be active");
+            session
+                .lock()
+                .await
+                .agent
+                .set_model_provider(Box::new(RejectingVisionProvider {
+                    requests: Arc::clone(&requests),
+                    first_call_done: StdArc::new(std::sync::atomic::AtomicBool::new(false)),
+                }));
+        }
+
+        // Prompt 1: the image goes out and the provider rejects it.
+        server
+            .handle_session_prompt(
+                &serde_json::json!({ "sessionId": session_id, "prompt": marker }),
+                &serde_json::json!(1),
+            )
+            .await
+            .expect_err("the rejected image must fail the turn");
+
+        // Prompt 2, same active session: the rejected attachment must not be
+        // re-attached.
+        server
+            .handle_session_prompt(
+                &serde_json::json!({ "sessionId": session_id, "prompt": "just text now" }),
+                &serde_json::json!(2),
+            )
+            .await
+            .expect("the next prompt must reach the provider");
+
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 2, "both prompts reached the provider");
+        assert!(
+            requests[0].iter().any(|m| m.content.contains("data:image")),
+            "precondition: the first request carried the image: {:?}",
+            requests[0]
+        );
+        for message in &requests[1] {
+            assert!(
+                !message.content.contains("data:image"),
+                "the rejected attachment must not be re-attached to the next active request: {message:?}"
+            );
+            assert!(
+                !message.content.contains("rejected-live.png"),
+                "not even the marker text may survive into the next request: {message:?}"
+            );
+        }
+        let omitted =
+            kinetic_runtime::i18n::get_required_cli_string("turn-failed-attachment-omitted");
+        assert!(
+            requests[1]
+                .iter()
+                .any(|message| message.content.contains(&omitted)),
+            "the seed should say an attachment was dropped: {:?}",
+            requests[1]
+        );
+
+        // The client-visible durable transcript keeps the attachment.
+        let stored = store
+            .load_session(&session_id)
+            .unwrap()
+            .expect("session record exists");
+        assert!(
+            stored.messages.iter().any(
+                |m| matches!(m, ConversationMessage::Chat(chat) if chat.content.contains("rejected-live.png"))
+            ),
+            "the failed turn's transcript must keep the attachment for client replay: {:?}",
+            stored.messages
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_image_with_tool_result_carrier_degrades_media_on_both_paths() {
+        use kinetic_api::model_provider::{ChatMessage, ConversationMessage};
+
+        // A prompt-mode tool round appends its results as a user-role
+        // `[Tool results]` carrier, and typed replay preserves it as an
+        // ordinary user chat. A turn shaped `user(image) -> assistant(tool
+        // request) -> user([Tool results] ...) -> failure` therefore hides its
+        // opening prompt behind that carrier: a span selector that walks back
+        // to "the last user message" starts at the carrier, misses the image
+        // prompt, and leaves the rejected attachment in both the live history
+        // and the restored seed. This regression drives that exact shape
+        // through both repair paths with a vision-capable provider, which
+        // retains historical image markers, so a clean next request is only
+        // possible if the span reached the opening prompt.
+
+        // ── Phase A: restore path ────────────────────────────────────
+        let cwd = tempfile::tempdir().unwrap();
+        let image_path = cwd.path().join("carrier-rejected.png");
+        let file_bytes = valid_1x1_png();
+        std::fs::write(&image_path, &file_bytes).unwrap();
+        let marker = format!("look at this [IMAGE:{}]", image_path.display());
+
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "sess-carrier-failed-turn";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        store
+            .append_turn(
+                session_id,
+                &AcpServer::failed_turn_transcript(vec![
+                    ConversationMessage::Chat(ChatMessage::user(marker.clone())),
+                    ConversationMessage::Chat(ChatMessage::assistant("let me read that file")),
+                    ConversationMessage::Chat(ChatMessage::user(format!(
+                        "[Tool results]\n{}",
+                        String::from_utf8_lossy(&file_bytes)
+                    ))),
+                ]),
+            )
+            .unwrap();
+
+        let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let server = Arc::new(AcpServer::new_with_writer_and_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        ));
+        server
+            .handle_session_load(&serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/load must succeed");
+
+        let mut notifications = Vec::new();
+        while let Ok(msg) = writer_rx.try_recv() {
+            notifications.push(msg);
+        }
+        assert!(
+            notifications
+                .iter()
+                .any(|n| n.contains("carrier-rejected.png")),
+            "the client must still replay the attachment: {notifications:?}"
+        );
+
+        let restore_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        {
+            let session = server
+                .sessions
+                .lock()
+                .await
+                .get(session_id)
+                .cloned()
+                .expect("loaded session must be active");
+            session
+                .lock()
+                .await
+                .agent
+                .set_model_provider(Box::new(RecordingVisionProvider {
+                    requests: Arc::clone(&restore_requests),
+                }));
+        }
+        server
+            .handle_session_prompt(
+                &serde_json::json!({ "sessionId": session_id, "prompt": "just text now" }),
+                &serde_json::json!(2),
+            )
+            .await
+            .expect("the next prompt must reach the provider");
+
+        let omitted =
+            kinetic_runtime::i18n::get_required_cli_string("turn-failed-attachment-omitted");
+        {
+            let restore_requests = restore_requests.lock();
+            assert_eq!(restore_requests.len(), 1, "expected one provider request");
+            for message in &restore_requests[0] {
+                assert!(
+                    !message.content.contains("data:image"),
+                    "the restored seed must not re-attach the rejected image past the tool carrier: {message:?}"
+                );
+            }
+            assert!(
+                restore_requests[0]
+                    .iter()
+                    .any(|message| message.content.contains(&omitted)),
+                "the restored seed should say an attachment was dropped: {:?}",
+                restore_requests[0]
+            );
+        }
+
+        // ── Phase B: live path through the real turn machinery ───────
+        // The provider advertises vision (no marker stripping) but no native
+        // tools (prompt mode). Round 0 requests a real auto-approved tool;
+        // round 1 fails non-retryably, leaving the carrier in the failed
+        // turn's history.
+        struct PromptToolVisionProvider {
+            requests: Arc<parking_lot::Mutex<Vec<Vec<ChatMessage>>>>,
+            calls: std::sync::atomic::AtomicUsize,
+            tool_call_response: String,
+        }
+
+        impl kinetic_api::attribution::Attributable for PromptToolVisionProvider {
+            fn role(&self) -> kinetic_api::attribution::Role {
+                kinetic_api::attribution::Role::Provider(
+                    kinetic_api::attribution::ProviderKind::Model(
+                        kinetic_api::attribution::ModelProviderKind::Custom,
+                    ),
+                )
+            }
+
+            fn alias(&self) -> &str {
+                "PromptToolVisionProvider"
+            }
+        }
+
+        #[async_trait]
+        impl ModelProvider for PromptToolVisionProvider {
+            fn capabilities(&self) -> kinetic_api::model_provider::ProviderCapabilities {
+                kinetic_api::model_provider::ProviderCapabilities {
+                    native_tool_calling: false,
+                    vision: true,
+                    ..Default::default()
+                }
+            }
+
+            async fn chat_with_system(
+                &self,
+                _system_prompt: Option<&str>,
+                _message: &str,
+                _model: &str,
+                _temperature: Option<f64>,
+            ) -> anyhow::Result<String> {
+                anyhow::bail!("400 Bad Request: provider rejected the request")
+            }
+
+            async fn chat(
+                &self,
+                request: kinetic_api::model_provider::ChatRequest<'_>,
+                _model: &str,
+                _temperature: Option<f64>,
+            ) -> anyhow::Result<kinetic_api::model_provider::ChatResponse> {
+                let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.requests.lock().push(request.messages.to_vec());
+                match call {
+                    0 => Ok(kinetic_api::model_provider::ChatResponse {
+                        text: Some(self.tool_call_response.clone()),
+                        tool_calls: Vec::new(),
+                        usage: None,
+                        reasoning_content: None,
+                    }),
+                    1 => anyhow::bail!("400 Bad Request: provider rejected the request"),
+                    _ => Ok(kinetic_api::model_provider::ChatResponse {
+                        text: Some("recovered".to_string()),
+                        tool_calls: Vec::new(),
+                        usage: None,
+                        reasoning_content: None,
+                    }),
+                }
+            }
+        }
+
+        let live_cwd = tempfile::tempdir().unwrap();
+        let live_image = live_cwd.path().join("carrier-live.png");
+        std::fs::write(&live_image, &file_bytes).unwrap();
+        let live_marker = format!("look at this [IMAGE:{}]", live_image.display());
+        let tool_call_response = format!(
+            "<tool_call>\n{{\"name\": \"file_read\", \"arguments\": {{\"path\": {}}}}}\n</tool_call>",
+            serde_json::to_string(&live_image.display().to_string())
+                .expect("a path string serializes to JSON")
+        );
+
+        let live_store = Arc::new(
+            kinetic_infra::acp_session_store::AcpSessionStore::new(live_cwd.path()).unwrap(),
+        );
+        let live_server = Arc::new(AcpServer::new_with_store(
+            make_test_config(live_cwd.path()),
+            AcpServerConfig::default(),
+            Arc::clone(&live_store),
+        ));
+        let live_session = live_server
+            .handle_session_new(&serde_json::json!({
+                "cwd": live_cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("session/new must succeed")["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let live_requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        {
+            let session = live_server
+                .sessions
+                .lock()
+                .await
+                .get(&live_session)
+                .cloned()
+                .expect("new session must be active");
+            session
+                .lock()
+                .await
+                .agent
+                .set_model_provider(Box::new(PromptToolVisionProvider {
+                    requests: Arc::clone(&live_requests),
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                    tool_call_response,
+                }));
+        }
+
+        // The image-bearing turn runs one prompt-mode tool round, then fails.
+        live_server
+            .handle_session_prompt(
+                &serde_json::json!({ "sessionId": live_session, "prompt": live_marker }),
+                &serde_json::json!(1),
+            )
+            .await
+            .expect_err("the provider rejection must fail the turn");
+
+        // Precondition: the failed turn really produced the carrier shape, and
+        // the durable transcript still carries the attachment for the client.
+        let stored = live_store
+            .load_session(&live_session)
+            .unwrap()
+            .expect("session record exists");
+        assert!(
+            stored
+                .messages
+                .iter()
+                .any(|m| matches!(m, ConversationMessage::Chat(chat)
+                    if chat.role == "user" && chat.content.starts_with("[Tool results]"))),
+            "precondition: the failed turn must contain a prompt-mode tool-result carrier: {:?}",
+            stored.messages
+        );
+        assert!(
+            stored.messages.iter().any(
+                |m| matches!(m, ConversationMessage::Chat(chat) if chat.content.contains("carrier-live.png"))
+            ),
+            "the failed turn's transcript must keep the attachment for client replay: {:?}",
+            stored.messages
+        );
+
+        // The next active prompt must not re-attach the rejected image.
+        live_server
+            .handle_session_prompt(
+                &serde_json::json!({ "sessionId": live_session, "prompt": "just text now" }),
+                &serde_json::json!(2),
+            )
+            .await
+            .expect("the next prompt must reach the provider");
+
+        let live_requests = live_requests.lock();
+        assert_eq!(
+            live_requests.len(),
+            3,
+            "two requests for the failed turn (tool round + failure), one for the next prompt: {:?}",
+            live_requests.len()
+        );
+        assert!(
+            live_requests[0]
+                .iter()
+                .any(|m| m.content.contains("data:image")),
+            "precondition: the first request carried the image"
+        );
+        for message in &live_requests[2] {
+            assert!(
+                !message.content.contains("data:image"),
+                "the rejected image must not be re-attached past the tool carrier: {message:?}"
+            );
+        }
+        assert!(
+            live_requests[2]
+                .iter()
+                .any(|message| message.content.contains(&omitted)),
+            "the live seed should say an attachment was dropped: {:?}",
+            live_requests[2]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_load_aligns_replay_with_repaired_trimmed_seed() {
+        use kinetic_api::model_provider::{ChatMessage, ConversationMessage, ToolCall};
+
+        // The C1 witness, composed: an older failed turn (user prompt,
+        // unmatched native call, durable failure sentinel) followed by a newer
+        // complete turn, restored under a history cap that retains only the
+        // newer turn. Repair removes the unmatched call from the provider
+        // seed, so the seed and the stored transcript stop sharing row
+        // positions; replay must follow the seed's retained boundary back to
+        // the original stored row instead of skipping a scalar count of stored
+        // rows — which would replay the older failure sentinel and drift from
+        // the provider's retained history.
+
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "sess-trim-repair-alignment";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        store
+            .append_turn(
+                session_id,
+                &AcpServer::failed_turn_transcript(vec![
+                    ConversationMessage::Chat(ChatMessage::user("older prompt before the failure")),
+                    ConversationMessage::AssistantToolCalls {
+                        text: None,
+                        tool_calls: vec![ToolCall {
+                            id: "toolu_orphan_trim".to_string(),
+                            name: "shell".to_string(),
+                            arguments: "{}".to_string(),
+                            extra_content: None,
+                        }],
+                        reasoning_content: None,
+                    },
+                ]),
+            )
+            .unwrap();
+        store
+            .append_turn(
+                session_id,
+                &[
+                    ConversationMessage::Chat(ChatMessage::user("newer complete question")),
+                    ConversationMessage::Chat(ChatMessage::assistant("newer complete answer")),
+                ],
+            )
+            .unwrap();
+
+        // The cap retains only the newer turn: after repair the seed body is
+        // [older user, older failure sentinel, newer user, newer assistant],
+        // two complete turns, and a one-turn cap drops the older one whole.
+        let mut config = make_test_config(cwd.path());
+        config
+            .runtime_profiles
+            .get_mut("default")
+            .unwrap()
+            .max_history_messages = Some(1);
+        let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let server = Arc::new(AcpServer::new_with_writer_and_store(
+            config,
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        ));
+
+        server
+            .handle_session_load(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect("session/load must succeed");
+
+        let mut notifications = Vec::new();
+        while let Ok(message) = writer_rx.try_recv() {
+            notifications.push(serde_json::from_str::<serde_json::Value>(&message).unwrap());
+        }
+        let old_sentinel = kinetic_runtime::i18n::get_required_cli_string("turn-failed");
+        let replayed_text = |notifications: &[serde_json::Value]| {
+            notifications
+                .iter()
+                .filter_map(|n| {
+                    n["params"]["update"]["content"]["text"]
+                        .as_str()
+                        .map(ToString::to_string)
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let replayed = replayed_text(&notifications);
+        assert!(
+            replayed.contains("newer complete question")
+                && replayed.contains("newer complete answer"),
+            "client replay must start at the retained newer turn: {replayed:?}"
+        );
+        assert!(
+            !replayed.contains("older prompt before the failure")
+                && !replayed.contains(&old_sentinel),
+            "client replay must not resurrect the trimmed older failed turn: {replayed:?}"
+        );
+        assert!(
+            !replayed.contains("toolu_orphan_trim"),
+            "the unmatched call's turn was trimmed; its rows are not replayed: {replayed:?}"
+        );
+
+        // The provider seed contains exactly the retained safe turn.
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let session = server
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .expect("loaded session must be active");
+        session
+            .lock()
+            .await
+            .agent
+            .set_model_provider(Box::new(RecordingNativeProvider {
+                requests: Arc::clone(&requests),
+            }));
+        server
+            .handle_session_prompt(
+                &serde_json::json!({ "sessionId": session_id, "prompt": "continue from the retained turn" }),
+                &serde_json::json!(2),
+            )
+            .await
+            .expect("the next prompt must reach the provider");
+
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 1, "expected exactly one provider request");
+        let seed_text = requests[0]
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            seed_text.contains("newer complete question")
+                && seed_text.contains("newer complete answer"),
+            "the provider seed must retain the safe newer turn: {seed_text:?}"
+        );
+        assert!(
+            !seed_text.contains("older prompt before the failure")
+                && !seed_text.contains(&old_sentinel)
+                && !seed_text.contains("toolu_orphan_trim"),
+            "the provider seed must exclude the repaired, trimmed older turn: {seed_text:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_restore_does_not_leak_a_finalization_gate() {
+        // `session_gate` creates its entry on a miss and a restore must take it
+        // before the existence check, so a client that asks for session ids that
+        // do not exist could otherwise grow `session_gates` without bound.
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let server = Arc::new(AcpServer::new_with_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            Arc::clone(&store),
+        ));
+
+        for id in ["ghost-load-1", "ghost-load-2"] {
+            server
+                .handle_session_load(&serde_json::json!({
+                    "sessionId": id,
+                    "cwd": cwd.path().to_string_lossy()
+                }))
+                .await
+                .expect_err("loading an unknown session must fail");
+        }
+        server
+            .handle_session_resume(&serde_json::json!({
+                "sessionId": "ghost-resume",
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect_err("resuming an unknown session must fail");
+
+        assert!(
+            server.session_gates.lock().unwrap().is_empty(),
+            "rejected restores left gates behind: {:?}",
+            server
+                .session_gates
+                .lock()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn cancelled_turn_transcript_swaps_generic_marker_for_structured_event() {
+        use kinetic_api::model_provider::{ChatMessage, ConversationMessage};
+
+        let interrupted =
+            kinetic_runtime::i18n::get_required_cli_string("turn-interrupted-by-user");
+
+        // The runtime tags a cancelled turn with a standalone generic marker.
+        let standalone = AcpServer::cancelled_turn_transcript(vec![
+            ConversationMessage::Chat(ChatMessage::user("do the thing")),
+            ConversationMessage::Chat(ChatMessage::assistant(interrupted.clone())),
+        ]);
+        // Generic marker gone; a structured cancellation event took its place.
+        assert!(
+            !standalone.iter().any(|m| matches!(
+                m,
+                ConversationMessage::Chat(c) if c.content == interrupted
+            )),
+            "generic interruption marker must not be persisted: {standalone:?}"
+        );
+        assert!(
+            AcpServer::is_cancellation_event(standalone.last().unwrap()),
+            "transcript must end with the structured cancellation event"
+        );
+
+        // When the marker is folded onto partial assistant text, only the marker
+        // suffix is stripped; the partial text is preserved.
+        let folded = AcpServer::cancelled_turn_transcript(vec![ConversationMessage::Chat(
+            ChatMessage::assistant(format!("partial answer\n\n{interrupted}")),
+        )]);
+        match &folded[0] {
+            ConversationMessage::Chat(chat) => assert_eq!(chat.content, "partial answer"),
+            other => panic!("expected preserved partial text, got {other:?}"),
+        }
+        assert!(AcpServer::is_cancellation_event(folded.last().unwrap()));
+    }
+
+    #[test]
+    fn is_cancellation_event_ignores_real_tool_call_sharing_the_sentinel_name() {
+        use kinetic_api::model_provider::{ConversationMessage, ToolCall};
+
+        // The genuine sentinel is still recognised.
+        assert!(
+            AcpServer::is_cancellation_event(&AcpServer::cancellation_event()),
+            "the structured cancellation event must be recognised"
+        );
+
+        // A real native/custom/MCP tool call that merely shares the reserved
+        // name — but carries a genuine call id and real arguments — must NOT be
+        // classified as a cancellation, so it is never stripped from provider
+        // history and replayed as a client cancel.
+        let real_call = ConversationMessage::AssistantToolCalls {
+            text: None,
+            tool_calls: vec![ToolCall {
+                id: "call_abc123".to_string(),
+                name: CANCELLATION_EVENT_TOOL_NAME.to_string(),
+                arguments: r#"{"target":"prod"}"#.to_string(),
+                extra_content: None,
+            }],
+            reasoning_content: None,
+        };
+        assert!(
+            !AcpServer::is_cancellation_event(&real_call),
+            "an ordinary tool call named turn-cancelled must remain a tool call"
+        );
+
+        // Even with the reserved id and empty args, accompanying assistant text
+        // means it is not the bare sentinel shape.
+        let with_text = ConversationMessage::AssistantToolCalls {
+            text: Some("here you go".to_string()),
+            tool_calls: vec![ToolCall {
+                id: CANCELLATION_EVENT_TOOL_ID.to_string(),
+                name: CANCELLATION_EVENT_TOOL_NAME.to_string(),
+                arguments: CANCELLATION_EVENT_TOOL_ARGS.to_string(),
+                extra_content: None,
+            }],
+            reasoning_content: None,
+        };
+        assert!(
+            !AcpServer::is_cancellation_event(&with_text),
+            "a tool call with surrounding assistant text is not the sentinel"
+        );
+
+        // The restore seed excludes the true sentinel but keeps the real
+        // same-named call, so it survives into provider history.
+        let seed: Vec<_> = [real_call, AcpServer::cancellation_event()]
+            .into_iter()
+            .filter(|message| !AcpServer::is_cancellation_event(message))
+            .collect();
+        assert_eq!(
+            seed.len(),
+            1,
+            "only the true sentinel is filtered from provider history"
+        );
+        assert!(
+            !AcpServer::is_cancellation_event(&seed[0]),
+            "the real same-named tool call survives into provider history"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_aborts_when_session_replaced_before_acquiring_the_gate() {
+        use std::sync::Arc as StdArc;
+
+        let cwd = tempfile::tempdir().unwrap();
+        let store = StdArc::new(
+            kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap(),
+        );
+        let server = StdArc::new(AcpServer::new_with_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            StdArc::clone(&store),
+        ));
+
+        let new_session = |alias: &str| {
+            let server = StdArc::clone(&server);
+            let cwd = cwd.path().to_string_lossy().to_string();
+            let alias = alias.to_string();
+            async move {
+                server
+                    .handle_session_new(&serde_json::json!({ "cwd": cwd, "agentAlias": alias }))
+                    .await
+                    .expect("session/new must succeed")["sessionId"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            }
+        };
+
+        let s1 = new_session("test-agent").await;
+        // A second session provides a genuinely different Arc to install as the replacement.
+        let s2 = new_session("test-agent").await;
+        let arc2 = server
+            .sessions
+            .lock()
+            .await
+            .get(&s2)
+            .cloned()
+            .expect("s2 must be active");
+
+        let before = store
+            .load_session(&s1)
+            .unwrap()
+            .expect("s1 record exists")
+            .messages
+            .len();
+
+        // Hold the finalization gate so the prompt parks right after admission
+        // (session clone + cancel-token registration) and before it can run.
+        let gate = server.session_gate(&s1);
+        let guard = gate.lock().await;
+
+        let prompt_server = StdArc::clone(&server);
+        let prompt_sid = s1.clone();
+        let prompt = kinetic_spawn::spawn!(async move {
+            prompt_server
+                .handle_session_prompt(
+                    &serde_json::json!({ "sessionId": prompt_sid, "prompt": "hi" }),
+                    &serde_json::json!(1),
+                )
+                .await
+        });
+
+        // Wait until the prompt has been admitted (token registered) and is now
+        // parked on the gate we hold.
+        loop {
+            let admitted = server
+                .cancel_tokens
+                .lock()
+                .expect("cancel_tokens lock")
+                .contains_key(&s1);
+            if admitted {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        // Simulate a `session/load` replacement: swap the live map entry for a
+        // different session generation while the prompt is parked on the gate.
+        server
+            .sessions
+            .lock()
+            .await
+            .insert(s1.clone(), StdArc::clone(&arc2));
+
+        // Release the gate; the parked prompt must revalidate its captured
+        // generation and abort rather than run on the superseded session.
+        drop(guard);
+
+        let result = prompt.await.expect("prompt task joins");
+        assert!(
+            result.is_err(),
+            "prompt must abort when its session was replaced under the gate"
+        );
+
+        // The superseded generation never ran, so no terminal transcript was appended.
+        let after = store
+            .load_session(&s1)
+            .unwrap()
+            .expect("s1 record exists")
+            .messages
+            .len();
+        assert_eq!(
+            after, before,
+            "an aborted prompt must not append onto the replaced session"
+        );
+    }
+
+    #[tokio::test]
+    async fn restored_cancelled_turn_replays_client_cancel_and_hides_marker_from_provider() {
+        use kinetic_api::model_provider::{ChatMessage, ConversationMessage};
+
+        let interrupted =
+            kinetic_runtime::i18n::get_required_cli_string("turn-interrupted-by-user");
+        let client_cancel =
+            kinetic_runtime::i18n::get_required_cli_string("turn-cancelled-client-rpc");
+
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let session_id = "sess-cancelled-turn";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        store
+            .append_turn(
+                session_id,
+                &AcpServer::cancelled_turn_transcript(vec![
+                    ConversationMessage::Chat(ChatMessage::user("summarize the repo")),
+                    ConversationMessage::Chat(ChatMessage::assistant(interrupted.clone())),
+                ]),
+            )
+            .unwrap();
+
+        let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let server = Arc::new(AcpServer::new_with_writer_and_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        ));
+        server
+            .handle_session_load(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect("cancelled transcript must reload");
+
+        let mut notifications = Vec::new();
+        while let Ok(message) = writer_rx.try_recv() {
+            notifications.push(serde_json::from_str::<serde_json::Value>(&message).unwrap());
+        }
+        // The cancellation replays as the live client-cancel tool_call update...
+        assert!(
+            notifications.iter().any(|n| {
+                n["params"]["update"]["sessionUpdate"] == "tool_call"
+                    && n["params"]["update"]["name"] == "turn-cancelled"
+            }),
+            "load must replay the client-cancel update: {notifications:?}"
+        );
+        // ...never as a verbatim assistant interruption message.
+        assert!(
+            !notifications.iter().any(|n| {
+                let text = &n["params"]["update"]["content"]["text"];
+                text == &serde_json::Value::String(interrupted.clone())
+            }),
+            "the generic interruption marker must not replay as an assistant message: {notifications:?}"
+        );
+
+        // The next prompt must not carry any transport marker or the sentinel
+        // into provider history.
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let session = server
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .expect("loaded session must be active");
+        session
+            .lock()
+            .await
+            .agent
+            .set_model_provider(Box::new(RecordingNativeProvider {
+                requests: Arc::clone(&requests),
+            }));
+
+        server
+            .handle_session_prompt(
+                &serde_json::json!({ "sessionId": session_id, "prompt": "now continue" }),
+                &serde_json::json!(2),
+            )
+            .await
+            .expect("the next prompt must reach the provider");
+
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 1, "expected exactly one provider request");
+        for message in &requests[0] {
+            assert!(
+                !message.content.contains(&interrupted)
+                    && !message.content.contains(&client_cancel)
+                    && !message.content.contains(CANCELLATION_EVENT_TOOL_NAME),
+                "provider history leaked a cancellation marker/sentinel: {message:?}"
+            );
+        }
+        assert!(
+            requests[0]
+                .iter()
+                .any(|m| m.role == "user" && m.content.contains("summarize the repo")),
+            "the pre-cancellation transcript must survive for the provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_waits_for_terminal_persistence_before_returning() {
+        use std::sync::Arc as StdArc;
+
+        use tokio::sync::Notify;
+
+        // A provider that parks inside `chat` — while parked, the turn task holds
+        // the session lock, so a racing `session/close` cannot proceed and the
+        // terminal transcript is not yet committed.
+        struct BarrierProvider {
+            entered: StdArc<Notify>,
+            release: StdArc<Notify>,
+        }
+
+        impl kinetic_api::attribution::Attributable for BarrierProvider {
+            fn role(&self) -> kinetic_api::attribution::Role {
+                kinetic_api::attribution::Role::Provider(
+                    kinetic_api::attribution::ProviderKind::Model(
+                        kinetic_api::attribution::ModelProviderKind::Custom,
+                    ),
+                )
+            }
+            fn alias(&self) -> &str {
+                "BarrierProvider"
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl kinetic_api::model_provider::ModelProvider for BarrierProvider {
+            async fn chat_with_system(
+                &self,
+                _system_prompt: Option<&str>,
+                _message: &str,
+                _model: &str,
+                _temperature: Option<f64>,
+            ) -> anyhow::Result<String> {
+                Ok("done".to_string())
+            }
+
+            async fn chat(
+                &self,
+                _request: kinetic_api::model_provider::ChatRequest<'_>,
+                _model: &str,
+                _temperature: Option<f64>,
+            ) -> anyhow::Result<kinetic_api::model_provider::ChatResponse> {
+                self.entered.notify_one();
+                self.release.notified().await;
+                Ok(kinetic_api::model_provider::ChatResponse {
+                    text: Some("done".to_string()),
+                    tool_calls: Vec::new(),
+                    usage: None,
+                    reasoning_content: None,
+                })
+            }
+        }
+
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let server = Arc::new(AcpServer::new_with_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            Arc::clone(&store),
+        ));
+        let session_id = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("session/new must succeed")["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let entered = StdArc::new(Notify::new());
+        let release = StdArc::new(Notify::new());
+        {
+            let session = server
+                .sessions
+                .lock()
+                .await
+                .get(&session_id)
+                .cloned()
+                .expect("new session must be active");
+            session
+                .lock()
+                .await
+                .agent
+                .set_model_provider(Box::new(BarrierProvider {
+                    entered: StdArc::clone(&entered),
+                    release: StdArc::clone(&release),
+                }));
+        }
+
+        let messages_before = store
+            .load_session(&session_id)
+            .unwrap()
+            .expect("session record exists")
+            .messages
+            .len();
+
+        let prompt_server = Arc::clone(&server);
+        let prompt_sid = session_id.clone();
+        let prompt = kinetic_spawn::spawn!(async move {
+            prompt_server
+                .handle_session_prompt(
+                    &serde_json::json!({ "sessionId": prompt_sid, "prompt": "hi" }),
+                    &serde_json::json!(1),
+                )
+                .await
+        });
+
+        // Turn is now parked inside the provider, holding the session lock.
+        entered.notified().await;
+
+        // session/close cancels the in-flight turn and then waits on the session
+        // lock. The turn task persists its terminal (cancelled) transcript while
+        // still holding that lock, so close can only acquire it — and return —
+        // after the transcript is committed. Release the barrier too so the turn
+        // also unwinds cleanly if cancellation did not abort the parked call.
+        release.notify_one();
+        server
+            .handle_session_close(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect("close resolves");
+
+        // Before this fix persistence ran after the lock was released, so close
+        // could return first and expose the session for reload with stale rows.
+        assert!(
+            store
+                .load_session(&session_id)
+                .unwrap()
+                .expect("session record exists")
+                .messages
+                .len()
+                > messages_before,
+            "close returned before the terminal transcript was committed"
+        );
+        prompt.await.unwrap().expect("prompt turn resolves");
+    }
+
+    #[tokio::test]
+    async fn close_then_immediate_load_waits_for_terminal_persistence() {
+        use std::sync::Arc as StdArc;
+
+        use tokio::sync::Notify;
+
+        // A provider that parks inside `chat` so the prompt turn stays in flight
+        // (holding both the session lock and the per-session finalization gate).
+        struct BarrierProvider {
+            entered: StdArc<Notify>,
+            release: StdArc<Notify>,
+        }
+        impl kinetic_api::attribution::Attributable for BarrierProvider {
+            fn role(&self) -> kinetic_api::attribution::Role {
+                kinetic_api::attribution::Role::Provider(
+                    kinetic_api::attribution::ProviderKind::Model(
+                        kinetic_api::attribution::ModelProviderKind::Custom,
+                    ),
+                )
+            }
+            fn alias(&self) -> &str {
+                "BarrierProvider"
+            }
+        }
+        #[async_trait::async_trait]
+        impl kinetic_api::model_provider::ModelProvider for BarrierProvider {
+            async fn chat_with_system(
+                &self,
+                _system_prompt: Option<&str>,
+                _message: &str,
+                _model: &str,
+                _temperature: Option<f64>,
+            ) -> anyhow::Result<String> {
+                Ok("done".to_string())
+            }
+            async fn chat(
+                &self,
+                _request: kinetic_api::model_provider::ChatRequest<'_>,
+                _model: &str,
+                _temperature: Option<f64>,
+            ) -> anyhow::Result<kinetic_api::model_provider::ChatResponse> {
+                self.entered.notify_one();
+                self.release.notified().await;
+                Ok(kinetic_api::model_provider::ChatResponse {
+                    text: Some("done".to_string()),
+                    tool_calls: Vec::new(),
+                    usage: None,
+                    reasoning_content: None,
+                })
+            }
+        }
+
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let server = Arc::new(AcpServer::new_with_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            Arc::clone(&store),
+        ));
+        let session_id = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("session/new must succeed")["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let entered = StdArc::new(Notify::new());
+        let release = StdArc::new(Notify::new());
+        {
+            let session = server
+                .sessions
+                .lock()
+                .await
+                .get(&session_id)
+                .cloned()
+                .expect("new session must be active");
+            session
+                .lock()
+                .await
+                .agent
+                .set_model_provider(Box::new(BarrierProvider {
+                    entered: StdArc::clone(&entered),
+                    release: StdArc::clone(&release),
+                }));
+        }
+
+        let before = store
+            .load_session(&session_id)
+            .unwrap()
+            .expect("session record exists")
+            .messages
+            .len();
+
+        // Prompt is parked in the provider, holding the session lock + the gate.
+        let prompt_server = Arc::clone(&server);
+        let prompt_sid = session_id.clone();
+        let prompt = kinetic_spawn::spawn!(async move {
+            prompt_server
+                .handle_session_prompt(
+                    &serde_json::json!({ "sessionId": prompt_sid, "prompt": "hi" }),
+                    &serde_json::json!(1),
+                )
+                .await
+        });
+        entered.notified().await;
+
+        // A `session/load` spawned while the prompt is in flight must block on the
+        // finalization gate — it cannot reach the store read. (The prompt is still
+        // parked here; nothing has cancelled it yet.)
+        let load_server = Arc::clone(&server);
+        let load_sid = session_id.clone();
+        let mut load = kinetic_spawn::spawn!(async move {
+            load_server
+                .handle_session_load(&serde_json::json!({ "sessionId": load_sid }))
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_millis(150), &mut load)
+            .await
+            .expect_err("load must block on the finalization gate while the prompt is in flight");
+
+        // Close participates in the same lifecycle guard: it cannot remove the
+        // map entry while the prompt holds the gate, so the prompt terminalizes
+        // (committing its transcript) before close proceeds. Deterministic order:
+        // release the parked turn, let it finish, then close, then load.
+        release.notify_one();
+        prompt.await.unwrap().expect("prompt resolves");
+
+        // The racing load wakes after the prompt released the gate, but the
+        // session is still active (close has not run yet), so it is correctly
+        // rejected instead of seeding a replacement underneath it.
+        let racing_load = load
+            .await
+            .unwrap()
+            .expect_err("a load racing an active session must be rejected");
+        assert_eq!(racing_load.code, INVALID_PARAMS, "already-active rejection");
+
+        // Close removes the entry only after the prompt's terminal transcript
+        // is committed.
+        server
+            .handle_session_close(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect("close resolves");
+
+        // An immediate load after close reads the committed rows.
+        server
+            .handle_session_load(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect("load resolves against committed rows");
+
+        assert!(
+            store
+                .load_session(&session_id)
+                .unwrap()
+                .expect("session record exists")
+                .messages
+                .len()
+                > before,
+            "the terminal transcript must be committed before the load reads the store"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_during_admitted_prompt_waits_for_terminal_persistence() {
+        use std::sync::Arc as StdArc;
+
+        // The scheduling window the lock-await cannot cover: `session/prompt`
+        // has validated and spawned its turn task, but that task has not yet
+        // been polled, so the session mutex is still free. The test holds the
+        // session lock to park the spawned task there, closes while the prompt
+        // holds the finalization gate, and then releases the lock. Close must
+        // not return before the admitted prompt's terminal (cancelled)
+        // transcript is committed, and nothing may append after it returns.
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let server = Arc::new(AcpServer::new_with_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            Arc::clone(&store),
+        ));
+        let session_id = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("session/new must succeed")["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Records any provider call; the cancelled turn must abort at the
+        // tool loop's first cancellation check, before the provider is reached.
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        {
+            let session = server
+                .sessions
+                .lock()
+                .await
+                .get(&session_id)
+                .cloned()
+                .expect("new session must be active");
+            session
+                .lock()
+                .await
+                .agent
+                .set_model_provider(Box::new(RecordingNativeProvider {
+                    requests: Arc::clone(&requests),
+                }));
+        }
+
+        let before = store
+            .load_session(&session_id)
+            .unwrap()
+            .expect("session record exists")
+            .messages
+            .len();
+
+        // Hold the session lock so the spawned turn task parks before its
+        // first poll of the agent — the post-validation/pre-lock window.
+        let session_arc = server
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+            .expect("session must be active");
+        let session_guard = session_arc.lock().await;
+
+        let prompt_server = StdArc::clone(&server);
+        let prompt_sid = session_id.clone();
+        let prompt = kinetic_spawn::spawn!(async move {
+            prompt_server
+                .handle_session_prompt(
+                    &serde_json::json!({ "sessionId": prompt_sid, "prompt": "hi" }),
+                    &serde_json::json!(1),
+                )
+                .await
+        });
+
+        // Deterministic barrier: wait until the prompt holds the finalization
+        // gate (past admission and generation revalidation). Close cannot
+        // remove the map entry while the gate is held, so from here on the
+        // prompt's terminalization is ordered before close returns. Drop our
+        // probe clone so it cannot hold the gate entry alive at reclaim time.
+        let gate = server.session_gate(&session_id);
+        loop {
+            if gate.try_lock().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        drop(gate);
+
+        // Close while the turn task is spawned-but-not-yet-locked. It cancels
+        // the token and then parks on the gate the prompt holds.
+        let close_server = StdArc::clone(&server);
+        let close_sid = session_id.clone();
+        let close = kinetic_spawn::spawn!(async move {
+            close_server
+                .handle_session_close(&serde_json::json!({ "sessionId": close_sid }))
+                .await
+        });
+
+        // Release the lock: the task runs with the token already cancelled,
+        // aborts at the first cancellation check, and persists its terminal
+        // transcript while the prompt still holds the gate.
+        drop(session_guard);
+
+        close.await.unwrap().expect("close resolves");
+
+        let after_close = store
+            .load_session(&session_id)
+            .unwrap()
+            .expect("session record exists")
+            .messages
+            .len();
+        assert!(
+            after_close > before,
+            "close returned before the admitted prompt's terminal outcome was persisted"
+        );
+
+        // The turn aborted before dispatching anything to the provider.
+        assert!(
+            requests.lock().is_empty(),
+            "a turn cancelled in the admitted window must not reach the provider"
+        );
+
+        // And nothing appends after close has returned.
+        prompt.await.unwrap().expect("prompt resolves as cancelled");
+        let after_join = store
+            .load_session(&session_id)
+            .unwrap()
+            .expect("session record exists")
+            .messages
+            .len();
+        assert_eq!(
+            after_join, after_close,
+            "no terminal append may occur after close/stop returns"
+        );
+
+        // The gate was reclaimed once the last borrower left.
+        assert!(
+            server.session_gates.lock().unwrap().is_empty(),
+            "close must reclaim the finalization gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_during_admitted_prompt_waits_for_terminal_persistence() {
+        use std::sync::Arc as StdArc;
+
+        // Same scheduling window as the close variant, for `session/stop`.
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let server = Arc::new(AcpServer::new_with_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            Arc::clone(&store),
+        ));
+        let session_id = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("session/new must succeed")["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let before = store
+            .load_session(&session_id)
+            .unwrap()
+            .expect("session record exists")
+            .messages
+            .len();
+
+        let session_arc = server
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .cloned()
+            .expect("session must be active");
+        let session_guard = session_arc.lock().await;
+
+        let prompt_server = StdArc::clone(&server);
+        let prompt_sid = session_id.clone();
+        let prompt = kinetic_spawn::spawn!(async move {
+            prompt_server
+                .handle_session_prompt(
+                    &serde_json::json!({ "sessionId": prompt_sid, "prompt": "hi" }),
+                    &serde_json::json!(1),
+                )
+                .await
+        });
+
+        let gate = server.session_gate(&session_id);
+        loop {
+            if gate.try_lock().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        drop(gate);
+
+        let stop_server = StdArc::clone(&server);
+        let stop_sid = session_id.clone();
+        let stop = kinetic_spawn::spawn!(async move {
+            stop_server
+                .handle_session_stop(&serde_json::json!({ "sessionId": stop_sid }))
+                .await
+        });
+
+        drop(session_guard);
+
+        stop.await.unwrap().expect("stop resolves");
+
+        let after_stop = store
+            .load_session(&session_id)
+            .unwrap()
+            .expect("session record exists")
+            .messages
+            .len();
+        assert!(
+            after_stop > before,
+            "stop returned before the admitted prompt's terminal outcome was persisted"
+        );
+
+        prompt.await.unwrap().expect("prompt resolves as cancelled");
+        let after_join = store
+            .load_session(&session_id)
+            .unwrap()
+            .expect("session record exists")
+            .messages
+            .len();
+        assert_eq!(
+            after_join, after_stop,
+            "no terminal append may occur after stop returns"
+        );
+        assert!(
+            server.session_gates.lock().unwrap().is_empty(),
+            "stop must reclaim the finalization gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_prompt_leaves_stored_messages_unchanged() {
+        // A blank/whitespace prompt clears `parse_prompt` (it is a non-empty
+        // JSON string) but `turn_streamed_with_steering_state` rejects it
+        // before any provider work, returning `StreamedTurnError` with an empty
+        // `new_messages`. This drives the real failed-turn branch in
+        // `handle_session_prompt` — no mock provider needed — and must NOT
+        // append an assistant-only `turn-failed` marker, otherwise repeating an
+        // invalid request would pollute `session/load`.
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let server = Arc::new(AcpServer::new_with_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            Arc::clone(&store),
+        ));
+
+        let new_result = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("session/new must succeed");
+        let session_id = new_result["sessionId"].as_str().unwrap().to_string();
+
+        let before = store
+            .load_session(&session_id)
+            .unwrap()
+            .expect("session record must exist after session/new")
+            .messages;
+
+        let err = server
+            .handle_session_prompt(
+                &serde_json::json!({
+                    "sessionId": session_id.clone(),
+                    "prompt": "   "
+                }),
+                &serde_json::json!(1),
+            )
+            .await
+            .expect_err("a blank turn must surface an RPC error");
+        assert_eq!(err.code, INTERNAL_ERROR);
+
+        let after = store
+            .load_session(&session_id)
+            .unwrap()
+            .expect("session record must still exist")
+            .messages;
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "a rejected blank turn must not persist any messages: {after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_load_returns_not_found_for_unknown_id() {
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let (writer_tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
+        let server = AcpServer::new_with_writer_and_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            writer_tx,
+            store,
+        );
+
+        let err = server
+            .handle_session_load(&serde_json::json!({ "sessionId": "ghost" }))
+            .await
+            .expect_err("unknown session must fail");
+
+        assert_eq!(err.code, SESSION_NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn session_load_rejects_already_active_session() {
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let (writer_tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
+        let server = Arc::new(AcpServer::new_with_writer_and_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        ));
+
+        // Create and load the session once to put it in memory
+        let session_id = "sess-already-active";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        server
+            .handle_session_load(&serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .unwrap();
+
+        // Second load must be rejected
+        let err = server
+            .handle_session_load(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect_err("session/load for active session must fail");
+
+        assert_eq!(err.code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn turn_cancelled_notification_is_styled_tool_call() {
+        let note = AcpServer::turn_cancelled_notification("sess-c");
+        let update = &note.params["update"];
+        assert_eq!(update["sessionUpdate"], "tool_call");
+        assert_eq!(update["name"], "turn-cancelled");
+        assert_eq!(update["status"], "completed");
+        assert!(
+            update["content"][0]["content"]["text"]
+                .as_str()
+                .is_some_and(|t| !t.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn session_resume_restores_without_replay() {
+        use kinetic_api::model_provider::{ChatMessage, ConversationMessage};
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+
+        let session_id = "sess-resume-test";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        store
+            .append_turn(
+                session_id,
+                &[ConversationMessage::Chat(ChatMessage::user("hello"))],
+            )
+            .unwrap();
+
+        let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let server = Arc::new(AcpServer::new_with_writer_and_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        ));
+
+        let result = server
+            .handle_session_resume(&serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/resume must succeed");
+
+        // Result is empty object
+        assert_eq!(result, serde_json::json!({}));
+
+        // Session must be in memory
+        assert!(server.sessions.lock().await.contains_key(session_id));
+
+        // A resume with no stored plan must not emit notifications (transcript
+        // is seeded into the agent, not replayed to the client as updates).
+        assert!(
+            writer_rx.try_recv().is_err(),
+            "session/resume with no plan must not emit session/update notifications"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_resume_replays_stored_plan() {
+        use kinetic_api::plan::{PlanEntry, PlanPriority, PlanStatus};
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+
+        let session_id = "sess-resume-plan";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+        // A durable plan exists from a prior turn.
+        store
+            .set_plan(
+                session_id,
+                &[PlanEntry {
+                    content: "Resume me".to_string(),
+                    status: PlanStatus::InProgress,
+                    priority: PlanPriority::High,
+                    active_form: Some("Resuming".to_string()),
+                }],
+            )
+            .unwrap();
+
+        let (writer_tx, mut writer_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let server = Arc::new(AcpServer::new_with_writer_and_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        ));
+
+        server
+            .handle_session_resume(&serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/resume must succeed");
+
+        // The stored plan must be replayed as a native ACP `plan` update.
+        let raw = writer_rx
+            .try_recv()
+            .expect("resume must emit a plan session/update");
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["method"], "session/update");
+        assert_eq!(v["params"]["update"]["sessionUpdate"], "plan");
+        assert_eq!(v["params"]["update"]["entries"][0]["content"], "Resume me");
+        assert_eq!(v["params"]["update"]["entries"][0]["status"], "in_progress");
+    }
+
+    #[tokio::test]
+    async fn session_close_releases_memory_but_keeps_store_record() {
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+        let server = Arc::new(AcpServer::new_with_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            Arc::clone(&store),
+        ));
+
+        let new_result = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/new must succeed");
+        let session_id = new_result["sessionId"].as_str().unwrap().to_string();
+
+        assert!(server.sessions.lock().await.contains_key(&session_id));
+
+        let result = server
+            .handle_session_close(&serde_json::json!({ "sessionId": &session_id }))
+            .await
+            .expect("session/close must succeed");
+
+        assert_eq!(result, serde_json::json!({}));
+
+        // Session gone from in-memory map
+        assert!(!server.sessions.lock().await.contains_key(&session_id));
+
+        // Session record still on disk
+        let data = store.load_session(&session_id).unwrap();
+        assert!(
+            data.is_some(),
+            "session/close must not delete the DB record"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_close_returns_not_found_for_unknown_session() {
+        let cwd = tempfile::tempdir().unwrap();
+        let server = AcpServer::new(make_test_config(cwd.path()), AcpServerConfig::default());
+
+        let err = server
+            .handle_session_close(&serde_json::json!({ "sessionId": "ghost" }))
+            .await
+            .expect_err("unknown session must fail");
+
+        assert_eq!(err.code, SESSION_NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn session_new_respects_max_sessions() {
+        let cwd = tempfile::tempdir().unwrap();
+        let server = Arc::new(AcpServer::new(
+            make_test_config(cwd.path()),
+            AcpServerConfig {
+                max_sessions: 1,
+                ..AcpServerConfig::default()
+            },
+        ));
+
+        server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect("first session/new must succeed under the limit");
+
+        let err = server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy(),
+                "agentAlias": "test-agent"
+            }))
+            .await
+            .expect_err("second session/new must fail at max_sessions");
+
+        assert_eq!(
+            err.code, SESSION_LIMIT_REACHED,
+            "expected SESSION_LIMIT_REACHED, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_load_respects_max_sessions() {
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+
+        // Pre-create a stored session that we'll attempt to load
+        let stored_id = "sess-load-limit-test";
+        store
+            .create_session(stored_id, "test-agent", &cwd.path().to_string_lossy(), None)
+            .unwrap();
+
+        let (writer_tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
+        let server = Arc::new(AcpServer::new_with_writer_and_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig {
+                max_sessions: 1,
+                ..AcpServerConfig::default()
+            },
+            writer_tx,
+            Arc::clone(&store),
+        ));
+
+        // Fill the one available slot via session/new
+        server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/new must succeed when under limit");
+
+        // Now session/load for the stored session must fail with SESSION_LIMIT_REACHED
+        let err = server
+            .handle_session_load(&serde_json::json!({ "sessionId": stored_id }))
+            .await
+            .expect_err("session/load must fail when max_sessions reached");
+
+        assert_eq!(
+            err.code, SESSION_LIMIT_REACHED,
+            "expected SESSION_LIMIT_REACHED, got: {:?}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn session_resume_respects_max_sessions() {
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+
+        // Pre-create a stored session that we'll attempt to resume
+        let stored_id = "sess-resume-limit-test";
+        store
+            .create_session(stored_id, "test-agent", &cwd.path().to_string_lossy(), None)
+            .unwrap();
+
+        let (writer_tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
+        let server = Arc::new(AcpServer::new_with_writer_and_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig {
+                max_sessions: 1,
+                ..AcpServerConfig::default()
+            },
+            writer_tx,
+            Arc::clone(&store),
+        ));
+
+        // Fill the one available slot via session/new
+        server
+            .handle_session_new(&serde_json::json!({
+                "cwd": cwd.path().to_string_lossy()
+            }))
+            .await
+            .expect("session/new must succeed when under limit");
+
+        // Now session/resume for the stored session must fail with SESSION_LIMIT_REACHED
+        let err = server
+            .handle_session_resume(&serde_json::json!({ "sessionId": stored_id }))
+            .await
+            .expect_err("session/resume must fail when max_sessions reached");
+
+        assert_eq!(
+            err.code, SESSION_LIMIT_REACHED,
+            "expected SESSION_LIMIT_REACHED, got: {:?}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn session_load_releases_reservation_on_store_error() {
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+
+        let session_id = "sess-load-store-err";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+
+        // Drop the schema via a second connection to force a "no such table"
+        // error on the store's next query_row call.
+        let db_path = cwd.path().join("sessions/acp-sessions.db");
+        {
+            let second =
+                rusqlite::Connection::open(&db_path).expect("second conn must open same db");
+            second
+                .execute_batch(
+                    "DROP TABLE IF EXISTS acp_messages; DROP TABLE IF EXISTS acp_sessions;",
+                )
+                .expect("schema drop must succeed on second conn");
+        }
+
+        let (writer_tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
+        let server = Arc::new(AcpServer::new_with_writer_and_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        ));
+
+        // First call: must fail with INTERNAL_ERROR (SQLite "no such table").
+        let first_err = server
+            .handle_session_load(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect_err("session/load must fail when store returns Err");
+        assert_eq!(
+            first_err.code, INTERNAL_ERROR,
+            "expected INTERNAL_ERROR from store failure, got: {:?}",
+            first_err
+        );
+
+        // Second call for the same session: must also fail with INTERNAL_ERROR,
+        // NOT with INVALID_PARAMS ("already active"). A leaked reservation would
+        // cause INVALID_PARAMS, proving the slot was never released.
+        let second_err = server
+            .handle_session_load(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect_err("second session/load must also fail");
+        assert_eq!(
+            second_err.code, INTERNAL_ERROR,
+            "second load must fail with INTERNAL_ERROR, not INVALID_PARAMS (leaked slot); got: {:?}",
+            second_err
+        );
+    }
+
+    #[tokio::test]
+    async fn session_resume_releases_reservation_on_store_error() {
+        let cwd = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(kinetic_infra::acp_session_store::AcpSessionStore::new(cwd.path()).unwrap());
+
+        let session_id = "sess-resume-store-err";
+        store
+            .create_session(
+                session_id,
+                "test-agent",
+                &cwd.path().to_string_lossy(),
+                None,
+            )
+            .unwrap();
+
+        let db_path = cwd.path().join("sessions/acp-sessions.db");
+        {
+            let second =
+                rusqlite::Connection::open(&db_path).expect("second conn must open same db");
+            second
+                .execute_batch(
+                    "DROP TABLE IF EXISTS acp_messages; DROP TABLE IF EXISTS acp_sessions;",
+                )
+                .expect("schema drop must succeed on second conn");
+        }
+
+        let (writer_tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
+        let server = Arc::new(AcpServer::new_with_writer_and_store(
+            make_test_config(cwd.path()),
+            AcpServerConfig::default(),
+            writer_tx,
+            Arc::clone(&store),
+        ));
+
+        let first_err = server
+            .handle_session_resume(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect_err("session/resume must fail when store returns Err");
+        assert_eq!(
+            first_err.code, INTERNAL_ERROR,
+            "expected INTERNAL_ERROR from store failure, got: {:?}",
+            first_err
+        );
+
+        let second_err = server
+            .handle_session_resume(&serde_json::json!({ "sessionId": session_id }))
+            .await
+            .expect_err("second session/resume must also fail");
+        assert_eq!(
+            second_err.code, INTERNAL_ERROR,
+            "second resume must fail with INTERNAL_ERROR, not INVALID_PARAMS (leaked slot); got: {:?}",
+            second_err
+        );
+    }
+}

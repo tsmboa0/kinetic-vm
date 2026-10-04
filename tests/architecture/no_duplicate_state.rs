@@ -28,7 +28,7 @@ const FORBIDDEN_TYPE_SUBSTRINGS: &[&str] = &[
 
 /// Roots to scan. Channels are the hottest drift surface; we lint there
 /// first. Extending the scan is one entry away.
-const SCAN_ROOTS: &[&str] = &["crates/zeroclaw-channels/src"];
+const SCAN_ROOTS: &[&str] = &["crates/kinetic-channels/src"];
 
 /// Files / paths that hold the canonical sources of truth and are
 /// therefore allowed to declare these fields. Anything outside these
@@ -68,7 +68,7 @@ fn no_channel_handle_caches_peer_authorization_state() {
 
 fn workspace_root() -> std::path::PathBuf {
     // `CARGO_MANIFEST_DIR` for the workspace's top-level crate (the
-    // `zeroclaw` binary) — that's where `cargo test` invokes from.
+    // `kinetic` binary) — that's where `cargo test` invokes from.
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     here.to_path_buf()
 }

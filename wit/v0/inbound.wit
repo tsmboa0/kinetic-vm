@@ -1,4 +1,4 @@
-package zeroclaw:plugin@0.1.0;
+package kinetic:plugin@0.1.0;
 
 /// Host-provided inbound queue for channel plugins that cannot open their own
 /// listener inside the sandbox.

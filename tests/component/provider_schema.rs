@@ -1,7 +1,7 @@
 //! TG7: ModelProvider Schema Conformance Tests
 
-use zeroclaw::providers::compatible::AuthStyle;
-use zeroclaw::providers::traits::{ChatMessage, ChatResponse, ToolCall};
+use kinetic::providers::compatible::AuthStyle;
+use kinetic::providers::traits::{ChatMessage, ChatResponse, ToolCall};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ChatMessage serialization
@@ -248,7 +248,7 @@ fn auth_style_custom_header() {
 
 #[test]
 fn provider_construction_with_different_names() {
-    use zeroclaw::providers::compatible::OpenAiCompatibleModelProvider;
+    use kinetic::providers::compatible::OpenAiCompatibleModelProvider;
 
     // Construction with various names should succeed
     let _p1 = OpenAiCompatibleModelProvider::builder("test")
@@ -267,7 +267,7 @@ fn provider_construction_with_different_names() {
 
 #[test]
 fn provider_construction_with_different_auth_styles() {
-    use zeroclaw::providers::compatible::OpenAiCompatibleModelProvider;
+    use kinetic::providers::compatible::OpenAiCompatibleModelProvider;
 
     let _bearer = OpenAiCompatibleModelProvider::builder("test")
         .display_name("Test")

@@ -1,47 +1,47 @@
 [workspace]
-members = [".", "crates/zeroclaw-api", "crates/zeroclaw-buildinfo", "crates/zeroclaw-infra", "crates/zeroclaw-config", "crates/zeroclaw-log", "crates/zeroclaw-log/tests/fixtures/attribution-macro-support", "crates/zeroclaw-log/tests/fixtures/attribution-macro-consumer", "crates/zeroclaw-tls", "crates/zeroclaw-relay-proto", "crates/zeroclaw-spawn", "crates/zeroclaw-commands", "crates/zeroclaw-providers", "crates/zeroclaw-memory", "crates/zeroclaw-channels", "crates/zeroclaw-tools", "crates/zeroclaw-sop-graph", "crates/zeroclaw-runtime", "crates/zeroclaw-eval", "crates/zeroclaw-plugins", "crates/zeroclaw-plugins/tests/fixtures/channel-fixture", "crates/zeroclaw-plugins/tests/fixtures/channel-egress-fixture", "crates/zeroclaw-plugins/tests/fixtures/egress-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-timeout-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-sequential-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-secret-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-socket-fixture", "crates/zeroclaw-plugins/tests/fixtures/tool-websocket-fixture", "crates/zeroclaw-gateway", "crates/zeroclaw-hardware", "crates/zeroclaw-tool-call-parser", "crates/zeroclaw-macros"]
+members = [".", "crates/kinetic-api", "crates/kinetic-buildinfo", "crates/kinetic-infra", "crates/kinetic-config", "crates/kinetic-log", "crates/kinetic-log/tests/fixtures/attribution-macro-support", "crates/kinetic-log/tests/fixtures/attribution-macro-consumer", "crates/kinetic-tls", "crates/kinetic-relay-proto", "crates/kinetic-spawn", "crates/kinetic-commands", "crates/kinetic-providers", "crates/kinetic-memory", "crates/kinetic-channels", "crates/kinetic-tools", "crates/kinetic-sop-graph", "crates/kinetic-runtime", "crates/kinetic-eval", "crates/kinetic-plugins", "crates/kinetic-plugins/tests/fixtures/channel-fixture", "crates/kinetic-plugins/tests/fixtures/channel-egress-fixture", "crates/kinetic-plugins/tests/fixtures/egress-fixture", "crates/kinetic-plugins/tests/fixtures/tool-fixture", "crates/kinetic-plugins/tests/fixtures/tool-timeout-fixture", "crates/kinetic-plugins/tests/fixtures/tool-sequential-fixture", "crates/kinetic-plugins/tests/fixtures/tool-secret-fixture", "crates/kinetic-plugins/tests/fixtures/tool-socket-fixture", "crates/kinetic-plugins/tests/fixtures/tool-websocket-fixture", "crates/kinetic-gateway", "crates/kinetic-hardware", "crates/kinetic-tool-call-parser", "crates/kinetic-macros"]
 resolver = "2"
 
 [workspace.package]
 version = "0.8.5"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/zeroclaw-labs/zeroclaw"
+repository = "https://github.com/tsmboa0/kinetic-vm"
 homepage = "https://www.zeroclaw.com"
 rust-version = "1.96.0"
 
 [workspace.dependencies]
-zeroclaw-api = { path = "crates/zeroclaw-api", version = "0.8.5" }
-zeroclaw-buildinfo = { path = "crates/zeroclaw-buildinfo", version = "0.8.5" }
-zeroclaw-infra = { path = "crates/zeroclaw-infra", version = "0.8.5" }
-zeroclaw-config = { path = "crates/zeroclaw-config", version = "0.8.5", default-features = false }
-zeroclaw-log = { path = "crates/zeroclaw-log", version = "0.8.5" }
-zeroclaw-tls = { path = "crates/zeroclaw-tls", version = "0.8.5" }
-zeroclaw-relay-proto = { path = "crates/zeroclaw-relay-proto", version = "0.8.5" }
-zeroclaw-spawn = { path = "crates/zeroclaw-spawn", version = "0.8.5" }
-zeroclaw-commands = { path = "crates/zeroclaw-commands", version = "0.8.5" }
-zeroclaw-providers = { path = "crates/zeroclaw-providers", version = "0.8.5" }
-zeroclaw-memory = { path = "crates/zeroclaw-memory", version = "0.8.5" }
-zeroclaw-channels = { path = "crates/zeroclaw-channels", version = "0.8.5", default-features = false }
-zeroclaw-tools = { path = "crates/zeroclaw-tools", version = "0.8.5" }
-zeroclaw-sop-graph = { path = "crates/zeroclaw-sop-graph", version = "0.8.5", default-features = false }
-zeroclaw-runtime = { path = "crates/zeroclaw-runtime", version = "0.8.5", default-features = false }
-zeroclaw-eval = { path = "crates/zeroclaw-eval", version = "0.8.5" }
-zeroclaw-plugins = { path = "crates/zeroclaw-plugins", version = "0.8.5" }
-zeroclaw-gateway = { path = "crates/zeroclaw-gateway", version = "0.8.5" }
-zeroclaw-hardware = { path = "crates/zeroclaw-hardware", version = "0.8.5" }
-zeroclaw-tool-call-parser = { path = "crates/zeroclaw-tool-call-parser", version = "0.8.5" }
-zeroclaw-macros = { path = "crates/zeroclaw-macros", version = "0.8.5" }
+kinetic-api = { path = "crates/kinetic-api", version = "0.8.5" }
+kinetic-buildinfo = { path = "crates/kinetic-buildinfo", version = "0.8.5" }
+kinetic-infra = { path = "crates/kinetic-infra", version = "0.8.5" }
+kinetic-config = { path = "crates/kinetic-config", version = "0.8.5", default-features = false }
+kinetic-log = { path = "crates/kinetic-log", version = "0.8.5" }
+kinetic-tls = { path = "crates/kinetic-tls", version = "0.8.5" }
+kinetic-relay-proto = { path = "crates/kinetic-relay-proto", version = "0.8.5" }
+kinetic-spawn = { path = "crates/kinetic-spawn", version = "0.8.5" }
+kinetic-commands = { path = "crates/kinetic-commands", version = "0.8.5" }
+kinetic-providers = { path = "crates/kinetic-providers", version = "0.8.5" }
+kinetic-memory = { path = "crates/kinetic-memory", version = "0.8.5" }
+kinetic-channels = { path = "crates/kinetic-channels", version = "0.8.5", default-features = false }
+kinetic-tools = { path = "crates/kinetic-tools", version = "0.8.5" }
+kinetic-sop-graph = { path = "crates/kinetic-sop-graph", version = "0.8.5", default-features = false }
+kinetic-runtime = { path = "crates/kinetic-runtime", version = "0.8.5", default-features = false }
+kinetic-eval = { path = "crates/kinetic-eval", version = "0.8.5" }
+kinetic-plugins = { path = "crates/kinetic-plugins", version = "0.8.5" }
+kinetic-gateway = { path = "crates/kinetic-gateway", version = "0.8.5" }
+kinetic-hardware = { path = "crates/kinetic-hardware", version = "0.8.5" }
+kinetic-tool-call-parser = { path = "crates/kinetic-tool-call-parser", version = "0.8.5" }
+kinetic-macros = { path = "crates/kinetic-macros", version = "0.8.5" }
 directories = "6.0"
 sys-locale = "0.3"
 hmac = "0.12"
 zeroize = "1.8"
 
 [package]
-name = "zeroclaw"
+name = "kinetic"
 # Workspace crates are publish = false during microkernel transition.
 publish = true
-default-run = "zeroclaw"
+default-run = "kinetic"
 version.workspace = true
 edition.workspace = true
 authors = ["theonlyhennygod"]
@@ -65,40 +65,40 @@ include = [
 ]
 
 [[bin]]
-name = "zeroclaw"
+name = "kinetic"
 path = "src/main.rs"
 
 [[bin]]
-name = "zeroclaw-acp-bridge"
-path = "src/bin/zeroclaw-acp-bridge.rs"
+name = "kinetic-acp-bridge"
+path = "src/bin/kinetic-acp-bridge.rs"
 required-features = ["acp-bridge"]
 
 [lib]
-name = "zeroclaw"
+name = "kinetic"
 path = "src/lib.rs"
 
 [build-dependencies]
-zeroclaw-buildinfo.workspace = true
+kinetic-buildinfo.workspace = true
 
 [dependencies]
 # Internal workspace crates — versions and paths declared once in [workspace.dependencies]
-zeroclaw-api.workspace = true
-zeroclaw-spawn.workspace = true
-zeroclaw-infra.workspace = true
-zeroclaw-config = { workspace = true, features = ["clap"] }
-zeroclaw-log.workspace = true
-zeroclaw-providers.workspace = true
-zeroclaw-memory.workspace = true
-zeroclaw-channels = { workspace = true, optional = true }
-zeroclaw-tools = { workspace = true, optional = true }
-zeroclaw-runtime = { workspace = true, optional = true }
-zeroclaw-tls = { workspace = true }
-zeroclaw-eval = { workspace = true, optional = true }
-zeroclaw-plugins = { workspace = true, optional = true }
-zeroclaw-gateway = { workspace = true, optional = true }
-zeroclaw-hardware = { workspace = true, optional = true }
-zeroclaw-tool-call-parser.workspace = true
-zeroclaw-macros.workspace = true
+kinetic-api.workspace = true
+kinetic-spawn.workspace = true
+kinetic-infra.workspace = true
+kinetic-config = { workspace = true, features = ["clap"] }
+kinetic-log.workspace = true
+kinetic-providers.workspace = true
+kinetic-memory.workspace = true
+kinetic-channels = { workspace = true, optional = true }
+kinetic-tools = { workspace = true, optional = true }
+kinetic-runtime = { workspace = true, optional = true }
+kinetic-tls = { workspace = true }
+kinetic-eval = { workspace = true, optional = true }
+kinetic-plugins = { workspace = true, optional = true }
+kinetic-gateway = { workspace = true, optional = true }
+kinetic-hardware = { workspace = true, optional = true }
+kinetic-tool-call-parser.workspace = true
+kinetic-macros.workspace = true
 # CLI - minimal and fast
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
@@ -136,7 +136,7 @@ tempfile = "3.26"
 
 # Capability-scoped directory handles (beneath/no-follow). Used by the agent-bundle
 # export to walk a live, agent-writable workspace without re-opening paths by name.
-# Already built through zeroclaw-runtime and zeroclaw-tools, which bind their
+# Already built through kinetic-runtime and kinetic-tools, which bind their
 # workspace reads the same way — zero added compile/binary cost for default builds.
 cap-std = "4"
 # `follow(FollowSymlinks::No)` and `open_dir_nofollow`, which cap-std itself does not
@@ -212,7 +212,7 @@ default = [
 # Channels are opt-in via the `default-channels` bundle or individual
 # `channel-*` features.
 agent-runtime = [
-    "dep:zeroclaw-runtime", "dep:zeroclaw-eval", "dep:zeroclaw-channels", "dep:zeroclaw-tools",
+    "dep:kinetic-runtime", "dep:kinetic-eval", "dep:kinetic-channels", "dep:kinetic-tools",
     "dep:rusqlite",
     "dep:which",
     "dep:crossterm",
@@ -231,43 +231,43 @@ default-channels = [
 
 # Major subsystems — each forwards to exactly ONE crate
 gateway = [
-    "dep:zeroclaw-gateway",
+    "dep:kinetic-gateway",
     "dep:axum", "dep:tower",
 ]
-schema-export = ["dep:schemars", "zeroclaw-config/schema-export"]
+schema-export = ["dep:schemars", "kinetic-config/schema-export"]
 acp-bridge = ["dep:tokio-tungstenite"]
 
-# Channels — each forwards to zeroclaw-channels.
-channel-telegram = ["zeroclaw-channels/channel-telegram"]
-channel-mqtt = ["zeroclaw-channels/channel-mqtt"]
-channel-webhook = ["zeroclaw-channels/channel-webhook"]
-channel-filesystem = ["zeroclaw-channels/channel-filesystem"]
-channel-acp-server = ["zeroclaw-channels/channel-acp-server", "zeroclaw-gateway?/channel-acp-server"]
-voice-wake = ["zeroclaw-channels/voice-wake"]
-memory-postgres = ["zeroclaw-memory/memory-postgres"]
+# Channels — each forwards to kinetic-channels.
+channel-telegram = ["kinetic-channels/channel-telegram"]
+channel-mqtt = ["kinetic-channels/channel-mqtt"]
+channel-webhook = ["kinetic-channels/channel-webhook"]
+channel-filesystem = ["kinetic-channels/channel-filesystem"]
+channel-acp-server = ["kinetic-channels/channel-acp-server", "kinetic-gateway?/channel-acp-server"]
+voice-wake = ["kinetic-channels/voice-wake"]
+memory-postgres = ["kinetic-memory/memory-postgres"]
 
 # Backends and platform flags — each forwards to ONE crate
 observability-prometheus = [
-    "zeroclaw-runtime/observability-prometheus",
-    "zeroclaw-gateway/observability-prometheus",
+    "kinetic-runtime/observability-prometheus",
+    "kinetic-gateway/observability-prometheus",
 ]
-observability-otel = ["zeroclaw-runtime/observability-otel"]
-hardware = ["dep:zeroclaw-hardware", "zeroclaw-hardware/hardware"]
-peripheral-rpi = ["dep:zeroclaw-hardware", "zeroclaw-hardware/peripheral-rpi"]
-# Forwards `zeroclaw-hardware/dev-sim`: extends the serial allow-list with
+observability-otel = ["kinetic-runtime/observability-otel"]
+hardware = ["dep:kinetic-hardware", "kinetic-hardware/hardware"]
+peripheral-rpi = ["dep:kinetic-hardware", "kinetic-hardware/peripheral-rpi"]
+# Forwards `kinetic-hardware/dev-sim`: extends the serial allow-list with
 # `/tmp/zc-sim-*` for hardware-free simulation. Off by default; opt-in for the
 # simulator and demo.
-dev-sim = ["dep:zeroclaw-hardware", "zeroclaw-hardware/dev-sim"]
-sandbox-landlock = ["zeroclaw-runtime/sandbox-landlock"]
-sandbox-bubblewrap = ["zeroclaw-runtime/sandbox-bubblewrap"]
+dev-sim = ["dep:kinetic-hardware", "kinetic-hardware/dev-sim"]
+sandbox-landlock = ["kinetic-runtime/sandbox-landlock"]
+sandbox-bubblewrap = ["kinetic-runtime/sandbox-bubblewrap"]
 plugins-wasm = [
-    "dep:zeroclaw-plugins",
-    "zeroclaw-runtime/plugins-wasm",
-    "zeroclaw-gateway?/plugins-wasm",
+    "dep:kinetic-plugins",
+    "kinetic-runtime/plugins-wasm",
+    "kinetic-gateway?/plugins-wasm",
 ]
-probe = ["dep:zeroclaw-hardware", "zeroclaw-hardware/probe"]
-webauthn = ["zeroclaw-runtime/webauthn", "zeroclaw-gateway?/webauthn"]
-embedded-web = ["zeroclaw-gateway/embedded-web"]
+probe = ["dep:kinetic-hardware", "kinetic-hardware/probe"]
+webauthn = ["kinetic-runtime/webauthn", "kinetic-gateway?/webauthn"]
+embedded-web = ["kinetic-gateway/embedded-web"]
 
 # Backward-compatible aliases
 landlock = ["sandbox-landlock"]
@@ -296,9 +296,9 @@ metrics = ["observability-prometheus"]
 # - `plugins-wasm-pulley`: Most flexible, supports JIT compilation on targets
 #   where Cranelift isn't available (e.g., ARM32), but has the slowest runtime
 #   performance.
-plugins-wasm-runtime-only = ["plugins-wasm", "zeroclaw-plugins/plugins-wasmtime"]
-plugins-wasm-cranelift    = ["plugins-wasm", "zeroclaw-plugins/plugins-wasm-cranelift", "zeroclaw-runtime/plugins-wasm-cranelift"]
-plugins-wasm-pulley       = ["plugins-wasm", "zeroclaw-plugins/plugins-wasm-pulley"]
+plugins-wasm-runtime-only = ["plugins-wasm", "kinetic-plugins/plugins-wasmtime"]
+plugins-wasm-cranelift    = ["plugins-wasm", "kinetic-plugins/plugins-wasm-cranelift", "kinetic-runtime/plugins-wasm-cranelift"]
+plugins-wasm-pulley       = ["plugins-wasm", "kinetic-plugins/plugins-wasm-pulley"]
 
 # CI meta-feature
 ci-all = [
@@ -347,7 +347,7 @@ panic = "abort"
 # so this package's integration-test helpers can mint the now-sealed engine tool
 # registry. dev-dependency only: resolver v2 keeps `test-util` out of the shipped
 # binary build, so the assemble()-only seal holds in production.
-zeroclaw-runtime = { workspace = true, features = ["test-util"] }
+kinetic-runtime = { workspace = true, features = ["test-util"] }
 tempfile = "3.26"
 wiremock = "0.6"
 scopeguard = "1.2"

@@ -1,16 +1,16 @@
-pub use zeroclaw_runtime::cron::*;
+pub use kinetic_runtime::cron::*;
 
 use crate::config::Config;
 use anyhow::{Result, bail};
-use zeroclaw_runtime::i18n::{get_required_cli_string, get_required_cli_string_with_args};
+use kinetic_runtime::i18n::{get_required_cli_string, get_required_cli_string_with_args};
 
 /// Bail with a clear error if the named agent isn't configured.
 fn require_configured_agent(config: &Config, agent_alias: &str) -> Result<()> {
     if config.agent(agent_alias).is_none() {
-        ::zeroclaw_log::record!(
+        ::kinetic_log::record!(
             WARN,
-            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Reject)
+                .with_outcome(::kinetic_log::EventOutcome::Failure)
                 .with_attrs(::serde_json::json!({"agent_alias": agent_alias})),
             "cron CLI rejected: unknown agent alias"
         );
@@ -23,10 +23,10 @@ fn parse_explicit_rfc3339_utc(raw: &str) -> Result<chrono::DateTime<chrono::Utc>
     chrono::DateTime::parse_from_rfc3339(raw)
         .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
         .map_err(|err| {
-            ::zeroclaw_log::record!(
+            ::kinetic_log::record!(
                 WARN,
-                ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
-                    .with_outcome(::zeroclaw_log::EventOutcome::Failure)
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Reject)
+                    .with_outcome(::kinetic_log::EventOutcome::Failure)
                     .with_attrs(::serde_json::json!({
                         "raw": raw,
                         "error": format!("{}", err),
@@ -137,7 +137,7 @@ pub fn handle_command(command: crate::CronCommands, config: &Config) -> Result<(
             if jobs.is_empty() {
                 println!("{}", get_required_cli_string("cli-cron-none"));
                 println!("\n{}", get_required_cli_string("cli-cron-usage"));
-                println!("  zeroclaw cron add '0 9 * * *' 'echo ok' --agent sentinel"); // i18n-exempt: literal command example
+                println!("  kinetic cron add '0 9 * * *' 'echo ok' --agent sentinel"); // i18n-exempt: literal command example
                 return Ok(());
             }
 
@@ -713,7 +713,7 @@ mod tests {
             .ensure("openrouter", "test-agent")
             .expect("known family");
         config.agents.entry("test-agent".to_string()).or_insert(
-            zeroclaw_config::schema::AliasedAgentConfig {
+            kinetic_config::schema::AliasedAgentConfig {
                 model_provider: "openrouter.test-agent".into(),
                 risk_profile: "test-agent".into(),
                 runtime_profile: "test-agent".into(),

@@ -1,1 +1,1 @@
-pub use zeroclaw_tools::cli_discovery::*;
+pub use kinetic_tools::cli_discovery::*;

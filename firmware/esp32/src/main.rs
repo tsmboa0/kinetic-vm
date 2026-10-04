@@ -1,4 +1,4 @@
-//! ZeroClaw ESP32 firmware — JSON-over-serial peripheral.
+//! KineticVM ESP32 firmware — JSON-over-serial peripheral.
 
 use esp_idf_svc::hal::gpio::PinDriver;
 use esp_idf_svc::hal::peripherals::Peripherals;
@@ -6,7 +6,7 @@ use esp_idf_svc::hal::uart::{UartConfig, UartDriver};
 use esp_idf_svc::hal::units::Hertz;
 use heapless::{String, Vec};
 use log::info;
-use zeroclaw_fw_protocol::{Command, copy_id, write_err, write_ok};
+use kinetic_fw_protocol::{Command, copy_id, write_err, write_ok};
 
 // Pre-escaped because `write_ok` embeds this value as a JSON string without escaping.
 const CAPABILITIES_RESULT: &str =
@@ -34,7 +34,7 @@ fn main() -> anyhow::Result<()> {
         &config,
     )?;
 
-    info!("ZeroClaw ESP32 firmware ready on UART0 (115200)");
+    info!("KineticVM ESP32 firmware ready on UART0 (115200)");
 
     let mut buf = [0u8; 512];
     let mut line: Vec<u8, 400> = Vec::new();

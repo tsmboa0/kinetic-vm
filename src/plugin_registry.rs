@@ -1,21 +1,21 @@
 use anyhow::{Context, Result, bail};
+use kinetic::plugins::PluginManifest;
+pub(crate) use kinetic::plugins::registry::search_entries;
+use kinetic::plugins::registry::{
+    PluginRegistryEntry, PluginRegistryIndex, parse_plugin_spec, resolve_entry,
+    write_cached_registry_index,
+};
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
-use zeroclaw::plugins::PluginManifest;
-pub(crate) use zeroclaw::plugins::registry::search_entries;
-use zeroclaw::plugins::registry::{
-    PluginRegistryEntry, PluginRegistryIndex, parse_plugin_spec, resolve_entry,
-    write_cached_registry_index,
-};
 
 pub(crate) const DEFAULT_REGISTRY_URL: &str =
     "https://raw.githubusercontent.com/tsmboa0/kinetic-plugins/main/registry.json";
 pub(crate) const MAX_PLUGIN_ZIP_BYTES: usize = 50 * 1024 * 1024;
 pub(crate) const MAX_PLUGIN_EXTRACTED_BYTES: u64 = 50 * 1024 * 1024;
-const REGISTRY_URL_ENV: &str = "ZEROCLAW_PLUGIN_REGISTRY_URL";
+const REGISTRY_URL_ENV: &str = "KINETIC_PLUGIN_REGISTRY_URL";
 
 pub(crate) struct DownloadedPlugin {
     _temp_dir: TempDir,
@@ -440,13 +440,13 @@ capabilities = ["tool"]
             author: None,
             wasm_path: None,
             wasm_sha256: None,
-            capabilities: vec![zeroclaw::plugins::PluginCapability::Tool],
+            capabilities: vec![kinetic::plugins::PluginCapability::Tool],
             provides: None,
             permissions: Vec::new(),
             config_schema: None,
             signature: None,
             publisher_key: None,
-            egress: zeroclaw::plugins::PluginEgressDeclaration::default(),
+            egress: kinetic::plugins::PluginEgressDeclaration::default(),
         };
 
         assert!(verify_manifest_matches_registry(&entry, &manifest).is_err());

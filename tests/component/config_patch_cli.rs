@@ -7,6 +7,17 @@
 #[cfg(feature = "gateway")]
 use axum::{Router, routing::patch};
 #[cfg(feature = "gateway")]
+use kinetic::gateway::{self, AppState};
+#[cfg(feature = "gateway")]
+use kinetic_api::attribution::Attributable;
+use kinetic_config::schema::Config;
+#[cfg(feature = "gateway")]
+use kinetic_memory::NoneMemory;
+#[cfg(feature = "gateway")]
+use kinetic_providers::ModelProvider;
+#[cfg(feature = "gateway")]
+use kinetic_runtime::security::PairingGuard;
+#[cfg(feature = "gateway")]
 use parking_lot::RwLock;
 #[cfg(feature = "gateway")]
 use std::collections::HashMap;
@@ -17,17 +28,6 @@ use std::sync::Arc;
 use std::time::Duration;
 #[cfg(feature = "gateway")]
 use tower::ServiceExt;
-#[cfg(feature = "gateway")]
-use zeroclaw::gateway::{self, AppState};
-#[cfg(feature = "gateway")]
-use zeroclaw_api::attribution::Attributable;
-use zeroclaw_config::schema::Config;
-#[cfg(feature = "gateway")]
-use zeroclaw_memory::NoneMemory;
-#[cfg(feature = "gateway")]
-use zeroclaw_providers::ModelProvider;
-#[cfg(feature = "gateway")]
-use zeroclaw_runtime::security::PairingGuard;
 
 #[cfg(feature = "gateway")]
 #[derive(Default)]
@@ -49,9 +49,9 @@ impl ModelProvider for MockModelProvider {
 
 #[cfg(feature = "gateway")]
 impl Attributable for MockModelProvider {
-    fn role(&self) -> zeroclaw_api::attribution::Role {
-        zeroclaw_api::attribution::Role::Provider(zeroclaw_api::attribution::ProviderKind::Model(
-            zeroclaw_api::attribution::ModelProviderKind::Custom,
+    fn role(&self) -> kinetic_api::attribution::Role {
+        kinetic_api::attribution::Role::Provider(kinetic_api::attribution::ProviderKind::Model(
+            kinetic_api::attribution::ModelProviderKind::Custom,
         ))
     }
 
@@ -62,7 +62,7 @@ impl Attributable for MockModelProvider {
 
 #[cfg(feature = "gateway")]
 fn test_state(config: Config) -> AppState {
-    let memory: Arc<dyn zeroclaw_memory::Memory> =
+    let memory: Arc<dyn kinetic_memory::Memory> =
         Arc::new(NoneMemory::new("config-patch-cli-test"));
     AppState {
         config: Arc::new(RwLock::new(config)),
@@ -73,9 +73,9 @@ fn test_state(config: Config) -> AppState {
         temperature: None,
         mem: memory.clone(),
         memory_strategy: Arc::new(
-            zeroclaw_runtime::agent::memory_strategy::DefaultMemoryStrategy::with_config(
+            kinetic_runtime::agent::memory_strategy::DefaultMemoryStrategy::with_config(
                 memory,
-                zeroclaw_config::schema::MemoryConfig::default(),
+                kinetic_config::schema::MemoryConfig::default(),
                 std::path::PathBuf::new(),
             ),
         ),
@@ -83,7 +83,7 @@ fn test_state(config: Config) -> AppState {
         pairing: Arc::new(PairingGuard::new(
             false,
             &[],
-            zeroclaw_config::pairing::PairingCodePolicy::default(),
+            kinetic_config::pairing::PairingCodePolicy::default(),
         )),
         trust_forwarded_headers: false,
         rate_limiter: Arc::new(gateway::GatewayRateLimiter::new(100, 100, 100)),
@@ -92,7 +92,7 @@ fn test_state(config: Config) -> AppState {
             Duration::from_secs(300),
             1000,
         )),
-        observer: Arc::new(zeroclaw_runtime::observability::NoopObserver),
+        observer: Arc::new(kinetic_runtime::observability::NoopObserver),
         tools_registry: Arc::new(Vec::new()),
         tools_registry_by_agent: Arc::new(HashMap::new()),
         cost_tracker: None,
@@ -120,9 +120,9 @@ fn test_state(config: Config) -> AppState {
 }
 
 fn run_cli_patch_output(config_dir: &std::path::Path, patch_doc: &[u8]) -> Output {
-    let bin = env!("CARGO_BIN_EXE_zeroclaw");
+    let bin = env!("CARGO_BIN_EXE_kinetic");
     Command::new(bin)
-        .env("ZEROCLAW_CONFIG_DIR", config_dir)
+        .env("KINETIC_CONFIG_DIR", config_dir)
         .env("RUST_LOG", "off")
         .args(["config", "patch", "--json", "-"])
         .stdin(Stdio::piped())
@@ -140,15 +140,15 @@ fn run_cli_patch_output(config_dir: &std::path::Path, patch_doc: &[u8]) -> Outpu
             }
             child.wait_with_output()
         })
-        .expect("run zeroclaw config patch")
+        .expect("run kinetic config patch")
 }
 
-/// Run `zeroclaw config patch - ` **without** `--json`, exercising the
+/// Run `kinetic config patch - ` **without** `--json`, exercising the
 /// human-readable failure branch of `config_patch_fail_json_or_human`.
 fn run_cli_patch_output_human(config_dir: &std::path::Path, patch_doc: &[u8]) -> Output {
-    let bin = env!("CARGO_BIN_EXE_zeroclaw");
+    let bin = env!("CARGO_BIN_EXE_kinetic");
     Command::new(bin)
-        .env("ZEROCLAW_CONFIG_DIR", config_dir)
+        .env("KINETIC_CONFIG_DIR", config_dir)
         .env("RUST_LOG", "off")
         .args(["config", "patch", "-"])
         .stdin(Stdio::piped())
@@ -166,7 +166,7 @@ fn run_cli_patch_output_human(config_dir: &std::path::Path, patch_doc: &[u8]) ->
             }
             child.wait_with_output()
         })
-        .expect("run zeroclaw config patch (human mode)")
+        .expect("run kinetic config patch (human mode)")
 }
 
 /// Drive a failing patch in human mode and return stderr. Asserts the
@@ -741,7 +741,7 @@ fn config_patch_add_does_not_materialize_resource_keyed_rate_alias() {
 #[test]
 fn config_patch_replace_on_dotted_resource_id_does_not_plant_phantom_sibling() {
     let config_dir = tempfile::tempdir().expect("temp config dir");
-    let version = zeroclaw_config::migration::CURRENT_SCHEMA_VERSION;
+    let version = kinetic_config::migration::CURRENT_SCHEMA_VERSION;
     std::fs::write(
         config_dir.path().join("config.toml"),
         format!(
@@ -770,15 +770,15 @@ fn config_patch_replace_on_dotted_resource_id_does_not_plant_phantom_sibling() {
 }
 
 fn run_cli_init(config_dir: &std::path::Path, section: &str) -> serde_json::Value {
-    let bin = env!("CARGO_BIN_EXE_zeroclaw");
+    let bin = env!("CARGO_BIN_EXE_kinetic");
     let output = Command::new(bin)
-        .env("ZEROCLAW_CONFIG_DIR", config_dir)
+        .env("KINETIC_CONFIG_DIR", config_dir)
         .env("RUST_LOG", "off")
         .args(["config", "init", section, "--json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("run zeroclaw config init");
+        .expect("run kinetic config init");
     assert!(
         output.status.success(),
         "config init should succeed: {}",
@@ -789,15 +789,15 @@ fn run_cli_init(config_dir: &std::path::Path, section: &str) -> serde_json::Valu
 }
 
 fn run_cli_get(config_dir: &std::path::Path, path: &str) -> serde_json::Value {
-    let bin = env!("CARGO_BIN_EXE_zeroclaw");
+    let bin = env!("CARGO_BIN_EXE_kinetic");
     let output = Command::new(bin)
-        .env("ZEROCLAW_CONFIG_DIR", config_dir)
+        .env("KINETIC_CONFIG_DIR", config_dir)
         .env("RUST_LOG", "off")
         .args(["config", "get", path, "--json"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("run zeroclaw config get");
+        .expect("run kinetic config get");
     assert!(
         output.status.success(),
         "config get should succeed after reloading the saved file: {}",
@@ -809,15 +809,15 @@ fn run_cli_get(config_dir: &std::path::Path, path: &str) -> serde_json::Value {
 
 /// Run one non-interactive property write in a fresh CLI process.
 fn run_cli_set(config_dir: &std::path::Path, path: &str, value: &str) {
-    let bin = env!("CARGO_BIN_EXE_zeroclaw");
+    let bin = env!("CARGO_BIN_EXE_kinetic");
     let output = Command::new(bin)
-        .env("ZEROCLAW_CONFIG_DIR", config_dir)
+        .env("KINETIC_CONFIG_DIR", config_dir)
         .env("RUST_LOG", "off")
         .args(["config", "set", "--no-interactive", path, value])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("run zeroclaw config set");
+        .expect("run kinetic config set");
     assert!(
         output.status.success(),
         "config set {path} should succeed in a new process: {}",
@@ -831,8 +831,8 @@ fn required_field_sections_can_be_completed_across_cli_processes() {
         (
             "gateway.tls",
             &[
-                ("gateway.tls.cert_path", "/tmp/zeroclaw-test-cert.pem"),
-                ("gateway.tls.key_path", "/tmp/zeroclaw-test-key.pem"),
+                ("gateway.tls.cert_path", "/tmp/kinetic-test-cert.pem"),
+                ("gateway.tls.key_path", "/tmp/kinetic-test-key.pem"),
             ],
         ),
         (
@@ -844,7 +844,7 @@ fn required_field_sections_can_be_completed_across_cli_processes() {
         ),
         (
             "tunnel.openvpn",
-            &[("tunnel.openvpn.config_file", "/tmp/zeroclaw-test.ovpn")],
+            &[("tunnel.openvpn.config_file", "/tmp/kinetic-test.ovpn")],
         ),
     ];
 
@@ -945,9 +945,9 @@ fn agent_targeting_config_commands_fail_closed_while_daemon_owns_config() {
     );
     let data_dir = config_dir.path().join("data");
     std::fs::create_dir_all(&data_dir).expect("create resolved config data directory");
-    let _owner = zeroclaw_runtime::live_config_authority::ConfigOwnershipGuard::acquire(&data_dir)
+    let _owner = kinetic_runtime::live_config_authority::ConfigOwnershipGuard::acquire(&data_dir)
         .expect("hold daemon config ownership");
-    let bin = env!("CARGO_BIN_EXE_zeroclaw");
+    let bin = env!("CARGO_BIN_EXE_kinetic");
 
     let commands: &[(&[&str], Option<&[u8]>)] = &[
         (
@@ -969,7 +969,7 @@ fn agent_targeting_config_commands_fail_closed_while_daemon_owns_config() {
 
     for (args, stdin) in commands {
         let mut child = Command::new(bin)
-            .env("ZEROCLAW_CONFIG_DIR", config_dir.path())
+            .env("KINETIC_CONFIG_DIR", config_dir.path())
             .env("RUST_LOG", "off")
             .args(*args)
             .stdin(Stdio::piped())
@@ -1012,26 +1012,26 @@ fn standalone_agent_ownership_uses_resolved_temp_data_dir_and_preserves_alias_va
     );
 
     let run_agent = || {
-        Command::new(env!("CARGO_BIN_EXE_zeroclaw"))
-            .env("ZEROCLAW_CONFIG_DIR", config_dir.path())
-            .env_remove("ZEROCLAW_DATA_DIR")
-            .env_remove("ZEROCLAW_WORKSPACE")
+        Command::new(env!("CARGO_BIN_EXE_kinetic"))
+            .env("KINETIC_CONFIG_DIR", config_dir.path())
+            .env_remove("KINETIC_DATA_DIR")
+            .env_remove("KINETIC_WORKSPACE")
             .env("RUST_LOG", "off")
             .args(["agent", "--agent", "missing", "--message", "should-not-run"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .expect("run zeroclaw agent")
+            .expect("run kinetic agent")
     };
 
     let owner =
-        zeroclaw_runtime::live_config_authority::ConfigOwnershipGuard::acquire(&resolved_data_dir)
-            .expect("hold the actual ZEROCLAW_CONFIG_DIR-resolved data directory");
+        kinetic_runtime::live_config_authority::ConfigOwnershipGuard::acquire(&resolved_data_dir)
+            .expect("hold the actual KINETIC_CONFIG_DIR-resolved data directory");
     let refused = run_agent();
     assert!(!refused.status.success());
     let refused_stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
-        refused_stderr.contains("Cannot run `zeroclaw agent` while another ZeroClaw process owns"),
+        refused_stderr.contains("Cannot run `kinetic agent` while another KineticVM process owns"),
         "ownership refusal must be actionable: {refused_stderr}"
     );
     assert!(
@@ -1044,11 +1044,11 @@ fn standalone_agent_ownership_uses_resolved_temp_data_dir_and_preserves_alias_va
     assert!(!validated.status.success());
     let validated_stderr = String::from_utf8_lossy(&validated.stderr);
     assert!(
-        validated_stderr.contains("`zeroclaw agent --agent missing` is not configured"),
+        validated_stderr.contains("`kinetic agent --agent missing` is not configured"),
         "after ownership release, the normal alias validation must run: {validated_stderr}"
     );
     assert!(
-        !validated_stderr.contains("while another ZeroClaw process owns"),
+        !validated_stderr.contains("while another KineticVM process owns"),
         "released ownership must not leave a stale refusal: {validated_stderr}"
     );
 }
@@ -1056,9 +1056,9 @@ fn standalone_agent_ownership_uses_resolved_temp_data_dir_and_preserves_alias_va
 #[cfg(all(feature = "agent-runtime", feature = "channel-acp-server"))]
 #[test]
 fn standalone_acp_ownership_refuses_before_store_open_and_retains_stdio_authority() {
-    use zeroclaw::channels::acp_server::{AcpServer, AcpServerConfig};
-    use zeroclaw_runtime::LiveConfigAuthority;
-    use zeroclaw_runtime::live_config_authority::{ConfigOwnershipError, ConfigOwnershipGuard};
+    use kinetic::channels::acp_server::{AcpServer, AcpServerConfig};
+    use kinetic_runtime::LiveConfigAuthority;
+    use kinetic_runtime::live_config_authority::{ConfigOwnershipError, ConfigOwnershipGuard};
 
     let config_dir = tempfile::tempdir().expect("temp config dir");
     let resolved_data_dir = config_dir.path().join("data");
@@ -1070,17 +1070,17 @@ fn standalone_acp_ownership_refuses_before_store_open_and_retains_stdio_authorit
     let store_path = resolved_data_dir.join("sessions/acp-sessions.db");
     assert!(!store_path.exists());
     let run_acp = || {
-        Command::new(env!("CARGO_BIN_EXE_zeroclaw"))
-            .env("ZEROCLAW_CONFIG_DIR", config_dir.path())
-            .env_remove("ZEROCLAW_DATA_DIR")
-            .env_remove("ZEROCLAW_WORKSPACE")
+        Command::new(env!("CARGO_BIN_EXE_kinetic"))
+            .env("KINETIC_CONFIG_DIR", config_dir.path())
+            .env_remove("KINETIC_DATA_DIR")
+            .env_remove("KINETIC_WORKSPACE")
             .env("RUST_LOG", "off")
             .arg("acp")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
-            .expect("run zeroclaw acp with closed stdin")
+            .expect("run kinetic acp with closed stdin")
     };
 
     let owner = ConfigOwnershipGuard::acquire(&resolved_data_dir).expect("hold resolved data dir");
@@ -1088,7 +1088,7 @@ fn standalone_acp_ownership_refuses_before_store_open_and_retains_stdio_authorit
     assert!(!refused.status.success());
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
-        stderr.contains("Cannot run `zeroclaw acp` while another ZeroClaw process owns"),
+        stderr.contains("Cannot run `kinetic acp` while another KineticVM process owns"),
         "ownership refusal must name the standalone command: {stderr}"
     );
     assert!(
