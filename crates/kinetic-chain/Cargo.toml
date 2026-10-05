@@ -1,0 +1,22 @@
+[package]
+name = "kinetic-chain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Monad identity, vault, and attestation client for a KineticVM device."
+repository.workspace = true
+homepage.workspace = true
+publish = true
+
+[dependencies]
+kinetic-config.workspace = true
+kinetic-log.workspace = true
+alloy = { version = "2", default-features = false, features = ["std", "essentials", "reqwest", "reqwest-rustls-tls"] }
+anyhow = "1.0"
+hex = "0.4"
+serde_json = { version = "1.0", default-features = false, features = ["std"] }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.26"
+toml = "1.0"

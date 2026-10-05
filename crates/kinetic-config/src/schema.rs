@@ -506,6 +506,11 @@ pub struct Config {
     #[nested]
     pub hardware: HardwareConfig,
 
+    /// Monad identity, vault, and attestation for this device.
+    #[serde(default, skip_serializing_if = "ChainConfig::is_default")]
+    #[nested]
+    pub chain: ChainConfig,
+
     /// Voice transcription configuration (Whisper API via Groq).
     #[serde(default)]
     #[nested]
@@ -3022,6 +3027,79 @@ impl Default for HardwareConfig {
             probe_target: None,
             workspace_datasheets: false,
         }
+    }
+}
+
+fn default_chain_id() -> u64 {
+    10_143
+}
+
+fn default_chain_rpc_url() -> String {
+    "https://testnet-rpc.monad.xyz".into()
+}
+
+fn default_chain_registry() -> String {
+    // contracts/deployments/10143.json
+    "0xBf2E634F8DA4C8C02979C1A2CcAD113eFb259132".into()
+}
+
+fn default_chain_vault() -> String {
+    "0xD01eEa46c7E054f98dde0ed58DB5Da73ED4D22fD".into()
+}
+
+fn default_chain_attestor() -> String {
+    "0xAb523187C7687743B29daf3468891E339CbF8f82".into()
+}
+
+/// Monad testnet identity for one device. Defaults match the published
+/// deployment and stay off until the owner opts in.
+#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[prefix = "chain"]
+pub struct ChainConfig {
+    /// Read this device's agent, vault limits, and attestation contract.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Chain id. 10143 is Monad testnet.
+    #[serde(default = "default_chain_id")]
+    pub chain_id: u64,
+    /// JSON-RPC endpoint used for identity, vault, and attestation reads.
+    #[serde(default = "default_chain_rpc_url")]
+    pub rpc_url: String,
+    /// KineticRegistry address.
+    #[serde(default = "default_chain_registry")]
+    pub registry: String,
+    /// DeviceVault address.
+    #[serde(default = "default_chain_vault")]
+    pub vault: String,
+    /// KineticAttestor address.
+    #[serde(default = "default_chain_attestor")]
+    pub attestor: String,
+}
+
+impl Default for ChainConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            chain_id: default_chain_id(),
+            rpc_url: default_chain_rpc_url(),
+            registry: default_chain_registry(),
+            vault: default_chain_vault(),
+            attestor: default_chain_attestor(),
+        }
+    }
+}
+
+impl ChainConfig {
+    /// True when every field still has its published default.
+    pub fn is_default(&self) -> bool {
+        let default = Self::default();
+        self.enabled == default.enabled
+            && self.chain_id == default.chain_id
+            && self.rpc_url == default.rpc_url
+            && self.registry.eq_ignore_ascii_case(&default.registry)
+            && self.vault.eq_ignore_ascii_case(&default.vault)
+            && self.attestor.eq_ignore_ascii_case(&default.attestor)
     }
 }
 
@@ -16420,6 +16498,7 @@ impl Default for Config {
             peer_groups: HashMap::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
+            chain: ChainConfig::default(),
             query_classification: QueryClassificationConfig::default(),
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
@@ -27398,6 +27477,7 @@ auto_save = true
             peer_groups: HashMap::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
+            chain: ChainConfig::default(),
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
             nodes: NodesConfig::default(),
@@ -28528,6 +28608,7 @@ default_temperature = 0.7
             peer_groups: HashMap::new(),
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
+            chain: ChainConfig::default(),
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
             nodes: NodesConfig::default(),
