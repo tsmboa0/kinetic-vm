@@ -268,7 +268,10 @@ impl ScopedToolRegistry {
         //    `connect_peripherals: true`; listing-only surfaces pass `false` and
         //    enumerate without holding devices.
         if connect_peripherals {
-            let peripheral_tools = load_peripheral_tools(config.peripherals.clone()).await;
+            let peripheral_tools = super::monad::attest_physical_actions(
+                config,
+                load_peripheral_tools(config.peripherals.clone()).await,
+            );
             if emit_assembly_logs && !peripheral_tools.is_empty() {
                 ::kinetic_log::record!(
                     INFO,

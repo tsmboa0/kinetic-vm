@@ -12,6 +12,7 @@ pub mod delegate;
 pub mod deliver_file;
 pub mod file_read;
 pub mod model_switch;
+pub mod monad;
 pub mod param_options;
 pub mod read_skill;
 mod runtime_command_error;
@@ -1268,6 +1269,15 @@ fn all_tools_with_runtime_on_thread(
         Arc::new(CalculatorTool::new()),
         Arc::new(TodoWriteTool::new()),
     ];
+
+    if root_config.chain.enabled
+        && let Some(key_dir) = root_config.config_path.parent()
+    {
+        tool_arcs.extend(monad::chain_tools(
+            root_config.chain.clone(),
+            key_dir.to_path_buf(),
+        ));
+    }
 
     // A SubAgent runs as an ephemeral clone of its parent and inherits the
     // parent's model verbatim; it must not be able to switch the active

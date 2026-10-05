@@ -20,6 +20,7 @@ kinetic-log.workspace = true
 kinetic-providers.workspace = true
 kinetic-memory.workspace = true
 kinetic-tools.workspace = true
+kinetic-chain.workspace = true
 kinetic-sop-graph.workspace = true
 kinetic-plugins = { workspace = true, optional = true }
 kinetic-tool-call-parser.workspace = true

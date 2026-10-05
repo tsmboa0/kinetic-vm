@@ -4924,6 +4924,7 @@ dependencies = [
  "hmac 0.12.1",
  "hostname",
  "kinetic-api",
+ "kinetic-chain",
  "kinetic-commands",
  "kinetic-config",
  "kinetic-infra",

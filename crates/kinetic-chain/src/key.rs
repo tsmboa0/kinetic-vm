@@ -62,6 +62,10 @@ impl SoftwareKey {
         self.signer.address()
     }
 
+    pub(crate) fn transaction_signer(&self) -> PrivateKeySigner {
+        self.signer.clone()
+    }
+
     fn load(path: &Path, dir: &Path) -> Result<Self> {
         let stored = fs::read_to_string(path).context("failed to read the device key file")?;
         let store = SecretStore::new(dir, true);

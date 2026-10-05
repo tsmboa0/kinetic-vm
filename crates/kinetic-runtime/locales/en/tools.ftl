@@ -203,3 +203,8 @@ tool-a2a-cancel = Cancel an in-flight A2A task on a peer. Returns the updated Ta
 tool-a2a-cancel-desc-peer = Configured peer name hosting the task.
 tool-a2a-cancel-desc-task-id = The task id to cancel.
 tool-a2a-cancel-desc-agent = Optional agent alias or tenant that created the task (from a2a_send). Helps route the cancel to the correct interface when discovery is re-run (the cached route is used first).
+
+tool-monad-identity = Read this device's Monad agent, owner, vault caps, and whether it still needs to be claimed.
+tool-monad-attest = Record a device action on Monad. The device key signs the action, the parameters, and the request URI.
+tool-vault-status = Read the device vault balance, the rolling daily spend, the caps, and whether spending is paused.
+tool-vault-pay = Pay a recipient from the device vault. The payment always goes through the vault caps and allowlist.
