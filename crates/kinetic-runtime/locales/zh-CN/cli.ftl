@@ -407,6 +407,12 @@ channel-telegram-cmd-stop-desc = 取消当前进行中的任务
 channel-telegram-cmd-model-desc = 显示或切换当前模型
 channel-telegram-cmd-models-desc = 列出可用的模型提供商或切换提供商
 channel-telegram-cmd-config-desc = 显示当前配置
+channel-telegram-cmd-link-desc = 将此聊天绑定到链上所有者
+channel-telegram-cmd-status-desc = 显示身份、金库和最近的证明
+channel-telegram-cmd-pause-desc = 如何暂停金库支出
+channel-telegram-cmd-resume-desc = 用所有者签名恢复支出
+channel-telegram-cmd-limits-desc = 查看或更改支出上限
+channel-telegram-cmd-approve-desc = 允许一个金库收款地址
 onboard-openai-auth-note =
     OpenAI 身份验证：
     • API 密钥 — 通过 platform.openai.com 的标准 API 访问（sk-...）

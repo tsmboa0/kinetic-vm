@@ -31,6 +31,7 @@ pub mod hooks;
 pub mod i18n;
 pub mod integrations;
 pub mod observability;
+pub mod owner_commands;
 pub mod peers;
 pub mod platform;
 pub mod plugin_runtime;

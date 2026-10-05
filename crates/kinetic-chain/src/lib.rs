@@ -21,7 +21,8 @@ pub fn format_mon(amount: U256) -> String {
 }
 pub use client::{
     ActionAttestation, Binding, BootReport, ChainClient, ClaimTicket, VaultStatus,
-    action_request_hash, binding_from_device, unclaimed_claim_text,
+    action_request_hash, binding_from_device, owner_link_message, recover_personal_signer,
+    unclaimed_claim_text,
 };
 pub use key::{DeviceSigner, SoftwareKey};
 
@@ -76,6 +77,107 @@ impl DeviceChain {
         self.client
             .attest(&self.key, agent_id, action, params, request_uri)
             .await
+    }
+
+    pub fn chain_id(&self) -> u64 {
+        self.client.chain_id()
+    }
+
+    pub fn vault_address(&self) -> Address {
+        self.client.vault_address()
+    }
+
+    pub fn attestor_address(&self) -> Address {
+        self.client.attestor_address()
+    }
+
+    pub async fn block_timestamp(&self) -> Result<u64> {
+        self.client.block_timestamp().await
+    }
+
+    pub async fn loosen_nonce(&self, agent_id: U256) -> Result<U256> {
+        self.client.loosen_nonce(agent_id).await
+    }
+
+    pub async fn unpause_digest(
+        &self,
+        agent_id: U256,
+        nonce: U256,
+        deadline: U256,
+    ) -> Result<B256> {
+        self.client.unpause_digest(agent_id, nonce, deadline).await
+    }
+
+    pub async fn loosen_digest(
+        &self,
+        agent_id: U256,
+        per_tx_cap: U256,
+        daily_cap: U256,
+        nonce: U256,
+        deadline: U256,
+    ) -> Result<B256> {
+        self.client
+            .loosen_digest(agent_id, per_tx_cap, daily_cap, nonce, deadline)
+            .await
+    }
+
+    pub async fn allow_digest(
+        &self,
+        agent_id: U256,
+        recipient: Address,
+        nonce: U256,
+        deadline: U256,
+    ) -> Result<B256> {
+        self.client
+            .allow_digest(agent_id, recipient, nonce, deadline)
+            .await
+    }
+
+    pub async fn relay_unpause(
+        &self,
+        agent_id: U256,
+        deadline: U256,
+        signature_hex: &str,
+    ) -> Result<B256> {
+        self.client
+            .relay_unpause(&self.key, agent_id, deadline, signature_hex)
+            .await
+    }
+
+    pub async fn relay_loosen(
+        &self,
+        agent_id: U256,
+        per_tx_cap: U256,
+        daily_cap: U256,
+        deadline: U256,
+        signature_hex: &str,
+    ) -> Result<B256> {
+        self.client
+            .relay_loosen(
+                &self.key,
+                agent_id,
+                per_tx_cap,
+                daily_cap,
+                deadline,
+                signature_hex,
+            )
+            .await
+    }
+
+    pub async fn relay_allow(
+        &self,
+        agent_id: U256,
+        recipient: Address,
+        deadline: U256,
+        signature_hex: &str,
+    ) -> Result<B256> {
+        self.client
+            .relay_allow(&self.key, agent_id, recipient, deadline, signature_hex)
+            .await
+    }
+
+    pub async fn recent_attestations(&self, agent_id: U256, limit: usize) -> Result<Vec<B256>> {
+        self.client.recent_attestation_txs(agent_id, limit).await
     }
 }
 

@@ -3692,6 +3692,12 @@ impl TelegramChannel {
             serde_json::json!({ "command": "model",  "description": telegram_cli_string("channel-telegram-cmd-model-desc") }),
             serde_json::json!({ "command": "models", "description": telegram_cli_string("channel-telegram-cmd-models-desc") }),
             serde_json::json!({ "command": "config", "description": telegram_cli_string("channel-telegram-cmd-config-desc") }),
+            serde_json::json!({ "command": "link",   "description": telegram_cli_string("channel-telegram-cmd-link-desc") }),
+            serde_json::json!({ "command": "status", "description": telegram_cli_string("channel-telegram-cmd-status-desc") }),
+            serde_json::json!({ "command": "pause",  "description": telegram_cli_string("channel-telegram-cmd-pause-desc") }),
+            serde_json::json!({ "command": "resume", "description": telegram_cli_string("channel-telegram-cmd-resume-desc") }),
+            serde_json::json!({ "command": "limits", "description": telegram_cli_string("channel-telegram-cmd-limits-desc") }),
+            serde_json::json!({ "command": "approve","description": telegram_cli_string("channel-telegram-cmd-approve-desc") }),
         ];
 
         // Track registered names to deduplicate across skills and tools.
@@ -22036,7 +22042,7 @@ mod tests {
         assert_eq!(content, "[Forwarded from @bob] [IMAGE:/tmp/photo.jpg]");
     }
 
-    /// The 6 built-in Telegram command entries, resolved through the i18n
+    /// The built-in Telegram command entries, resolved through the i18n
     /// catalog exactly as production's `register_bot_commands` does. Shared
     /// by every `register_bot_commands_*` test so expectations stay in sync
     /// with production ordering/content regardless of the active locale.
@@ -22048,6 +22054,12 @@ mod tests {
             ("model", "channel-telegram-cmd-model-desc"),
             ("models", "channel-telegram-cmd-models-desc"),
             ("config", "channel-telegram-cmd-config-desc"),
+            ("link", "channel-telegram-cmd-link-desc"),
+            ("status", "channel-telegram-cmd-status-desc"),
+            ("pause", "channel-telegram-cmd-pause-desc"),
+            ("resume", "channel-telegram-cmd-resume-desc"),
+            ("limits", "channel-telegram-cmd-limits-desc"),
+            ("approve", "channel-telegram-cmd-approve-desc"),
         ];
         entries
             .into_iter()
@@ -22661,7 +22673,7 @@ mod tests {
 
         let mock_server = MockServer::start().await;
 
-        // Build enough tool specs to exceed the 100-command cap: 6 built-ins + 101 tools = 107.
+        // Build enough tool specs to exceed the 100-command cap: 12 built-ins + 101 tools = 113.
         let specs: Vec<(String, String)> = (0..101)
             .map(|i| {
                 (
@@ -22724,11 +22736,12 @@ mod tests {
         // Built-ins are registered first, followed by tools in input order.
         assert_eq!(commands[0]["command"], "new");
         assert_eq!(commands[5]["command"], "config");
-        assert_eq!(commands[6]["command"], "tool_00");
+        assert_eq!(commands[6]["command"], "link");
+        assert_eq!(commands[12]["command"], "tool_00");
         assert_eq!(
             commands[TELEGRAM_MAX_BOT_COMMANDS - 1]["command"],
-            "tool_93",
-            "last registered command must be the 94th tool (built-ins + 94 tools = 100)"
+            "tool_87",
+            "last registered command must be the 88th tool (12 built-ins + 88 tools = 100)"
         );
 
         // Verify the WARN event: stable literal message identifies the event,
@@ -22768,7 +22781,7 @@ mod tests {
                         );
                         assert_eq!(
                             attrs.get("total_before_cap").and_then(|v| v.as_u64()),
-                            Some(107),
+                            Some(113),
                             "structured attribute total_before_cap"
                         );
                         assert_eq!(
@@ -22808,7 +22821,7 @@ mod tests {
 
         let mock_server = MockServer::start().await;
 
-        // 6 built-ins + 101 tools = 107, exceeding the 100-command cap.
+        // 12 built-ins + 101 tools = 113, exceeding the 100-command cap.
         let specs: Vec<(String, String)> = (0..101)
             .map(|i| {
                 (
@@ -22902,7 +22915,7 @@ mod tests {
                         );
                         assert_eq!(
                             attrs.get("total_before_cap").and_then(|v| v.as_u64()),
-                            Some(107),
+                            Some(113),
                         );
                         assert_eq!(attrs.get("registered").and_then(|v| v.as_u64()), Some(100),);
                     }

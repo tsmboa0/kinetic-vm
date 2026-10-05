@@ -411,6 +411,12 @@ channel-telegram-cmd-stop-desc = Annuler la tâche en cours
 channel-telegram-cmd-model-desc = Afficher ou changer le modèle actuel
 channel-telegram-cmd-models-desc = Lister les fournisseurs de modèles disponibles ou changer de fournisseur
 channel-telegram-cmd-config-desc = Afficher la configuration actuelle
+channel-telegram-cmd-link-desc = Lier ce chat au propriétaire onchain
+channel-telegram-cmd-status-desc = Afficher l'identité, le coffre et les attestations
+channel-telegram-cmd-pause-desc = Comment suspendre les dépenses du coffre
+channel-telegram-cmd-resume-desc = Reprendre les dépenses avec une signature
+channel-telegram-cmd-limits-desc = Voir ou modifier les plafonds de dépense
+channel-telegram-cmd-approve-desc = Autoriser un destinataire de paiement
 onboard-openai-auth-note =
     Authentification OpenAI :
     • Clé API — accès API standard via platform.openai.com (sk-...)

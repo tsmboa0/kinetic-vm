@@ -406,6 +406,12 @@ channel-telegram-cmd-stop-desc = 実行中のタスクをキャンセル
 channel-telegram-cmd-model-desc = 現在のモデルを表示または切り替え
 channel-telegram-cmd-models-desc = 利用可能なモデルプロバイダーを一覧表示、またはプロバイダーを切り替え
 channel-telegram-cmd-config-desc = 現在の設定を表示
+channel-telegram-cmd-link-desc = このチャットをオンチェーンの所有者に紐付ける
+channel-telegram-cmd-status-desc = 身元、ボールト、最近の証明を表示
+channel-telegram-cmd-pause-desc = ボールト支出の停止方法
+channel-telegram-cmd-resume-desc = 所有者の署名で支出を再開
+channel-telegram-cmd-limits-desc = 支出上限の表示または変更
+channel-telegram-cmd-approve-desc = 支払い先を許可する
 onboard-openai-auth-note =
     OpenAI認証:
     • APIキー — platform.openai.com 経由の標準APIアクセス (sk-...)

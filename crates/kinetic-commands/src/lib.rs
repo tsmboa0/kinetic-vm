@@ -38,6 +38,18 @@ pub enum BuiltinCommandId {
     Thinking,
     /// Manage durable goal-mode work.
     Goal,
+    /// Bind a Telegram chat to the onchain owner.
+    Link,
+    /// Show identity, vault, and recent attestations.
+    Status,
+    /// Explain how the owner pauses vault spending.
+    Pause,
+    /// Resume vault spending with an owner signature.
+    Resume,
+    /// Show or change vault spending caps.
+    Limits,
+    /// Allow a vault payment recipient.
+    Approve,
 }
 
 impl BuiltinCommandId {
@@ -52,6 +64,12 @@ impl BuiltinCommandId {
             Self::Config => "config",
             Self::Thinking => "thinking",
             Self::Goal => "goal",
+            Self::Link => "link",
+            Self::Status => "status",
+            Self::Pause => "pause",
+            Self::Resume => "resume",
+            Self::Limits => "limits",
+            Self::Approve => "approve",
         }
     }
 }
@@ -199,6 +217,60 @@ static BUILTIN_COMMANDS: &[CommandSpec] = &[
         surfaces: CHANNEL_ONLY,
         execution: CommandExecution::GoalAdmission,
     },
+    CommandSpec {
+        id: BuiltinCommandId::Link,
+        name: "link",
+        aliases: &[],
+        usage: "/link [signature]",
+        description_key: "channel-telegram-cmd-link-desc",
+        surfaces: CHANNEL_ONLY,
+        execution: CommandExecution::RuntimeCommand,
+    },
+    CommandSpec {
+        id: BuiltinCommandId::Status,
+        name: "status",
+        aliases: &[],
+        usage: "/status",
+        description_key: "channel-telegram-cmd-status-desc",
+        surfaces: CHANNEL_ONLY,
+        execution: CommandExecution::RuntimeCommand,
+    },
+    CommandSpec {
+        id: BuiltinCommandId::Pause,
+        name: "pause",
+        aliases: &[],
+        usage: "/pause",
+        description_key: "channel-telegram-cmd-pause-desc",
+        surfaces: CHANNEL_ONLY,
+        execution: CommandExecution::RuntimeCommand,
+    },
+    CommandSpec {
+        id: BuiltinCommandId::Resume,
+        name: "resume",
+        aliases: &[],
+        usage: "/resume [deadline signature]",
+        description_key: "channel-telegram-cmd-resume-desc",
+        surfaces: CHANNEL_ONLY,
+        execution: CommandExecution::RuntimeCommand,
+    },
+    CommandSpec {
+        id: BuiltinCommandId::Limits,
+        name: "limits",
+        aliases: &[],
+        usage: "/limits [per_tx daily [deadline signature]]",
+        description_key: "channel-telegram-cmd-limits-desc",
+        surfaces: CHANNEL_ONLY,
+        execution: CommandExecution::RuntimeCommand,
+    },
+    CommandSpec {
+        id: BuiltinCommandId::Approve,
+        name: "approve",
+        aliases: &[],
+        usage: "/approve [address [deadline signature]]",
+        description_key: "channel-telegram-cmd-approve-desc",
+        surfaces: CHANNEL_ONLY,
+        execution: CommandExecution::RuntimeCommand,
+    },
 ];
 
 pub fn builtin_commands() -> &'static [CommandSpec] {
@@ -330,6 +402,18 @@ mod tests {
         assert!(parse_command_token("/new", CommandSurface::Tui).is_some());
         assert!(parse_command_token("/new-session", CommandSurface::Tui).is_some());
         assert!(parse_command_token("/clear", CommandSurface::Tui).is_none());
+    }
+
+    #[test]
+    fn owner_commands_are_advertised_on_channels_only() {
+        assert!(parse_command_token("/status", CommandSurface::Channel).is_some());
+        assert!(parse_command_token("/link", CommandSurface::Channel).is_some());
+        assert!(parse_command_token("/pause", CommandSurface::Channel).is_some());
+        assert!(parse_command_token("/resume", CommandSurface::Channel).is_some());
+        assert!(parse_command_token("/limits", CommandSurface::Channel).is_some());
+        assert!(parse_command_token("/approve", CommandSurface::Channel).is_some());
+        assert!(parse_command_token("/status", CommandSurface::Tui).is_none());
+        assert!(parse_command_token("/link", CommandSurface::Cli).is_none());
     }
 
     #[test]

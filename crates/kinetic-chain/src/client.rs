@@ -25,7 +25,14 @@ sol! {
         function limitsOf(uint256 agentId) external view returns (uint256 perTxCap, uint256 dailyCap, bool paused);
         function balanceOf(uint256 agentId) external view returns (uint256);
         function spentToday(uint256 agentId) external view returns (uint256);
+        function loosenNonce(uint256 agentId) external view returns (uint256);
+        function hashLoosenCaps(uint256 agentId, uint256 perTxCap, uint256 dailyCap, uint256 nonce, uint256 deadline) external view returns (bytes32);
+        function hashAllowRecipient(uint256 agentId, address recipient, uint256 nonce, uint256 deadline) external view returns (bytes32);
+        function hashUnpause(uint256 agentId, uint256 nonce, uint256 deadline) external view returns (bytes32);
         function pay(uint256 agentId, address recipient, uint256 amount) external;
+        function loosenCaps(uint256 agentId, uint256 perTxCap, uint256 dailyCap, uint256 deadline, bytes signature) external;
+        function allowRecipient(uint256 agentId, address recipient, uint256 deadline, bytes signature) external;
+        function unpause(uint256 agentId, uint256 deadline, bytes signature) external;
     }
 
     #[sol(rpc)]
@@ -275,6 +282,154 @@ impl ChainClient {
         transaction_hash(pending).await
     }
 
+    pub fn chain_id(&self) -> u64 {
+        self.chain_id
+    }
+
+    pub fn vault_address(&self) -> Address {
+        self.vault
+    }
+
+    pub fn attestor_address(&self) -> Address {
+        self.attestor
+    }
+
+    pub async fn block_timestamp(&self) -> Result<u64> {
+        self.latest_timestamp().await
+    }
+
+    pub async fn loosen_nonce(&self, agent_id: U256) -> Result<U256> {
+        IDeviceVault::new(self.vault, &self.provider)
+            .loosenNonce(agent_id)
+            .call()
+            .await
+            .map_err(|_| anyhow::Error::msg("failed to read the vault nonce"))
+    }
+
+    pub async fn unpause_digest(
+        &self,
+        agent_id: U256,
+        nonce: U256,
+        deadline: U256,
+    ) -> Result<B256> {
+        IDeviceVault::new(self.vault, &self.provider)
+            .hashUnpause(agent_id, nonce, deadline)
+            .call()
+            .await
+            .map_err(|_| anyhow::Error::msg("failed to hash the unpause digest"))
+    }
+
+    pub async fn loosen_digest(
+        &self,
+        agent_id: U256,
+        per_tx_cap: U256,
+        daily_cap: U256,
+        nonce: U256,
+        deadline: U256,
+    ) -> Result<B256> {
+        IDeviceVault::new(self.vault, &self.provider)
+            .hashLoosenCaps(agent_id, per_tx_cap, daily_cap, nonce, deadline)
+            .call()
+            .await
+            .map_err(|_| anyhow::Error::msg("failed to hash the loosen digest"))
+    }
+
+    pub async fn allow_digest(
+        &self,
+        agent_id: U256,
+        recipient: Address,
+        nonce: U256,
+        deadline: U256,
+    ) -> Result<B256> {
+        IDeviceVault::new(self.vault, &self.provider)
+            .hashAllowRecipient(agent_id, recipient, nonce, deadline)
+            .call()
+            .await
+            .map_err(|_| anyhow::Error::msg("failed to hash the allow digest"))
+    }
+
+    /// Relay an owner EIP-712 signature. The device key is not the owner, so
+    /// the contract checks the signature and consumes `loosenNonce`.
+    pub async fn relay_unpause(
+        &self,
+        key: &SoftwareKey,
+        agent_id: U256,
+        deadline: U256,
+        signature_hex: &str,
+    ) -> Result<B256> {
+        let signature = signature_bytes(signature_hex)?;
+        let provider = self.signing_provider(key)?;
+        let pending = IDeviceVault::new(self.vault, provider)
+            .unpause(agent_id, deadline, signature.into())
+            .send()
+            .await
+            .map_err(|_| anyhow::Error::msg("the vault call failed"))?;
+        transaction_hash(pending).await
+    }
+
+    pub async fn relay_loosen(
+        &self,
+        key: &SoftwareKey,
+        agent_id: U256,
+        per_tx_cap: U256,
+        daily_cap: U256,
+        deadline: U256,
+        signature_hex: &str,
+    ) -> Result<B256> {
+        let signature = signature_bytes(signature_hex)?;
+        let provider = self.signing_provider(key)?;
+        let pending = IDeviceVault::new(self.vault, provider)
+            .loosenCaps(agent_id, per_tx_cap, daily_cap, deadline, signature.into())
+            .send()
+            .await
+            .map_err(|_| anyhow::Error::msg("the vault call failed"))?;
+        transaction_hash(pending).await
+    }
+
+    pub async fn relay_allow(
+        &self,
+        key: &SoftwareKey,
+        agent_id: U256,
+        recipient: Address,
+        deadline: U256,
+        signature_hex: &str,
+    ) -> Result<B256> {
+        let signature = signature_bytes(signature_hex)?;
+        let provider = self.signing_provider(key)?;
+        let pending = IDeviceVault::new(self.vault, provider)
+            .allowRecipient(agent_id, recipient, deadline, signature.into())
+            .send()
+            .await
+            .map_err(|_| anyhow::Error::msg("the vault call failed"))?;
+        transaction_hash(pending).await
+    }
+
+    /// Last few `Attested` transaction hashes for this agent. The chain is
+    /// the source; this does not keep a local copy.
+    pub async fn recent_attestation_txs(&self, agent_id: U256, limit: usize) -> Result<Vec<B256>> {
+        let topic = B256::from(agent_id.to_be_bytes());
+        let filter = alloy::rpc::types::Filter::new()
+            .address(self.attestor)
+            .event("Attested(uint256,address,bytes32,bytes32)")
+            .topic1(topic)
+            .from_block(0u64);
+        let logs = self
+            .provider
+            .get_logs(&filter)
+            .await
+            .map_err(|_| anyhow::Error::msg("failed to read attestation logs"))?;
+        let mut hashes = Vec::new();
+        for log in logs {
+            if let Some(hash) = log.transaction_hash {
+                hashes.push(hash);
+            }
+        }
+        if hashes.len() > limit {
+            hashes.drain(0..hashes.len() - limit);
+        }
+        Ok(hashes)
+    }
+
     /// Sign the action with the device key and submit it to the attestor.
     /// The contract hashes the proof; this method only signs that digest.
     pub async fn attest(
@@ -392,6 +547,31 @@ pub fn action_request_hash(
     keccak256((agent_id, action, params_hash, uri_hash, timestamp, nonce).abi_encode())
 }
 
+/// Exact text the owner personal-signs to bind a Telegram chat. The chat id
+/// is inside the signed text, so a signature for one chat cannot link another.
+pub fn owner_link_message(chain_id: u64, agent_id: U256, telegram_id: &str) -> String {
+    format!("KineticVM owner\nchain {chain_id}\nagent {agent_id}\ntelegram {telegram_id}")
+}
+
+/// Recover the signer of an EIP-191 personal signature over `message`.
+pub fn recover_personal_signer(message: &str, signature_hex: &str) -> Result<Address> {
+    let signature: alloy::primitives::Signature = signature_hex
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::Error::msg("the signature is not a 65-byte signature"))?;
+    signature
+        .recover_address_from_msg(message.as_bytes())
+        .map_err(|_| anyhow::Error::msg("the signature does not recover an address"))
+}
+
+fn signature_bytes(raw: &str) -> Result<Vec<u8>> {
+    let signature: alloy::primitives::Signature = raw
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::Error::msg("the signature is not a 65-byte signature"))?;
+    Ok(signature.as_bytes().to_vec())
+}
+
 fn parse_address(field: &str, value: &str) -> Result<Address> {
     value
         .parse::<Address>()
@@ -471,6 +651,21 @@ mod tests {
             .parse()
             .expect("request hash");
         assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn a_personal_signature_binds_the_telegram_id() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let key = SoftwareKey::load_or_create(dir.path()).expect("key");
+        let message = owner_link_message(10143, U256::from(2005), "42");
+        let other = owner_link_message(10143, U256::from(2005), "99");
+        let digest = alloy::primitives::eip191_hash_message(message.as_bytes());
+        let signature = key.sign_hash(&digest).expect("sign");
+        let hex = format!("0x{}", hex::encode(signature.as_bytes()));
+        let recovered = recover_personal_signer(&message, &hex).expect("recover");
+        assert_eq!(recovered, key.address());
+        let mismatched = recover_personal_signer(&other, &hex).expect("recover other");
+        assert_ne!(mismatched, key.address());
     }
 
     #[test]

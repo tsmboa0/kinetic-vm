@@ -401,6 +401,8 @@ enum ChannelRuntimeCommand {
     NewSession,
     SetThinking(Option<ThinkingLevel>),
     InvalidThinking(String),
+    /// Telegram owner command. The line still includes the slash token.
+    Owner(String),
 }
 
 // ModelCacheState / ModelCacheEntry are defined in kinetic-config::schema
@@ -2620,6 +2622,11 @@ fn parse_runtime_command(channel_name: &str, content: &str) -> Option<ChannelRun
         }
         "/config" if supports_runtime_model_switch(channel_name) => {
             Some(ChannelRuntimeCommand::ShowConfig)
+        }
+        "/link" | "/status" | "/pause" | "/resume" | "/limits" | "/approve"
+            if channel_name == "telegram" =>
+        {
+            Some(ChannelRuntimeCommand::Owner(trimmed.to_string()))
         }
         _ => None,
     }
@@ -5135,6 +5142,15 @@ async fn handle_runtime_command_for_delivery(
             "channel-runtime-thinking-invalid",
             &[("raw", raw.as_str())],
         ),
+        ChannelRuntimeCommand::Owner(line) => {
+            let config = ctx.live_config.read().clone();
+            kinetic_runtime::owner_commands::handle(
+                &config,
+                msg.platform_sender_id.as_deref().unwrap_or(""),
+                &line,
+            )
+            .await
+        }
     };
 
     if let Err(err) = channel.send(&SendMessage::reply_to(msg, response)).await {
@@ -37619,6 +37635,25 @@ BTC is currently around $65,000 based on latest tool output."#
             Some(ChannelRuntimeCommand::NewSession)
         );
         assert_eq!(parse_runtime_command("telegram", "/clear all"), None);
+    }
+
+    #[test]
+    fn parse_runtime_command_accepts_telegram_owner_commands() {
+        assert_eq!(
+            parse_runtime_command("telegram", "/status"),
+            Some(ChannelRuntimeCommand::Owner("/status".to_string()))
+        );
+        assert_eq!(
+            parse_runtime_command("telegram", "/limits@kinetic_bot 0.02 1"),
+            Some(ChannelRuntimeCommand::Owner(
+                "/limits@kinetic_bot 0.02 1".to_string()
+            ))
+        );
+        assert_eq!(parse_runtime_command("discord", "/status"), None);
+        assert_eq!(
+            parse_runtime_command("telegram", "/new"),
+            Some(ChannelRuntimeCommand::NewSession)
+        );
     }
 
     #[test]

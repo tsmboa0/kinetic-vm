@@ -752,6 +752,30 @@ mod tests {
                 "channel-telegram-cmd-config-desc",
                 "Show current configuration",
             ),
+            (
+                "channel-telegram-cmd-link-desc",
+                "Link this chat to the onchain owner",
+            ),
+            (
+                "channel-telegram-cmd-status-desc",
+                "Show identity, vault, and recent attestations",
+            ),
+            (
+                "channel-telegram-cmd-pause-desc",
+                "How to pause vault spending",
+            ),
+            (
+                "channel-telegram-cmd-resume-desc",
+                "Resume spending with an owner signature",
+            ),
+            (
+                "channel-telegram-cmd-limits-desc",
+                "Show or change vault spending caps",
+            ),
+            (
+                "channel-telegram-cmd-approve-desc",
+                "Allow a vault payment recipient",
+            ),
         ];
 
         // These descriptions are sent to Telegram's setMyCommands, which rejects
