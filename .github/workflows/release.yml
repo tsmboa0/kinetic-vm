@@ -93,11 +93,12 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           tag="${GITHUB_REF_NAME}"
           notes="Install with: curl -fsSL https://raw.githubusercontent.com/tsmboa0/kinetic-vm/main/install.sh | sh"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/* --clobber
+          if gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber --repo "$GH_REPO"
           else
-            gh release create "$tag" dist/* --title "$tag" --notes "$notes"
+            gh release create "$tag" dist/* --title "$tag" --notes "$notes" --repo "$GH_REPO"
           fi
