@@ -403,6 +403,11 @@ pub enum DaemonExit {
     Reload,
 }
 
+enum Waited {
+    Exit(Result<DaemonExit>),
+    Ready(Option<StartupReadiness>),
+}
+
 const EPHEMERAL_GRACE_SECS: u64 = 1;
 
 #[cfg(test)]
@@ -1347,14 +1352,23 @@ pub async fn run_with_authority(
         Ok(Some(exit)) => Ok(exit),
         Ok(None) if startup_feedback_enabled => {
             record_daemon_started(&config, &host, port);
+            let bar = crate::brand::ConnectBar::start(
+                crate::i18n::get_required_cli_string("cli-brand-connecting"),
+                stderr_is_interactive_foreground(),
+            );
             let readiness =
                 await_startup_readiness(startup_readiness_rx, gateway_required, socket_required);
             tokio::pin!(readiness);
 
-            tokio::select! {
+            let waited = tokio::select! {
                 biased;
-                exit = &mut exit => exit,
-                readiness = &mut readiness => {
+                exit = &mut exit => Waited::Exit(exit),
+                readiness = &mut readiness => Waited::Ready(readiness),
+            };
+            bar.finish().await;
+            match waited {
+                Waited::Exit(exit) => exit,
+                Waited::Ready(readiness) => {
                     if let Some(readiness) = readiness
                         && stderr_is_interactive_foreground()
                     {

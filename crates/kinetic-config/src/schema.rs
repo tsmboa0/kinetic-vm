@@ -509,6 +509,7 @@ pub struct Config {
     /// Monad identity, vault, and attestation for this device.
     #[serde(default, skip_serializing_if = "ChainConfig::is_default")]
     #[nested]
+    #[group = "Foundation"]
     pub chain: ChainConfig,
 
     /// Voice transcription configuration (Whisper API via Groq).
@@ -3051,6 +3052,22 @@ fn default_chain_attestor() -> String {
     "0xAb523187C7687743B29daf3468891E339CbF8f82".into()
 }
 
+fn default_chain_network() -> String {
+    "testnet".into()
+}
+
+fn default_chain_claim_url() -> String {
+    "https://claim.kineticvm.xyz".into()
+}
+
+fn default_chain_per_tx_cap() -> String {
+    "0.05".into()
+}
+
+fn default_chain_daily_cap() -> String {
+    "1".into()
+}
+
 /// Monad testnet identity for one device. Defaults match the published
 /// deployment and stay off until the owner opts in.
 #[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
@@ -3075,6 +3092,25 @@ pub struct ChainConfig {
     /// KineticAttestor address.
     #[serde(default = "default_chain_attestor")]
     pub attestor: String,
+    /// `testnet` uses the published contracts. `mainnet` stays refused until
+    /// those three addresses are a mainnet deployment.
+    #[serde(default = "default_chain_network")]
+    pub network: String,
+    /// Public https page the owner wallet opens to claim this device.
+    #[serde(default = "default_chain_claim_url")]
+    pub claim_url: String,
+    /// Wallet that will own the agent NFT. Empty until setup stores it.
+    #[serde(default)]
+    pub owner: String,
+    /// Name sent as the agent URI on the claim page.
+    #[serde(default)]
+    pub device_name: String,
+    /// Starting per-transaction cap, in MON, sent with the claim.
+    #[serde(default = "default_chain_per_tx_cap")]
+    pub per_tx_cap: String,
+    /// Starting daily cap, in MON, sent with the claim.
+    #[serde(default = "default_chain_daily_cap")]
+    pub daily_cap: String,
 }
 
 impl Default for ChainConfig {
@@ -3086,6 +3122,12 @@ impl Default for ChainConfig {
             registry: default_chain_registry(),
             vault: default_chain_vault(),
             attestor: default_chain_attestor(),
+            network: default_chain_network(),
+            claim_url: default_chain_claim_url(),
+            owner: String::new(),
+            device_name: String::new(),
+            per_tx_cap: default_chain_per_tx_cap(),
+            daily_cap: default_chain_daily_cap(),
         }
     }
 }
@@ -3100,6 +3142,12 @@ impl ChainConfig {
             && self.registry.eq_ignore_ascii_case(&default.registry)
             && self.vault.eq_ignore_ascii_case(&default.vault)
             && self.attestor.eq_ignore_ascii_case(&default.attestor)
+            && self.network == default.network
+            && self.claim_url == default.claim_url
+            && self.owner == default.owner
+            && self.device_name == default.device_name
+            && self.per_tx_cap == default.per_tx_cap
+            && self.daily_cap == default.daily_cap
     }
 }
 

@@ -123,6 +123,7 @@ impl ChainClient {
         if !config.enabled {
             anyhow::bail!("the Monad chain client is disabled in config");
         }
+        ensure_supported_network(config)?;
         let rpc_url = config
             .rpc_url
             .parse()
@@ -579,9 +580,134 @@ fn parse_address(field: &str, value: &str) -> Result<Address> {
 }
 
 /// Text a later claim screen can put in a QR code. The claim ticket itself
-/// is signed only after the owner address is known.
+/// is signed only after the owner address is known, and that signature goes
+/// in the public claim link rather than the QR.
 pub fn unclaimed_claim_text(device: Address) -> String {
     format!("kinetic:{device}")
+}
+
+/// Refuse mainnet while the config still names the published testnet
+/// contracts, and refuse a testnet label pointed at chain id 143 with those
+/// same addresses.
+pub fn ensure_supported_network(config: &ChainConfig) -> Result<()> {
+    match config.network.as_str() {
+        "testnet" => {
+            if config.chain_id == 143 && points_at_published_testnet(config) {
+                anyhow::bail!(
+                    "chain id 143 is Monad mainnet, and these contract addresses are the testnet deployment"
+                );
+            }
+            Ok(())
+        }
+        "mainnet" => {
+            if config.chain_id != 143 || points_at_published_testnet(config) {
+                anyhow::bail!("Monad mainnet has no KineticVM contracts yet");
+            }
+            Ok(())
+        }
+        _ => anyhow::bail!("chain.network must be testnet or mainnet"),
+    }
+}
+
+fn points_at_published_testnet(config: &ChainConfig) -> bool {
+    let published = ChainConfig::default();
+    config.registry.eq_ignore_ascii_case(&published.registry)
+        || config.vault.eq_ignore_ascii_case(&published.vault)
+        || config.attestor.eq_ignore_ascii_case(&published.attestor)
+}
+
+/// The claim page has to be a public https origin. A phone wallet opens it.
+pub fn ensure_public_claim_url(claim_url: &str) -> Result<()> {
+    let Some(host) = claim_url_host(claim_url) else {
+        anyhow::bail!("chain.claim_url must be a public https address");
+    };
+    let blocked = host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case("0.0.0.0")
+        || host == "::1"
+        || host.starts_with("127.")
+        || host.ends_with(".local")
+        || host.ends_with(".localhost");
+    if blocked {
+        anyhow::bail!("chain.claim_url must be a public https address");
+    }
+    Ok(())
+}
+
+/// Query the shared claim page can submit without calling the device.
+pub struct ClaimPageQuery<'a> {
+    pub claim_url: &'a str,
+    pub device: Address,
+    pub owner: Address,
+    pub signature: &'a [u8],
+    pub deadline: U256,
+    pub per_tx_cap: &'a str,
+    pub daily_cap: &'a str,
+    pub chain_id: u64,
+    pub device_name: &'a str,
+    pub registry: &'a str,
+    pub vault: &'a str,
+    pub attestor: &'a str,
+    pub rpc_url: &'a str,
+}
+
+pub fn claim_page_url(query: &ClaimPageQuery<'_>) -> Result<String> {
+    ensure_public_claim_url(query.claim_url)?;
+    let mut url = query.claim_url.trim().to_string();
+    if let Some(hash) = url.find('#') {
+        url.truncate(hash);
+    }
+    while url.ends_with('?') || url.ends_with('&') {
+        url.pop();
+    }
+    let mut first = !url.contains('?');
+    let signature = format!("0x{}", hex::encode(query.signature));
+    let deadline = query.deadline.to_string();
+    let chain_id = query.chain_id.to_string();
+    let fields = [
+        ("device", query.device.to_string()),
+        ("owner", query.owner.to_string()),
+        ("sig", signature),
+        ("deadline", deadline),
+        ("perTx", query.per_tx_cap.to_string()),
+        ("daily", query.daily_cap.to_string()),
+        ("chainId", chain_id),
+        ("name", query.device_name.to_string()),
+        ("registry", query.registry.to_string()),
+        ("vault", query.vault.to_string()),
+        ("attestor", query.attestor.to_string()),
+        ("rpc", query.rpc_url.to_string()),
+    ];
+    for (key, value) in fields {
+        url.push(if first { '?' } else { '&' });
+        first = false;
+        url.push_str(key);
+        url.push('=');
+        url.push_str(&query_component(&value));
+    }
+    Ok(url)
+}
+
+fn claim_url_host(claim_url: &str) -> Option<&str> {
+    let rest = claim_url.trim().strip_prefix("https://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = authority.rsplit('@').next().unwrap_or(authority);
+    if let Some(inner) = hostport.strip_prefix('[') {
+        return inner.split(']').next().filter(|host| !host.is_empty());
+    }
+    hostport.split(':').next().filter(|host| !host.is_empty())
+}
+
+fn query_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 #[cfg(test)]
@@ -651,6 +777,86 @@ mod tests {
             .parse()
             .expect("request hash");
         assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn the_claim_page_carries_the_ticket_and_the_deployment() {
+        let config = ChainConfig::default();
+        let device: Address = "0x00000000000000000000000000000000000000a1"
+            .parse()
+            .expect("device");
+        let owner: Address = "0x00000000000000000000000000000000000000b2"
+            .parse()
+            .expect("owner");
+        let url = claim_page_url(&ClaimPageQuery {
+            claim_url: &config.claim_url,
+            device,
+            owner,
+            signature: &[0x01, 0x02, 0x03],
+            deadline: U256::from(1_700_000_000u64),
+            per_tx_cap: "0.05",
+            daily_cap: "1",
+            chain_id: config.chain_id,
+            device_name: "vending 1",
+            registry: &config.registry,
+            vault: &config.vault,
+            attestor: &config.attestor,
+            rpc_url: &config.rpc_url,
+        })
+        .expect("claim url");
+        assert!(url.starts_with("https://claim.kineticvm.xyz?"));
+        assert!(url.contains(&format!("device={device}")));
+        assert!(url.contains(&format!("owner={owner}")));
+        assert!(url.contains("sig=0x010203"));
+        assert!(url.contains("deadline=1700000000"));
+        assert!(url.contains("perTx=0.05"));
+        assert!(url.contains("daily=1"));
+        assert!(url.contains("chainId=10143"));
+        assert!(url.contains("name=vending%201"));
+        assert!(url.contains(&format!("registry={}", config.registry)));
+        assert!(url.contains(&format!("attestor={}", config.attestor)));
+        assert!(!url.contains("never-the-key"));
+    }
+
+    #[test]
+    fn a_local_claim_page_is_refused() {
+        let error = ensure_public_claim_url("http://localhost:3000/claim")
+            .expect_err("http localhost")
+            .to_string();
+        assert!(error.contains("public https"));
+        assert!(ensure_public_claim_url("https://127.0.0.1/claim").is_err());
+        assert!(ensure_public_claim_url("https://localhost/claim").is_err());
+        assert!(ensure_public_claim_url("https://[::1]/claim").is_err());
+    }
+
+    #[test]
+    fn mainnet_keeps_the_published_testnet_contracts_offline() {
+        let mainnet = ChainConfig {
+            network: "mainnet".into(),
+            chain_id: 143,
+            ..ChainConfig::default()
+        };
+        assert!(ensure_supported_network(&mainnet).is_err());
+
+        let mislabeled = ChainConfig {
+            chain_id: 143,
+            ..ChainConfig::default()
+        };
+        assert!(ensure_supported_network(&mislabeled).is_err());
+        assert!(ensure_supported_network(&ChainConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn a_private_mainnet_deployment_is_accepted() {
+        let config = ChainConfig {
+            network: "mainnet".into(),
+            chain_id: 143,
+            registry: "0x1111111111111111111111111111111111111111".into(),
+            vault: "0x2222222222222222222222222222222222222222".into(),
+            attestor: "0x3333333333333333333333333333333333333333".into(),
+            ..ChainConfig::default()
+        };
+        assert!(ensure_supported_network(&config).is_ok());
     }
 
     #[test]

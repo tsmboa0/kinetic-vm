@@ -20,9 +20,9 @@ pub fn format_mon(amount: U256) -> String {
     alloy::primitives::utils::format_ether(amount)
 }
 pub use client::{
-    ActionAttestation, Binding, BootReport, ChainClient, ClaimTicket, VaultStatus,
-    action_request_hash, binding_from_device, owner_link_message, recover_personal_signer,
-    unclaimed_claim_text,
+    ActionAttestation, Binding, BootReport, ChainClient, ClaimPageQuery, ClaimTicket, VaultStatus,
+    action_request_hash, binding_from_device, claim_page_url, ensure_public_claim_url,
+    ensure_supported_network, owner_link_message, recover_personal_signer, unclaimed_claim_text,
 };
 pub use key::{DeviceSigner, SoftwareKey};
 
@@ -39,14 +39,20 @@ pub struct DeviceChain {
 
 impl DeviceChain {
     /// Load or create the device key, then connect. Fails while the chain
-    /// section is disabled, before any key file is created.
+    /// section is disabled, and while the network still points at an
+    /// unpublished deployment, before any key file is created.
     pub async fn open(config: &ChainConfig, key_dir: &Path) -> Result<Self> {
         if !config.enabled {
             anyhow::bail!("the Monad chain client is disabled in config");
         }
+        ensure_supported_network(config)?;
         let key = SoftwareKey::load_or_create(key_dir)?;
         let client = ChainClient::connect(config).await?;
         Ok(Self { key, client })
+    }
+
+    pub async fn sign_claim(&self, owner: Address, deadline: U256) -> Result<ClaimTicket> {
+        self.client.sign_claim(&self.key, owner, deadline).await
     }
 
     pub fn address(&self) -> Address {

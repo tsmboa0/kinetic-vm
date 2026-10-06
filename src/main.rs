@@ -1246,23 +1246,25 @@ Examples:
         session_timeout: Option<u64>,
     },
 
-    /// Start long-running autonomous runtime (gateway + channels + heartbeat + scheduler)
+    /// Start the device runtime
     // i18n-exempt: clap derive help — framework requires a compile-time literal
-    #[command(long_about = "\
-Start the long-running autonomous daemon.
+    #[command(
+        name = "start",
+        alias = "daemon",
+        long_about = "\
+Start the device runtime.
 
-Launches the full KineticVM runtime: gateway server, all configured \
-channels (Telegram, Discord, Slack, etc.), heartbeat monitor, and \
-the cron scheduler. This is the recommended way to run KineticVM in \
-production or as an always-on assistant.
+Launches the gateway, configured channels, heartbeat, and scheduler. \
+`kinetic service install` registers this process with systemd or \
+launchd so it starts when the machine boots.
 
-Use 'kinetic service install' to register the daemon as an OS \
-service (systemd/launchd) for auto-start on boot.
+`kinetic daemon` still runs the same process.
 
 Examples:
-  kinetic daemon                   # use config defaults
-  kinetic daemon -p 9090           # gateway on port 9090
-  kinetic daemon --host 127.0.0.1  # localhost only")]
+  kinetic start                   # use config defaults
+  kinetic start -p 9090           # gateway on port 9090
+  kinetic start --host 127.0.0.1  # localhost only"
+    )]
     Daemon {
         /// Port to listen on (use 0 for random available port); defaults to config gateway.port
         #[arg(short, long)]
@@ -1283,6 +1285,10 @@ Examples:
         #[arg(long)]
         allow_degraded_security: bool,
     },
+
+    /// Print the public page where the owner wallet claims this device
+    // i18n-exempt: clap derive help — framework requires a compile-time literal
+    ClaimLink,
 
     /// Manage OS service lifecycle (launchd/systemd user service)
     Service {
@@ -1766,6 +1772,10 @@ async fn run_quickstart_cli(
             )
         );
     }
+    kinetic_runtime::brand::write_mark(
+        &mut std::io::stderr().lock(),
+        kinetic_runtime::brand::ansi_color_enabled(),
+    )?;
 
     #[derive(Default)]
     struct Form {
@@ -6418,9 +6428,9 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                     }
                     let message = ta(
                         "cli-standalone-daemon-owned",
-                        &[("command", "daemon"), ("path", &data_dir.display().to_string())],
+                        &[("command", "start"), ("path", &data_dir.display().to_string())],
                         format!(
-                            "Cannot run `kinetic daemon` while another KineticVM process owns the config state at {}. Stop the owning process or use its daemon-backed interface, then retry. No agent work was started.",
+                            "Cannot run `kinetic start` while another KineticVM process owns the config state at {}. Stop the owning process or use its daemon-backed interface, then retry. No agent work was started.",
                             data_dir.display()
                         ),
                     );
@@ -6432,7 +6442,7 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                         )
                         .with_outcome(::kinetic_log::EventOutcome::Failure)
                         .with_attrs(::serde_json::json!({
-                            "command": "daemon",
+                            "command": "start",
                             "path": data_dir.display().to_string(),
                         })),
                         "daemon refused because config state is already owned"
@@ -7075,6 +7085,21 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
             }
         }
 
+        Commands::ClaimLink => match kinetic_runtime::claim_link::build(&config).await {
+            Ok(url) => {
+                println!(
+                    "{}",
+                    ta(
+                        "cli-claim-link-ready",
+                        &[("url", url.as_str())],
+                        format!("Open this page in the owner wallet to claim the device: {url}"),
+                    )
+                );
+                Ok(())
+            }
+            Err(error) => anyhow::bail!("{}", error.message()),
+        },
+
         Commands::Daemon {
             port,
             host,
@@ -7213,6 +7238,13 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
             let mut degraded_nag: Option<tokio::task::JoinHandle<()>> =
                 gate_security_posture(&current_config, allow_degraded_security)?;
             let startup_feedback_enabled = !cli.verbose;
+            if daemon::stderr_is_interactive_foreground() {
+                let mut stderr = std::io::stderr().lock();
+                let _ = kinetic_runtime::brand::write_mark(
+                    &mut stderr,
+                    kinetic_runtime::brand::ansi_color_enabled(),
+                );
+            }
             // Cron drivers a generation aborted that had not stopped by the time
             // its teardown returned. Held across the reload boundary so the next
             // generation adopts them instead of the process losing track of a

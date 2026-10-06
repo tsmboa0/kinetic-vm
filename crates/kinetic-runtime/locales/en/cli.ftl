@@ -1239,6 +1239,7 @@ cli-gateway-restart-hint-process = restart the `kinetic daemon` process
 # a supervisor retry loop. The two variants differ only by who holds the port.
 cli-daemon-gateway-already-running = A KineticVM gateway is already running on {$host}:{$port}. The daemon supervises its own gateway and will not start a second one on the same address. Stop that gateway (or point the daemon at a free port with `kinetic config set gateway.port <port>`), then run the daemon again.
 cli-daemon-gateway-port-occupied = Gateway address {$host}:{$port} is already in use by another process. Free the port or point the daemon at a free port (`kinetic config set gateway.port <port>`), then run the daemon again.
+cli-brand-connecting = Connecting
 cli-daemon-starting-title = 🧠 KineticVM daemon starting…
 cli-daemon-starting-detail = Preparing configured daemon endpoints
 cli-daemon-started-title = 🧠 KineticVM daemon ready
@@ -1425,6 +1426,26 @@ cli-chain-bad-amount = Amount must be a MON value such as 0.02.
 cli-chain-bad-address = Recipient must be an address.
 cli-chain-missing = Missing {$field}.
 cli-chain-failed = The chain call failed: {$error}.
+cli-claim-link-about = Print the public page where the owner wallet claims this device
+cli-claim-link-ready = Open this page in the owner wallet to claim the device: {$url}
+cli-claim-link-disabled = Monad identity is turned off. Enable it with `kinetic config set chain.enabled true`, then run `kinetic claim-link` again.
+cli-claim-link-missing-owner = Set chain.owner to the wallet that will own this device, then run `kinetic claim-link` again.
+cli-claim-link-bad-owner = chain.owner is not a wallet address.
+cli-claim-link-bad-cap = chain.per_tx_cap and chain.daily_cap must be MON amounts such as 0.05.
+cli-claim-link-local = chain.claim_url must be a public https address so the owner wallet can open it.
+cli-claim-link-mainnet = Monad mainnet has no KineticVM contracts yet. Stay on testnet, or deploy your own and set chain.registry, chain.vault, and chain.attestor.
+cli-claim-link-network = chain.network must be testnet or mainnet.
+cli-start-about = Start the device runtime
+cli-start-long-about =
+    Start the device runtime.
+
+    Launches the gateway, configured channels, heartbeat, and scheduler. `kinetic service install` registers this process with systemd or launchd so it starts when the machine boots.
+
+    `kinetic daemon` still runs the same process.
+
+        kinetic start
+        kinetic start -p 9090
+        kinetic start --host 127.0.0.1
 cli-chain-yes = yes
 cli-chain-no = no
 cli-chain-actuator-attested = The action was recorded on Monad. Transaction {$tx}.

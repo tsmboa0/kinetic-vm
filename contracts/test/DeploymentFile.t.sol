@@ -11,8 +11,8 @@ contract DeploymentFileTest is Test {
         assertEq(vm.parseJsonAddress(json, ".identityRegistry"), Monad8004.TESTNET_IDENTITY);
         assertEq(vm.parseJsonAddress(json, ".reputationRegistry"), Monad8004.TESTNET_REPUTATION);
         assertEq(vm.parseJsonAddress(json, ".validationRegistry"), Monad8004.TESTNET_VALIDATION);
-        assertEq(vm.parseJsonAddress(json, ".kineticRegistry"), address(0));
-        assertEq(vm.parseJsonAddress(json, ".deviceVault"), address(0));
-        assertEq(vm.parseJsonAddress(json, ".kineticAttestor"), address(0));
+        assertEq(vm.parseJsonAddress(json, ".kineticRegistry"), 0xBf2E634F8DA4C8C02979C1A2CcAD113eFb259132);
+        assertEq(vm.parseJsonAddress(json, ".deviceVault"), 0xD01eEa46c7E054f98dde0ed58DB5Da73ED4D22fD);
+        assertEq(vm.parseJsonAddress(json, ".kineticAttestor"), 0xAb523187C7687743B29daf3468891E339CbF8f82);
     }
 }
