@@ -14,6 +14,19 @@ The onchain registry, vault, and attestor are the next layer. They are not
 in this tree yet. What is here is the device runtime: the agent, its tools,
 the channels it listens on, and the hardware adapters.
 
+## Install
+
+Linux (64-bit, including Raspberry Pi) and macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tsmboa0/kinetic-vm/main/install.sh | sh
+```
+
+This puts the latest release binary in `~/.local/bin`. Then run `kinetic quickstart`.
+
+The command works after a version tag such as `v0.8.5` has been published.
+`KINETIC_VERSION=v0.8.5` pins one. Building from a clone is below.
+
 ## Build
 
 Rust 1.96 (`rust-toolchain.toml`).
