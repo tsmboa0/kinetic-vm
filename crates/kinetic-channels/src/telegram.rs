@@ -992,6 +992,8 @@ pub struct TelegramChannel {
     /// [`VOICE_DROP_NOTICE_TIMEOUT`] in production; tests shrink it so a
     /// stalled-notice regression does not have to wait out the real ceiling.
     voice_drop_notice_timeout: Duration,
+    /// One claim watcher per channel, even if `listen` is restarted.
+    claim_watch_started: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2589,6 +2591,7 @@ impl TelegramChannel {
             pending_model_pickers: tokio::sync::Mutex::new(HashMap::new()),
             approval_timeout_secs: 120,
             voice_drop_notice_timeout: VOICE_DROP_NOTICE_TIMEOUT,
+            claim_watch_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -6999,6 +7002,99 @@ Allowlist Telegram username (without '@') or numeric user ID.",
             UpdateOutcome::ReceiverClosed
         }
     }
+
+    /// Watch the bound chat: send the claim link once, then poll until it lands.
+    fn spawn_claim_watch(&self) {
+        let Some(authority) = self.persist.clone() else {
+            return;
+        };
+        if self
+            .claim_watch_started
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+        let alias = self.alias.clone();
+        let client = self.http_client();
+        let url = self.api_url("sendMessage");
+        kinetic_spawn::spawn!(async move {
+            Box::pin(watch_claim(authority, alias, client, url)).await;
+        });
+    }
+}
+
+async fn watch_claim(
+    authority: kinetic_runtime::LiveConfigAuthority,
+    alias: String,
+    client: reqwest::Client,
+    url: String,
+) {
+    let mut link_sent = false;
+    let mut claim_logged = false;
+    loop {
+        let config = authority.config().read().clone();
+        match Box::pin(kinetic_runtime::claim_watch::advance(
+            &config, &alias, link_sent,
+        ))
+        .await
+        {
+            kinetic_runtime::claim_watch::Advance::Wait => {}
+            kinetic_runtime::claim_watch::Advance::Deliver { chat_id, text } => {
+                if send_claim_text(&client, &url, &chat_id, &text).await {
+                    link_sent = true;
+                    ::kinetic_log::record!(
+                        INFO,
+                        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note),
+                        "sent the claim link"
+                    );
+                }
+            }
+            kinetic_runtime::claim_watch::Advance::Claimed { chat_id, text } => {
+                if !claim_logged {
+                    ::kinetic_log::record!(
+                        INFO,
+                        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note),
+                        "claim succeeded"
+                    );
+                    claim_logged = true;
+                }
+                if send_claim_text(&client, &url, &chat_id, &text).await {
+                    break;
+                }
+            }
+            kinetic_runtime::claim_watch::Advance::Settled => break,
+        }
+        tokio::time::sleep(kinetic_runtime::claim_watch::POLL_EVERY).await;
+    }
+}
+
+async fn send_claim_text(client: &reqwest::Client, url: &str, chat_id: &str, text: &str) -> bool {
+    let body = serde_json::json!({
+        "chat_id": chat_id,
+        "text": text,
+    });
+    match client.post(url).json(&body).send().await {
+        Ok(response) if response.status().is_success() => true,
+        Ok(response) => {
+            ::kinetic_log::record!(
+                WARN,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                    .with_outcome(::kinetic_log::EventOutcome::Unknown)
+                    .with_attrs(::serde_json::json!({"status": response.status().as_u16()})),
+                "claim message was rejected"
+            );
+            false
+        }
+        Err(_) => {
+            ::kinetic_log::record!(
+                WARN,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note)
+                    .with_outcome(::kinetic_log::EventOutcome::Unknown),
+                "claim message failed to send"
+            );
+            false
+        }
+    }
 }
 
 impl ::kinetic_api::attribution::Attributable for TelegramChannel {
@@ -8068,6 +8164,7 @@ impl Channel for TelegramChannel {
     }
 
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
+        self.spawn_claim_watch();
         let mut offset: i64 = 0;
         let mut poll_generation: u64 = 0;
         let mut pending_media_groups: std::collections::HashMap<MediaGroupKey, PendingMediaGroup> =

@@ -41,14 +41,6 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::io::{BufRead, ErrorKind, Read, Write};
 
-#[cfg(feature = "agent-runtime")]
-use crossterm::{
-    cursor::{Hide, MoveTo, Show},
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-    execute,
-    terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
-};
-
 #[cfg(any(not(feature = "agent-runtime"), windows))]
 const STDIN_LINE_CAP: usize = 1024 * 1024;
 
@@ -182,531 +174,6 @@ fn secret_prompt(prompt_text: &str, allow_empty: bool) -> Result<String> {
     } else {
         bail!(ta("cli-secret-empty", &[], "Value cannot be empty."))
     }
-}
-
-#[cfg(feature = "agent-runtime")]
-fn qta(key: &str, args: &[(&str, &str)]) -> String {
-    kinetic_runtime::i18n::get_required_cli_string_with_args(key, args)
-}
-
-#[cfg(feature = "agent-runtime")]
-fn quickstart_row(key: &str, glyph: &str, summary: &str) -> String {
-    qta(key, &[("glyph", glyph), ("summary", summary)])
-}
-
-#[cfg(feature = "agent-runtime")]
-const QUICKSTART_SELECTOR_MIN_WIDTH: usize = 20;
-
-#[cfg(feature = "agent-runtime")]
-const QUICKSTART_SELECTOR_ROW_OVERHEAD: usize = 3;
-
-#[cfg(feature = "agent-runtime")]
-const QUICKSTART_SELECTOR_VERTICAL_OVERHEAD: usize = 2;
-
-#[cfg(feature = "agent-runtime")]
-fn quickstart_selector_row_budget(terminal_width: usize) -> Option<usize> {
-    if terminal_width < QUICKSTART_SELECTOR_MIN_WIDTH {
-        return None;
-    }
-    terminal_width.checked_sub(QUICKSTART_SELECTOR_ROW_OVERHEAD)
-}
-
-/// Resolve the terminal dimensions the Quickstart checklist will be fitted to.
-///
-/// A narrow terminal whose size is unavailable must not get rows fitted against
-/// a guessed geometry — that would reintroduce the exact overflow class this
-/// change exists to prevent. Unknown dimensions therefore take the same
-/// fail-closed path as a too-narrow terminal.
-#[cfg(feature = "agent-runtime")]
-fn quickstart_selector_terminal_size<T: QuickstartSelectorTerminal>(
-    term: &mut T,
-) -> Option<(u16, u16)> {
-    term.size_checked()
-}
-
-/// Whether a sampled terminal size is usable for fitting the checklist.
-#[cfg(all(feature = "agent-runtime", test))]
-fn quickstart_selector_size_is_usable(size: Option<(u16, u16)>) -> bool {
-    size.is_some()
-}
-
-#[cfg(feature = "agent-runtime")]
-fn quickstart_selector_min_height(item_count: usize) -> usize {
-    item_count.saturating_add(QUICKSTART_SELECTOR_VERTICAL_OVERHEAD)
-}
-
-#[cfg(feature = "agent-runtime")]
-fn quickstart_selector_fits_height(terminal_height: usize, item_count: usize) -> bool {
-    terminal_height >= quickstart_selector_min_height(item_count)
-}
-
-#[cfg(feature = "agent-runtime")]
-fn fit_quickstart_selector_row(row: &str, budget: usize) -> String {
-    let normalized: String = row
-        .chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect();
-    if normalized.len() <= budget && console::measure_text_width(&normalized) <= budget {
-        return normalized;
-    }
-    if budget == 0 {
-        return String::new();
-    }
-
-    let marker = if budget >= "…".len() { "…" } else { "." };
-    let byte_budget = budget - marker.len();
-    let width_budget = budget - console::measure_text_width(marker);
-    let mut fitted = String::with_capacity(budget);
-    for ch in normalized.chars() {
-        fitted.push(ch);
-        if fitted.len() > byte_budget || console::measure_text_width(&fitted) > width_budget {
-            fitted.pop();
-            break;
-        }
-    }
-    fitted.push_str(marker);
-    fitted
-}
-
-#[cfg(feature = "agent-runtime")]
-fn quickstart_selector_resize_error(
-    initial_size: (u16, u16),
-    current_size: (u16, u16),
-) -> anyhow::Error {
-    let (initial_height, initial_width) = initial_size;
-    let (current_height, current_width) = current_size;
-    anyhow::Error::msg(qta(
-        "cli-quickstart-terminal-resized",
-        &[
-            ("initial_width", &initial_width.to_string()),
-            ("initial_height", &initial_height.to_string()),
-            ("current_width", &current_width.to_string()),
-            ("current_height", &current_height.to_string()),
-        ],
-    ))
-}
-
-/// Decide whether an interaction may continue at the size sampled now.
-///
-/// Returns `Err` both when the terminal changed size and when its size became
-/// unavailable: an unknown size is not evidence that the geometry still
-/// matches, and `Term::size()`'s fabricated `(24, 80)` fallback could even
-/// compare *equal* to the initial sample on an 80x24 terminal that has since
-/// lost its size query. Unknown therefore fails closed, like a resize.
-#[cfg(feature = "agent-runtime")]
-fn quickstart_selector_recheck_size(
-    initial_size: (u16, u16),
-    current_size: Option<(u16, u16)>,
-) -> Result<()> {
-    match current_size {
-        Some(current) if current == initial_size => Ok(()),
-        Some(current) => Err(quickstart_selector_resize_error(initial_size, current)),
-        None => Err(anyhow::Error::msg(qta(
-            "cli-quickstart-terminal-size-unknown",
-            &[],
-        ))),
-    }
-}
-
-#[cfg(feature = "agent-runtime")]
-fn quickstart_selector_frame_lines(
-    labels: &[String],
-    prompt: &str,
-    selected: usize,
-) -> Vec<String> {
-    std::iter::once(format!("? {prompt}"))
-        .chain(labels.iter().enumerate().map(|(index, label)| {
-            let marker = if index == selected { ">" } else { " " };
-            format!("{marker} {label}")
-        }))
-        .collect()
-}
-
-#[cfg(feature = "agent-runtime")]
-fn render_quickstart_selector<T: QuickstartSelectorTerminal>(
-    term: &mut T,
-    lines: &[String],
-) -> std::io::Result<()> {
-    for line in lines {
-        term.write_line(line)?;
-    }
-    term.flush()
-}
-
-#[cfg(feature = "agent-runtime")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum QuickstartSelectorKey {
-    Down,
-    Up,
-    Select,
-    Cancel,
-    Interrupt,
-    Other,
-}
-
-#[cfg(feature = "agent-runtime")]
-trait QuickstartSelectorTerminal {
-    /// Geometry of the terminal that receives `write_line` output, as
-    /// `(rows, columns)`, or `None` when it cannot be determined.
-    fn size_checked(&mut self) -> Option<(u16, u16)>;
-    fn enter_alternate_screen(&mut self) -> std::io::Result<()>;
-    fn clear_screen(&mut self) -> std::io::Result<()>;
-    fn move_cursor_to_origin(&mut self) -> std::io::Result<()>;
-    fn hide_cursor(&mut self) -> std::io::Result<()>;
-    fn show_cursor(&mut self) -> std::io::Result<()>;
-    fn leave_alternate_screen(&mut self) -> std::io::Result<()>;
-    fn write_line(&mut self, line: &str) -> std::io::Result<()>;
-    fn flush(&mut self) -> std::io::Result<()>;
-    fn read_key(&mut self) -> std::io::Result<QuickstartSelectorKey>;
-}
-
-/// The input half of the Crossterm selector: raw-mode ownership plus key
-/// decoding. It is separate from the output half so a regression can drive the
-/// production output adapter with injected keys.
-#[cfg(feature = "agent-runtime")]
-trait QuickstartSelectorInput {
-    fn read_key(&mut self) -> std::io::Result<QuickstartSelectorKey>;
-}
-
-#[cfg(feature = "agent-runtime")]
-struct CrosstermQuickstartInput {
-    restore_cooked_mode: bool,
-}
-
-#[cfg(feature = "agent-runtime")]
-impl CrosstermQuickstartInput {
-    fn new() -> std::io::Result<Self> {
-        let raw_mode_was_enabled = terminal::is_raw_mode_enabled()?;
-        if !raw_mode_was_enabled {
-            terminal::enable_raw_mode()?;
-        }
-        Ok(Self {
-            restore_cooked_mode: !raw_mode_was_enabled,
-        })
-    }
-}
-
-#[cfg(feature = "agent-runtime")]
-impl Drop for CrosstermQuickstartInput {
-    fn drop(&mut self) {
-        if self.restore_cooked_mode {
-            let _ = terminal::disable_raw_mode();
-        }
-    }
-}
-
-#[cfg(feature = "agent-runtime")]
-impl QuickstartSelectorInput for CrosstermQuickstartInput {
-    fn read_key(&mut self) -> std::io::Result<QuickstartSelectorKey> {
-        loop {
-            match event::read()? {
-                Event::Key(key)
-                    if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat =>
-                {
-                    let control = key.modifiers.contains(KeyModifiers::CONTROL);
-                    let modified = key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::META);
-                    return Ok(match key.code {
-                        KeyCode::Char('c') if control => QuickstartSelectorKey::Interrupt,
-                        KeyCode::Down | KeyCode::Tab => QuickstartSelectorKey::Down,
-                        KeyCode::Char('j') if !modified => QuickstartSelectorKey::Down,
-                        KeyCode::Up | KeyCode::BackTab => QuickstartSelectorKey::Up,
-                        KeyCode::Char('k') if !modified => QuickstartSelectorKey::Up,
-                        KeyCode::Enter => QuickstartSelectorKey::Select,
-                        KeyCode::Char(' ') if !modified => QuickstartSelectorKey::Select,
-                        KeyCode::Esc => QuickstartSelectorKey::Cancel,
-                        KeyCode::Char('q') if !modified => QuickstartSelectorKey::Cancel,
-                        _ => QuickstartSelectorKey::Other,
-                    });
-                }
-                // A resize is returned to the loop so the checked geometry is
-                // sampled immediately rather than waiting for another key.
-                Event::Resize(_, _) => return Ok(QuickstartSelectorKey::Other),
-                _ => {}
-            }
-        }
-    }
-}
-
-/// A frame destination whose own terminal geometry can be measured.
-///
-/// Quickstart requires stdin and stderr to be terminals, not the same
-/// terminal. The frame is therefore fitted to the descriptor it is written to
-/// rather than to whichever terminal a process-global query describes.
-#[cfg(all(feature = "agent-runtime", unix))]
-trait QuickstartSelectorOutput: Write + std::os::fd::AsFd {}
-
-#[cfg(all(feature = "agent-runtime", unix))]
-impl<W: Write + std::os::fd::AsFd> QuickstartSelectorOutput for W {}
-
-#[cfg(all(feature = "agent-runtime", not(unix)))]
-trait QuickstartSelectorOutput: Write {}
-
-#[cfg(all(feature = "agent-runtime", not(unix)))]
-impl<W: Write> QuickstartSelectorOutput for W {}
-
-/// Measure the terminal behind `output` as `(rows, columns)`.
-///
-/// A zero dimension means the driver holds no geometry for that terminal. It
-/// is reported as unknown so the caller fails closed instead of fitting rows
-/// to a zero-width frame.
-#[cfg(all(feature = "agent-runtime", unix))]
-fn quickstart_output_terminal_size<W: QuickstartSelectorOutput>(output: &W) -> Option<(u16, u16)> {
-    use std::os::fd::AsRawFd;
-
-    let mut size = std::mem::MaybeUninit::<libc::winsize>::uninit();
-    // SAFETY: `size` points to writable `winsize` storage and the borrowed
-    // descriptor stays open for the duration of the call.
-    let result = unsafe {
-        libc::ioctl(
-            output.as_fd().as_raw_fd(),
-            libc::TIOCGWINSZ,
-            size.as_mut_ptr(),
-        )
-    };
-    if result != 0 {
-        return None;
-    }
-    // SAFETY: a successful `TIOCGWINSZ` initialized `size`.
-    let size = unsafe { size.assume_init() };
-    (size.ws_row > 0 && size.ws_col > 0).then_some((size.ws_row, size.ws_col))
-}
-
-/// Measure the active console screen buffer as `(rows, columns)`.
-///
-/// Crossterm offers no per-handle geometry query here. A native console
-/// shares one screen buffer between stdout and stderr, so the measured
-/// surface is the one that receives the frame. Native-console rendering is
-/// not exercised by hosted checks and remains a documented verification gap.
-#[cfg(all(feature = "agent-runtime", not(unix)))]
-fn quickstart_output_terminal_size<W: QuickstartSelectorOutput>(_output: &W) -> Option<(u16, u16)> {
-    terminal::size().ok().map(|(columns, rows)| (rows, columns))
-}
-
-/// Crossterm-backed selector terminal: frames go to `output`, keys come from
-/// `input`, and geometry is always read from `output`.
-#[cfg(feature = "agent-runtime")]
-struct CrosstermQuickstartTerminal<W: QuickstartSelectorOutput, K: QuickstartSelectorInput> {
-    output: W,
-    input: K,
-}
-
-#[cfg(feature = "agent-runtime")]
-impl CrosstermQuickstartTerminal<std::io::Stderr, CrosstermQuickstartInput> {
-    fn stderr() -> std::io::Result<Self> {
-        Ok(Self {
-            output: std::io::stderr(),
-            input: CrosstermQuickstartInput::new()?,
-        })
-    }
-}
-
-#[cfg(feature = "agent-runtime")]
-impl<W: QuickstartSelectorOutput, K: QuickstartSelectorInput> QuickstartSelectorTerminal
-    for CrosstermQuickstartTerminal<W, K>
-{
-    fn size_checked(&mut self) -> Option<(u16, u16)> {
-        quickstart_output_terminal_size(&self.output)
-    }
-
-    fn enter_alternate_screen(&mut self) -> std::io::Result<()> {
-        execute!(self.output, EnterAlternateScreen)
-    }
-
-    fn clear_screen(&mut self) -> std::io::Result<()> {
-        execute!(self.output, Clear(ClearType::All))
-    }
-
-    fn move_cursor_to_origin(&mut self) -> std::io::Result<()> {
-        execute!(self.output, MoveTo(0, 0))
-    }
-
-    fn hide_cursor(&mut self) -> std::io::Result<()> {
-        execute!(self.output, Hide)
-    }
-
-    fn show_cursor(&mut self) -> std::io::Result<()> {
-        execute!(self.output, Show)
-    }
-
-    fn leave_alternate_screen(&mut self) -> std::io::Result<()> {
-        // Crossterm uses the native screen-buffer API on legacy Windows
-        // consoles and the ANSI sequence on terminals that support it.
-        execute!(self.output, LeaveAlternateScreen)
-    }
-
-    fn write_line(&mut self, line: &str) -> std::io::Result<()> {
-        // Raw mode disables the Unix terminal driver's LF-to-CRLF mapping.
-        // Emit both controls explicitly so every row begins in column zero.
-        write!(self.output, "{line}\r\n")
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.output.flush()
-    }
-
-    fn read_key(&mut self) -> std::io::Result<QuickstartSelectorKey> {
-        self.input.read_key()
-    }
-}
-
-/// Own the alternate screen from before its first fallible operation.
-///
-/// Claiming ownership before `enter_alternate_screen` means a partial write or
-/// flush failure still triggers a best-effort restore. Cleanup attempts are
-/// independent: a cursor error must never strand the alternate screen.
-#[cfg(feature = "agent-runtime")]
-struct QuickstartSelectorScreen<'a, T: QuickstartSelectorTerminal> {
-    term: &'a mut T,
-    restore_needed: bool,
-}
-
-#[cfg(feature = "agent-runtime")]
-impl<'a, T: QuickstartSelectorTerminal> QuickstartSelectorScreen<'a, T> {
-    fn enter(term: &'a mut T) -> std::io::Result<Self> {
-        let screen = Self {
-            term,
-            restore_needed: true,
-        };
-        screen.term.enter_alternate_screen()?;
-        screen.term.clear_screen()?;
-        screen.term.move_cursor_to_origin()?;
-        screen.term.hide_cursor()?;
-        screen.term.flush()?;
-        Ok(screen)
-    }
-
-    fn restore(&mut self) -> std::io::Result<()> {
-        if !self.restore_needed {
-            return Ok(());
-        }
-        self.restore_needed = false;
-
-        let mut first_error = None;
-        for result in [
-            self.term.show_cursor(),
-            self.term.leave_alternate_screen(),
-            self.term.flush(),
-        ] {
-            if first_error.is_none() {
-                first_error = result.err();
-            }
-        }
-        first_error.map_or(Ok(()), Err)
-    }
-}
-
-#[cfg(feature = "agent-runtime")]
-impl<T: QuickstartSelectorTerminal> Drop for QuickstartSelectorScreen<'_, T> {
-    fn drop(&mut self) {
-        let _ = self.restore();
-    }
-}
-
-#[cfg(feature = "agent-runtime")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum QuickstartSelectorOutcome {
-    Pick(Option<usize>),
-    Interrupt,
-}
-
-/// Render the fixed-size Quickstart checklist without dialoguer paging.
-///
-/// The terminal dimensions sampled for fitting are part of this interaction's
-/// contract. They describe the terminal that receives the frame, and every
-/// input event rechecks them before navigation or selection; a resize exits
-/// the selector-owned alternate screen instead of trying to erase a
-/// main-screen frame whose physical rows the terminal may have reflowed. A
-/// resize of the output terminal alone raises no input event, so it is caught
-/// at the next key. Leaving the alternate screen atomically restores
-/// unrelated output.
-#[cfg(feature = "agent-runtime")]
-fn interact_quickstart_selector<T: QuickstartSelectorTerminal>(
-    term: &mut T,
-    labels: &[String],
-    prompt: &str,
-    initial_size: (u16, u16),
-) -> Result<QuickstartSelectorOutcome> {
-    if labels.is_empty() {
-        bail!(qta("cli-quickstart-empty-checklist", &[]));
-    }
-    let current_size = quickstart_selector_terminal_size(term);
-    quickstart_selector_recheck_size(initial_size, current_size)?;
-
-    let mut screen = QuickstartSelectorScreen::enter(term)?;
-    let interaction = (|| -> Result<QuickstartSelectorOutcome> {
-        let mut selected = 0;
-        let mut frame = quickstart_selector_frame_lines(labels, prompt, selected);
-        render_quickstart_selector(screen.term, &frame)?;
-
-        loop {
-            let key = screen.term.read_key()?;
-            let current_size = quickstart_selector_terminal_size(screen.term);
-            quickstart_selector_recheck_size(initial_size, current_size)?;
-
-            match key {
-                QuickstartSelectorKey::Down => {
-                    selected = (selected + 1) % labels.len();
-                    frame = quickstart_selector_frame_lines(labels, prompt, selected);
-                    screen.term.clear_screen()?;
-                    screen.term.move_cursor_to_origin()?;
-                    render_quickstart_selector(screen.term, &frame)?;
-                }
-                QuickstartSelectorKey::Up => {
-                    selected = selected.checked_sub(1).unwrap_or(labels.len() - 1);
-                    frame = quickstart_selector_frame_lines(labels, prompt, selected);
-                    screen.term.clear_screen()?;
-                    screen.term.move_cursor_to_origin()?;
-                    render_quickstart_selector(screen.term, &frame)?;
-                }
-                QuickstartSelectorKey::Select => {
-                    return Ok(QuickstartSelectorOutcome::Pick(Some(selected)));
-                }
-                QuickstartSelectorKey::Cancel => {
-                    return Ok(QuickstartSelectorOutcome::Pick(None));
-                }
-                QuickstartSelectorKey::Interrupt => {
-                    return Ok(QuickstartSelectorOutcome::Interrupt);
-                }
-                QuickstartSelectorKey::Other => {}
-            }
-        }
-    })();
-    let cleanup = screen.restore();
-    match (interaction, cleanup) {
-        (Ok(QuickstartSelectorOutcome::Interrupt), _) => Ok(QuickstartSelectorOutcome::Interrupt),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error.into()),
-        (Ok(selection), Ok(())) => Ok(selection),
-    }
-}
-
-#[cfg(feature = "agent-runtime")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum QuickstartChecklistAction {
-    Provider,
-    Risk,
-    Memory,
-    Channels,
-    PeerGroups,
-    Agent,
-    Create,
-    Quit,
-}
-
-#[cfg(feature = "agent-runtime")]
-fn quickstart_action_for_pick(
-    choices: &[(QuickstartChecklistAction, String)],
-    pick: Option<usize>,
-) -> QuickstartChecklistAction {
-    pick.and_then(|index| choices.get(index).map(|(action, _)| *action))
-        .unwrap_or(QuickstartChecklistAction::Quit)
-}
-
-#[cfg(feature = "agent-runtime")]
-fn quickstart_step_label(step: kinetic_runtime::quickstart::QuickstartStep) -> String {
-    t(step.label_key(), step.label())
 }
 
 /// Decorate the value at `path` in `config.toml` with a leading `# {comment}`
@@ -1077,10 +544,9 @@ enum EvalCommands {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Quickstart — create one working agent end-to-end. Replaces the
-    /// section-by-section onboarding flow with a single preset-driven
-    /// path. Interactive: the flags below pre-seed checklist selectors
-    /// but do not skip them; a terminal is required.
+    /// Set up this device: name, owner, Telegram, model, and spending caps.
+    /// Interactive. The flags below prefill answers. A terminal is required.
+    /// The device key is not created here.
     Quickstart {
         /// Provider type (anthropic / openai / openrouter / ollama).
         #[arg(long)]
@@ -1094,7 +560,7 @@ enum Commands {
         #[arg(long)]
         api_key: Option<String>,
 
-        /// Alias for the new agent. Defaults to a sanitized provider name.
+        /// Device name to prefill. The address is generated later, not typed.
         #[arg(long)]
         agent: Option<String>,
     },
@@ -1289,6 +755,16 @@ Examples:
     /// Print the public page where the owner wallet claims this device
     // i18n-exempt: clap derive help — framework requires a compile-time literal
     ClaimLink,
+
+    /// Replace this binary with the latest published release.
+    // i18n-exempt: clap derive help — framework requires a compile-time literal
+    #[cfg(feature = "agent-runtime")]
+    Update {
+        /// Install again even when this binary already matches the latest release.
+        // i18n-exempt: clap derive help — framework requires a compile-time literal
+        #[arg(long)]
+        force: bool,
+    },
 
     /// Manage OS service lifecycle (launchd/systemd user service)
     Service {
@@ -1706,42 +1182,36 @@ enum DeprecatedPropsCommands {
 }
 
 #[cfg(feature = "agent-runtime")]
-fn quickstart_runtime_profile_for_provider(
-    provider_type: &str,
-    providers: &[kinetic_runtime::quickstart::QuickstartTypeOption],
-    default_runtime_profile: &str,
-) -> String {
-    providers
-        .iter()
-        .find(|provider| provider.kind == provider_type)
-        .and_then(|provider| provider.default_runtime_profile.as_deref())
-        .unwrap_or(default_runtime_profile)
-        .to_string()
+async fn run_update(force: bool) -> anyhow::Result<()> {
+    match Box::pin(kinetic_runtime::self_update::run(force)).await {
+        Ok(kinetic_runtime::self_update::Outcome::Current { version }) => {
+            println!(
+                "{}",
+                ta(
+                    "cli-update-current",
+                    &[("version", &version)],
+                    "This binary is already the latest release."
+                )
+            );
+            Ok(())
+        }
+        Ok(kinetic_runtime::self_update::Outcome::Installed { version, path }) => {
+            println!(
+                "{}",
+                ta(
+                    "cli-update-installed",
+                    &[("version", &version), ("path", &path)],
+                    "Installed the latest release."
+                )
+            );
+            Ok(())
+        }
+        Err(error) => anyhow::bail!("{}", error.message()),
+    }
 }
 
-/// `kinetic quickstart` CLI entry — checklist UX, not a wizard.
-///
-/// Mirrors the TUI Quickstart pane's structure: a single screen
-/// listing all six selectors with `[ ]` / `[✓]` status and a one-line
-/// summary, the user picks which selector to fill (any order), each
-/// selector opens its own picker / field-form / channel-list sub-flow,
-/// and `c` creates the agent once every selector is `[✓]`. There are
-/// no pre-checked defaults anywhere — every selector starts `[ ]` and
-/// is only satisfied by an explicit user choice (either a "Use
-/// existing" pick of an already-configured alias, or a fully-filled
-/// "Create new" entry).
-///
-/// All option lists, field shapes, presets, and the apply path come
-/// directly from `kinetic_runtime::quickstart` — the same module the
-/// gateway and TUI surfaces consume. No RPC, no daemon: the CLI is
-/// compiled in-process with `kinetic-runtime` and calls
-/// `snapshot_state` / `field_shape` / `apply_with_surface` as plain
-/// functions.
-///
-/// Flag pre-fills (`--model-provider`, `--model`, `--api-key`,
-/// `--agent`) silently seed the relevant selector's value and mark it
-/// `[✓]` if the seed is enough to satisfy the selector; the user can
-/// still open that selector and overwrite it.
+/// `kinetic quickstart` asks for this device's name, owner, Telegram bot,
+/// model, and starting caps, then stores them. It does not create the key.
 #[cfg(feature = "agent-runtime")]
 async fn run_quickstart_cli(
     model_provider: Option<String>,
@@ -1749,16 +1219,6 @@ async fn run_quickstart_cli(
     api_key: Option<String>,
     agent: Option<String>,
 ) -> anyhow::Result<()> {
-    use dialoguer::{Confirm, Editor, FuzzySelect, Input};
-    use kinetic_config::presets::{
-        AgentIdentity, BuilderSubmission, ChannelQuickStart, MemoryChoice, ModelProviderChoice,
-        RISK_PRESETS, SelectorChoice,
-    };
-    use kinetic_runtime::quickstart::{
-        FieldSection, QuickstartTypeOption, Surface, apply_with_surface, field_shape,
-        snapshot_state,
-    };
-
     if !std::io::IsTerminal::is_terminal(&std::io::stdin())
         || !std::io::IsTerminal::is_terminal(&std::io::stderr())
     {
@@ -1776,1220 +1236,224 @@ async fn run_quickstart_cli(
         &mut std::io::stderr().lock(),
         kinetic_runtime::brand::ansi_color_enabled(),
     )?;
+    kinetic_runtime::brand::hold_mark().await;
 
-    #[derive(Default)]
-    struct Form {
-        provider: Option<ProviderChoice>,
-        risk: Option<PresetChoice>,
-        memory: Option<MemoryChoice>,
-        channels: Vec<ChannelChoice>,
-        // Tracks whether the user explicitly visited Channels and
-        // confirmed "no channels". An empty `channels` Vec with
-        // `channels_visited == false` is *not* satisfied — the
-        // selector still shows `[ ]`.
-        channels_visited: bool,
-        peer_groups: Vec<kinetic_config::presets::QuickstartPeerGroup>,
-        // Mirrors `channels_visited`: peer groups are optional, so an
-        // empty `peer_groups` Vec only counts as satisfied once the
-        // user has actually opened the selector and left it. Until
-        // then the row stays `[ ]` rather than a pre-checked default.
-        peer_groups_visited: bool,
-        agent: Option<AgentChoice>,
-    }
-    enum ProviderChoice {
-        Fresh {
-            kind: String,
-            display_name: String,
-            alias: String,
-            model: String,
-            /// Round-trip of every non-`model` descriptor value the
-            /// daemon's `field_shape()` emitted, keyed by descriptor
-            /// key. The CLI doesn't know what these mean — the daemon
-            /// authored them and consumes them on the way back.
-            fields: std::collections::HashMap<String, String>,
-        },
-        Existing {
-            alias_ref: String,
-        },
-    }
-    enum PresetChoice {
-        Fresh(&'static str),
-        Existing(String),
-    }
-    enum ChannelChoice {
-        Fresh {
-            kind: String,
-            alias: String,
-            extras: std::collections::BTreeMap<String, String>,
-        },
-        Existing {
-            alias_ref: String,
-        },
-    }
-    struct AgentChoice {
-        name: String,
-        system_prompt: String,
-        personality_files: Vec<kinetic_config::presets::QuickstartPersonalityFile>,
-    }
-
-    impl Form {
-        fn provider_done(&self) -> bool {
-            self.provider.is_some()
-        }
-        fn risk_done(&self) -> bool {
-            self.risk.is_some()
-        }
-        fn memory_done(&self) -> bool {
-            self.memory.is_some()
-        }
-        fn channels_done(&self) -> bool {
-            self.channels_visited
-        }
-        fn peer_groups_done(&self) -> bool {
-            self.peer_groups_visited
-        }
-        fn agent_done(&self) -> bool {
-            self.agent
-                .as_ref()
-                .is_some_and(|a| !a.name.trim().is_empty())
-        }
-        fn all_done(&self) -> bool {
-            self.provider_done()
-                && self.risk_done()
-                && self.memory_done()
-                && self.channels_done()
-                && self.agent_done()
-        }
-    }
-
-    // ── Load config + canonical registries ──────────────────────
-    let _dirs = crate::config::schema::resolve_runtime_dirs().await?;
-    let mut cfg = Box::pin(crate::config::schema::Config::load_or_init()).await?;
-    let state = snapshot_state(&cfg);
-    let providers: &[QuickstartTypeOption] = &state.model_provider_types;
-    let channel_types: &[QuickstartTypeOption] = &state.channel_types;
+    let providers = kinetic_providers::list_model_providers();
     if providers.is_empty() {
         anyhow::bail!(
-            "Quickstart could not enumerate model providers — \
-             kinetic_providers::list_model_providers() returned no entries."
+            "{}",
+            t(
+                "cli-setup-no-providers",
+                "Quickstart could not find any model providers."
+            )
         );
-    }
-
-    let mut form = Form::default();
-
-    if let (Some(mp), Some(m)) = (model_provider.as_deref(), model.as_deref())
-        && let Some((canonical_provider, codex_auth)) =
-            kinetic_runtime::quickstart::resolve_model_provider_type(mp)
-        && let Some(found) = providers
-            .iter()
-            .find(|p| p.kind.eq_ignore_ascii_case(canonical_provider))
-    {
-        let needs_key = !found.local && api_key.is_none() && !codex_auth;
-        if !needs_key {
-            let mut fields: std::collections::HashMap<String, String> =
-                std::collections::HashMap::new();
-            if codex_auth {
-                fields.insert("auth_mode".to_string(), "codex".to_string());
-            }
-            if let Some(key) = api_key.as_deref().filter(|s| !s.is_empty()) {
-                // Submission field keys are snake_case (`api_key`) — the apply
-                // path round-trips them verbatim into `set_prop_persistent`,
-                // which rejects kebab-case with "Unknown property".
-                fields.insert("api_key".to_string(), key.to_string());
-            }
-            form.provider = Some(ProviderChoice::Fresh {
-                kind: found.kind.clone(),
-                display_name: found.display_name.clone(),
-                alias: "default".to_string(),
-                model: m.to_string(),
-                fields,
-            });
-        }
-    }
-    if let Some(a) = agent.as_deref() {
-        let trimmed = a.trim();
-        if !trimmed.is_empty() {
-            form.agent = Some(AgentChoice {
-                name: trimmed.to_string(),
-                system_prompt: String::new(),
-                personality_files: Vec::new(),
-            });
-        }
     }
 
     println!();
     println!(
         "{}",
-        t(
-            "cli-quickstart-title",
-            "Quickstart — create one working agent end-to-end."
-        )
+        t("cli-quickstart-title", "Set up this KineticVM device.")
     );
     println!();
 
+    let device_name = prompt_accepted(
+        &t("cli-quickstart-ask-name", "Device name"),
+        agent.as_deref(),
+        kinetic_runtime::device_setup::accepts_name,
+        "cli-setup-bad-name",
+        "Enter a device name, up to 128 characters, on one line.",
+    )?;
+    let owner = prompt_accepted(
+        &t("cli-quickstart-ask-owner", "Owner wallet address"),
+        None,
+        kinetic_runtime::device_setup::accepts_owner,
+        "cli-setup-bad-owner",
+        "That is not a wallet address.",
+    )?;
+    let bot_token = secret_prompt(&t("cli-quickstart-ask-token", "Telegram bot token"), false)?;
+    let provider = selected_provider(&providers, model_provider.as_deref())?;
+    let model_id = prompt_required(
+        &t("cli-quickstart-ask-model", "Model"),
+        model.as_deref(),
+        "cli-setup-bad-model",
+        "Enter a model id.",
+    )?;
+    let api_key = provider_api_key(&providers, &provider, api_key.as_deref())?;
+    let per_tx = prompt_accepted(
+        &t("cli-quickstart-ask-per-tx", "Per-transaction cap (MON)"),
+        Some("0.05"),
+        kinetic_runtime::device_setup::accepts_cap,
+        "cli-setup-bad-cap",
+        "Enter the cap as a MON amount, such as 0.05.",
+    )?;
+    let daily = prompt_daily_cap(&per_tx)?;
+
+    let mut cfg = Box::pin(crate::config::schema::Config::load_or_init()).await?;
+    let setup = kinetic_runtime::device_setup::DeviceSetup {
+        device_name,
+        owner,
+        bot_token,
+        provider,
+        model: model_id,
+        api_key,
+        per_tx_cap: per_tx,
+        daily_cap: daily,
+    };
+    Box::pin(kinetic_runtime::device_setup::apply(&mut cfg, &setup))
+        .await
+        .map_err(|error| anyhow::Error::msg(error.message()))?;
+    println!();
+    println!(
+        "{}",
+        kinetic_runtime::device_setup::saved_message(&setup.device_name)
+    );
+    Ok(())
+}
+
+#[cfg(feature = "agent-runtime")]
+fn prompt_required(
+    prompt: &str,
+    default: Option<&str>,
+    reject_key: &str,
+    reject_fallback: &str,
+) -> anyhow::Result<String> {
+    prompt_accepted(
+        prompt,
+        default,
+        |value| !value.trim().is_empty(),
+        reject_key,
+        reject_fallback,
+    )
+}
+
+#[cfg(feature = "agent-runtime")]
+fn prompt_accepted(
+    prompt: &str,
+    default: Option<&str>,
+    accept: impl Fn(&str) -> bool,
+    reject_key: &str,
+    reject_fallback: &str,
+) -> anyhow::Result<String> {
+    use dialoguer::Input;
     loop {
-        // Render selector list with current status / summary.
-        let glyph = |ok: bool| if ok { "[✓]" } else { "[ ]" };
-        let provider_summary = match &form.provider {
-            None => t("cli-quickstart-summary-not-yet-chosen", "not yet chosen"),
-            Some(ProviderChoice::Fresh {
-                display_name,
-                alias,
-                model,
-                ..
-            }) => qta(
-                "cli-quickstart-summary-provider-fresh",
-                &[("name", display_name), ("alias", alias), ("model", model)],
-            ),
-            Some(ProviderChoice::Existing { alias_ref }) => qta(
-                "cli-quickstart-summary-use-existing",
-                &[("reference", alias_ref)],
-            ),
-        };
-        let preset_summary = |p: &Option<PresetChoice>| -> String {
-            match p {
-                None => t("cli-quickstart-summary-not-yet-chosen", "not yet chosen"),
-                Some(PresetChoice::Fresh(name)) => {
-                    qta("cli-quickstart-summary-preset-fresh", &[("name", name)])
-                }
-                Some(PresetChoice::Existing(a)) => {
-                    qta("cli-quickstart-summary-use-existing", &[("reference", a)])
-                }
-            }
-        };
-        let memory_summary = match &form.memory {
-            None => t("cli-quickstart-summary-not-yet-chosen", "not yet chosen"),
-            Some(kind) => serde_json::to_value(kind)
-                .ok()
-                .and_then(|v| v.as_str().map(str::to_string))
-                .unwrap_or_else(|| format!("{kind:?}").to_lowercase()),
-        };
-        let channels_summary = if !form.channels_visited {
-            t("cli-quickstart-summary-not-yet-visited", "not yet visited")
-        } else if form.channels.is_empty() {
-            t(
-                "cli-quickstart-summary-channels-none",
-                "none (chat via `kinetic agent` only)",
-            )
-        } else {
-            form.channels
-                .iter()
-                .map(|c| match c {
-                    ChannelChoice::Fresh { kind, alias, .. } => format!("{kind}.{alias}"),
-                    ChannelChoice::Existing { alias_ref } => alias_ref.clone(),
-                })
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        let agent_summary = match &form.agent {
-            None => t("cli-quickstart-summary-not-yet-named", "not yet named"),
-            Some(a) => qta(
-                "cli-quickstart-summary-agent",
-                &[
-                    ("alias", &a.name),
-                    ("chars", &a.system_prompt.len().to_string()),
-                    ("files", &a.personality_files.len().to_string()),
-                ],
-            ),
-        };
-        let peer_groups_summary = if form.peer_groups.is_empty() {
-            t(
-                "cli-quickstart-summary-peer-groups-none",
-                "none — channels accept no peers",
-            )
-        } else {
-            form.peer_groups
-                .iter()
-                .map(|pg| format!("{} → {}", pg.channel, pg.name))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-
-        let risk_summary = preset_summary(&form.risk);
-        let mut choices: Vec<(QuickstartChecklistAction, String)> = vec![
-            (
-                QuickstartChecklistAction::Provider,
-                quickstart_row(
-                    "cli-quickstart-row-model-provider",
-                    glyph(form.provider_done()),
-                    &provider_summary,
-                ),
-            ),
-            (
-                QuickstartChecklistAction::Risk,
-                quickstart_row(
-                    "cli-quickstart-row-risk-profile",
-                    glyph(form.risk_done()),
-                    &risk_summary,
-                ),
-            ),
-            (
-                QuickstartChecklistAction::Memory,
-                quickstart_row(
-                    "cli-quickstart-row-memory",
-                    glyph(form.memory_done()),
-                    &memory_summary,
-                ),
-            ),
-            (
-                QuickstartChecklistAction::Channels,
-                quickstart_row(
-                    "cli-quickstart-row-channels",
-                    glyph(form.channels_done()),
-                    &channels_summary,
-                ),
-            ),
-            (
-                QuickstartChecklistAction::PeerGroups,
-                quickstart_row(
-                    "cli-quickstart-row-peer-groups",
-                    glyph(form.peer_groups_done()),
-                    &peer_groups_summary,
-                ),
-            ),
-            (
-                QuickstartChecklistAction::Agent,
-                quickstart_row(
-                    "cli-quickstart-row-agent-identity",
-                    glyph(form.agent_done()),
-                    &agent_summary,
-                ),
-            ),
-        ];
-        let create_enabled = form.all_done();
-        choices.push((
-            QuickstartChecklistAction::Create,
-            if create_enabled {
-                t("cli-quickstart-create-agent", "── Create agent")
-            } else {
-                t(
-                    "cli-quickstart-create-agent-locked",
-                    "── Create agent (locked — fill every selector first)",
-                )
-            },
-        ));
-
-        let mut term = CrosstermQuickstartTerminal::stderr()?;
-        // Fail closed when the terminal API cannot report its dimensions;
-        // fitting against a guessed size would reintroduce row overflow.
-        let Some(terminal_size) = quickstart_selector_terminal_size(&mut term) else {
-            anyhow::bail!("{}", qta("cli-quickstart-terminal-size-unknown", &[]));
-        };
-        let (terminal_height, terminal_width) = terminal_size;
-        let terminal_height = usize::from(terminal_height);
-        let terminal_width = usize::from(terminal_width);
-        let Some(row_budget) = quickstart_selector_row_budget(terminal_width) else {
-            let terminal_width = terminal_width.to_string();
-            let min_width = QUICKSTART_SELECTOR_MIN_WIDTH.to_string();
-            anyhow::bail!(
-                "{}",
-                qta(
-                    "cli-quickstart-terminal-too-narrow",
-                    &[("width", &terminal_width), ("min_width", &min_width)],
-                )
-            );
-        };
-        let labels: Vec<String> = choices
-            .iter()
-            .map(|(_, label)| fit_quickstart_selector_row(label, row_budget))
-            .collect();
-        let min_height = quickstart_selector_min_height(labels.len());
-        if !quickstart_selector_fits_height(terminal_height, labels.len()) {
-            let terminal_height = terminal_height.to_string();
-            let min_height = min_height.to_string();
-            anyhow::bail!(
-                "{}",
-                qta(
-                    "cli-quickstart-terminal-too-short",
-                    &[("height", &terminal_height), ("min_height", &min_height)],
-                )
-            );
+        let mut input = Input::<String>::new().with_prompt(prompt);
+        if let Some(value) = default.map(str::trim).filter(|value| !value.is_empty()) {
+            input = input.default(value.to_string());
         }
-
-        let prompt = fit_quickstart_selector_row(
-            &t(
-                "cli-quickstart-open-selector-prompt",
-                "Open a selector (Enter), or pick Create. Esc to quit.",
-            ),
-            row_budget,
-        );
-        // Keep this checklist non-searchable and non-paged, and fail closed if
-        // its fitted terminal dimensions change while it is active.
-        let outcome = interact_quickstart_selector(&mut term, &labels, &prompt, terminal_size)?;
-        // `process::exit` does not run destructors. Restore cooked mode before
-        // preserving the selector's historical Ctrl+C exit semantics.
-        drop(term);
-        let pick = match outcome {
-            QuickstartSelectorOutcome::Pick(pick) => pick,
-            QuickstartSelectorOutcome::Interrupt => std::process::exit(130),
-        };
-        let action = quickstart_action_for_pick(&choices, pick);
-
-        match action {
-            QuickstartChecklistAction::Quit => {
-                println!(
-                    "{}",
-                    t(
-                        "cli-quickstart-cancelled",
-                        "Quickstart cancelled. No config written."
-                    )
-                );
-                return Ok(());
-            }
-            QuickstartChecklistAction::Create => {
-                if !create_enabled {
-                    println!(
-                        "{}",
-                        t(
-                            "cli-quickstart-incomplete",
-                            "  Not all selectors are filled yet."
-                        )
-                    );
-                    continue;
-                }
-                break;
-            }
-            QuickstartChecklistAction::Provider => {
-                // Step 1: pick Existing or Fresh, when there are
-                // existing providers to choose from.
-                let mut mode_labels: Vec<String> = Vec::new();
-                let mut mode_kinds: Vec<&str> = Vec::new();
-                if !state.model_providers.is_empty() {
-                    mode_labels.push(t("cli-quickstart-use-existing", "Use existing"));
-                    mode_kinds.push("existing");
-                }
-                mode_labels.push(t("cli-quickstart-create-new", "Create new"));
-                mode_kinds.push("fresh");
-                let mode = if mode_labels.len() == 1 {
-                    Some(0)
-                } else {
-                    FuzzySelect::new()
-                        .with_prompt(t("cli-quickstart-model-provider-prompt", "Model provider"))
-                        .items(&mode_labels)
-                        .default(0)
-                        .max_length(mode_labels.len())
-                        .interact_opt()?
-                };
-                let Some(mi) = mode else { continue };
-                if mode_kinds[mi] == "existing" {
-                    let labels: Vec<String> = state.model_providers.clone();
-                    let Some(i) = FuzzySelect::new()
-                        .with_prompt(t(
-                            "cli-quickstart-pick-configured-provider",
-                            "Pick a configured provider",
-                        ))
-                        .items(&labels)
-                        .default(0)
-                        .max_length(labels.len().max(1))
-                        .interact_opt()?
-                    else {
-                        continue;
-                    };
-                    form.provider = Some(ProviderChoice::Existing {
-                        alias_ref: labels[i].clone(),
-                    });
-                    continue;
-                }
-                // Fresh: type → alias → field form.
-                let prov_labels: Vec<String> = providers
-                    .iter()
-                    .map(|p| {
-                        if p.local {
-                            qta(
-                                "cli-quickstart-provider-local-label",
-                                &[("name", &p.display_name)],
-                            )
-                        } else {
-                            p.display_name.clone()
-                        }
-                    })
-                    .collect();
-                let Some(pi) = FuzzySelect::new()
-                    .with_prompt(t("cli-quickstart-provider-type-prompt", "Provider type"))
-                    .items(&prov_labels)
-                    .default(0)
-                    .max_length(prov_labels.len().max(1))
-                    .interact_opt()?
-                else {
-                    continue;
-                };
-                let chosen = &providers[pi];
-                let Ok(alias) = Input::<String>::new()
-                    .with_prompt(qta(
-                        "cli-quickstart-alias-for",
-                        &[("name", &chosen.display_name)],
-                    ))
-                    .default("default".to_string())
-                    .allow_empty(false)
-                    .validate_with(|input: &String| {
-                        kinetic_config::helpers::validate_alias_key(input)
-                    })
-                    .interact_text()
-                else {
-                    continue;
-                };
-                // Field shape from the canonical schema.
-                let descriptors = field_shape(FieldSection::ModelProvider, &chosen.kind);
-                let mut model = String::new();
-                let mut field_buf: std::collections::HashMap<String, String> =
-                    std::collections::HashMap::new();
-                let mut aborted = false;
-                for d in &descriptors {
-                    if d.key == "api_key" {
-                        let skips_api_key =
-                            quickstart_field_value_eq(&field_buf, "auth_mode", "codex")
-                                || (chosen.kind == "anthropic"
-                                    && quickstart_field_value_eq(
-                                        &field_buf,
-                                        "auth_mode",
-                                        "setup_token",
-                                    ));
-                        if skips_api_key {
-                            continue;
-                        }
-                    }
-                    // For the model field, upgrade the descriptor with a
-                    // live catalog so `prompt_for_field` renders a picker
-                    // instead of a free-text input. Empty catalog (live=false)
-                    // leaves the descriptor unchanged → free-text fallback.
-                    let upgraded;
-                    let d_used = if d.key.eq_ignore_ascii_case("model") {
-                        let (models, _pricing, live) =
-                            kinetic_runtime::quickstart::model_catalog(&chosen.kind).await;
-                        if live && !models.is_empty() {
-                            upgraded = kinetic_runtime::quickstart::FieldDescriptor {
-                                kind: kinetic_config::traits::PropKind::Enum,
-                                enum_variants: Some(models),
-                                ..d.clone()
-                            };
-                            &upgraded
-                        } else {
-                            d
-                        }
-                    } else {
-                        d
-                    };
-                    let collected = prompt_for_field(d_used, None)?;
-                    let Some(value) = collected else {
-                        aborted = true;
-                        break;
-                    };
-                    // `model` is hoisted to a top-level field on
-                    // ProviderChoice for the summary line. Every other
-                    // descriptor flows through `field_buf` keyed by
-                    // its schema identifier — no cherry-picking.
-                    if d.key.eq_ignore_ascii_case("model") {
-                        model = value;
-                    } else if !value.is_empty() && value != kinetic_config::traits::UNSET_DISPLAY {
-                        field_buf.insert(d.key.clone(), value);
-                    }
-                }
-                if aborted {
-                    continue;
-                }
-                if model.is_empty() {
-                    eprintln!(
-                        "{}",
-                        qta(
-                            "cli-quickstart-model-field-missing-warning",
-                            &[("provider", &chosen.kind)],
-                        )
-                    );
-                    let Ok(m) = Input::<String>::new()
-                        .with_prompt(qta(
-                            "cli-quickstart-model-id-for",
-                            &[("name", &chosen.display_name)],
-                        ))
-                        .allow_empty(false)
-                        .interact_text()
-                    else {
-                        continue;
-                    };
-                    model = m;
-                }
-                form.provider = Some(ProviderChoice::Fresh {
-                    kind: chosen.kind.clone(),
-                    display_name: chosen.display_name.clone(),
-                    alias,
-                    model,
-                    fields: field_buf,
-                });
-            }
-            QuickstartChecklistAction::Risk => {
-                let chosen = pick_preset(
-                    &t("cli-quickstart-risk-profile-prompt", "Risk profile"),
-                    RISK_PRESETS
-                        .iter()
-                        .map(|p| (p.preset_name, p.label, p.help))
-                        .collect(),
-                    &state.risk_profiles,
-                )?;
-                if let Some(c) = chosen {
-                    form.risk = Some(match c {
-                        Ok(name) => PresetChoice::Fresh(name),
-                        Err(alias) => PresetChoice::Existing(alias),
-                    });
-                }
-            }
-            QuickstartChecklistAction::Memory => {
-                let kinds: [MemoryChoice; 6] = [
-                    MemoryChoice::Sqlite,
-                    MemoryChoice::Markdown,
-                    MemoryChoice::Postgres,
-                    MemoryChoice::Qdrant,
-                    MemoryChoice::Lucid,
-                    MemoryChoice::None,
-                ];
-                #[allow(clippy::no_effect_underscore_binding)]
-                let _exhaustive = |k: MemoryChoice| match k {
-                    MemoryChoice::Sqlite
-                    | MemoryChoice::Markdown
-                    | MemoryChoice::Postgres
-                    | MemoryChoice::Qdrant
-                    | MemoryChoice::Lucid
-                    | MemoryChoice::None => (),
-                };
-                let labels: Vec<String> = kinds
-                    .iter()
-                    .map(|k| {
-                        serde_json::to_value(k)
-                            .ok()
-                            .and_then(|v| v.as_str().map(str::to_string))
-                            .unwrap_or_else(|| format!("{k:?}").to_lowercase())
-                    })
-                    .collect();
-                let Some(i) = FuzzySelect::new()
-                    .with_prompt(t("cli-quickstart-memory-backend-prompt", "Memory backend"))
-                    .items(&labels)
-                    .default(0)
-                    .max_length(labels.len().max(1))
-                    .interact_opt()?
-                else {
-                    continue;
-                };
-                form.memory = Some(kinds[i]);
-            }
-            QuickstartChecklistAction::Channels => {
-                // Channels sub-flow: list current drafts + Add / Done.
-                loop {
-                    let mut items: Vec<String> = form
-                        .channels
-                        .iter()
-                        .map(|c| match c {
-                            ChannelChoice::Fresh { kind, alias, .. } => qta(
-                                "cli-quickstart-channel-remove-row",
-                                &[("reference", &format!("{kind}.{alias}"))],
-                            ),
-                            ChannelChoice::Existing { alias_ref } => qta(
-                                "cli-quickstart-channel-remove-row",
-                                &[("reference", alias_ref)],
-                            ),
-                        })
-                        .collect();
-                    items.push(t("cli-quickstart-add-channel", "+ Add a channel"));
-                    items.push(t(
-                        "cli-quickstart-channels-done",
-                        "Done (channels selector counts as visited)",
-                    ));
-                    let Some(i) = FuzzySelect::new()
-                        .with_prompt(t(
-                            "cli-quickstart-channels-prompt",
-                            "Channels (optional, 0..N)",
-                        ))
-                        .items(&items)
-                        .default(items.len().saturating_sub(2))
-                        .max_length(items.len())
-                        .interact_opt()?
-                    else {
-                        break;
-                    };
-                    if i < form.channels.len() {
-                        form.channels.remove(i);
-                        continue;
-                    }
-                    if i == form.channels.len() {
-                        // Add — pick Existing or Fresh.
-                        let mut mode_labels: Vec<String> = Vec::new();
-                        let mut mode_kinds: Vec<&str> = Vec::new();
-                        if !state.unassigned_channels.is_empty() {
-                            mode_labels.push(t("cli-quickstart-use-existing", "Use existing"));
-                            mode_kinds.push("existing");
-                        }
-                        mode_labels.push(t("cli-quickstart-create-new", "Create new"));
-                        mode_kinds.push("fresh");
-                        let mode = if mode_labels.len() == 1 {
-                            Some(0)
-                        } else {
-                            FuzzySelect::new()
-                                .with_prompt(t(
-                                    "cli-quickstart-channel-source-prompt",
-                                    "Channel source",
-                                ))
-                                .items(&mode_labels)
-                                .default(0)
-                                .max_length(mode_labels.len())
-                                .interact_opt()?
-                        };
-                        let Some(mi) = mode else { continue };
-                        if mode_kinds[mi] == "existing" {
-                            let labels: Vec<String> = state.unassigned_channels.clone();
-                            if labels.is_empty() {
-                                println!(
-                                    "{}",
-                                    t(
-                                        "cli-quickstart-all-channels-bound",
-                                        "  Every configured channel is already bound to an agent. Free one with `kinetic config set agents.<alias>.channels ...` before reusing it here.",
-                                    )
-                                );
-                                continue;
-                            }
-                            let Some(ei) = FuzzySelect::new()
-                                .with_prompt(t(
-                                    "cli-quickstart-pick-configured-channel",
-                                    "Pick a configured channel",
-                                ))
-                                .items(&labels)
-                                .default(0)
-                                .max_length(labels.len().max(1))
-                                .interact_opt()?
-                            else {
-                                continue;
-                            };
-                            form.channels.push(ChannelChoice::Existing {
-                                alias_ref: labels[ei].clone(),
-                            });
-                            continue;
-                        }
-                        if channel_types.is_empty() {
-                            println!(
-                                "{}",
-                                t(
-                                    "cli-no-channels-compiled",
-                                    "  No channel types are compiled into this binary."
-                                )
-                            );
-                            continue;
-                        }
-                        let labels: Vec<String> = channel_types
-                            .iter()
-                            .map(|c| c.display_name.clone())
-                            .collect();
-                        let Some(ci) = FuzzySelect::new()
-                            .with_prompt(t("cli-quickstart-channel-type-prompt", "Channel type"))
-                            .items(&labels)
-                            .default(0)
-                            .max_length(labels.len().max(1))
-                            .interact_opt()?
-                        else {
-                            continue;
-                        };
-                        let chosen = &channel_types[ci];
-                        let Ok(alias) = Input::<String>::new()
-                            .with_prompt(qta(
-                                "cli-quickstart-alias-for",
-                                &[("name", &chosen.display_name)],
-                            ))
-                            .default(chosen.kind.clone())
-                            .allow_empty(false)
-                            .interact_text()
-                        else {
-                            continue;
-                        };
-                        let descriptors = field_shape(FieldSection::Channel, &chosen.kind);
-                        let mut extras: std::collections::BTreeMap<String, String> =
-                            std::collections::BTreeMap::new();
-                        let mut aborted = false;
-                        for d in &descriptors {
-                            let Some(value) = prompt_for_field(d, None)? else {
-                                aborted = true;
-                                break;
-                            };
-                            if !value.is_empty() && value != kinetic_config::traits::UNSET_DISPLAY {
-                                extras.insert(d.key.clone(), value);
-                            }
-                        }
-                        if aborted {
-                            continue;
-                        }
-                        form.channels.push(ChannelChoice::Fresh {
-                            kind: chosen.kind.clone(),
-                            alias,
-                            extras,
-                        });
-                        continue;
-                    }
-                    // Done.
-                    form.channels_visited = true;
-                    break;
-                }
-            }
-            QuickstartChecklistAction::PeerGroups => {
-                // Available channel refs: staged channels (this run) +
-                // unassigned channels already in config. Refs already
-                // covered by a staged peer-group are filtered out.
-                let staged_refs: Vec<String> = form
-                    .channels
-                    .iter()
-                    .map(|c| match c {
-                        ChannelChoice::Fresh { kind, alias, .. } => format!("{kind}.{alias}"),
-                        ChannelChoice::Existing { alias_ref } => alias_ref.clone(),
-                    })
-                    .collect();
-                let claimed: std::collections::HashSet<String> = form
-                    .peer_groups
-                    .iter()
-                    .map(|pg| pg.channel.clone())
-                    .collect();
-                let mut available: Vec<String> = staged_refs
-                    .iter()
-                    .chain(state.unassigned_channels.iter())
-                    .filter(|r| !claimed.contains(r.as_str()))
-                    .cloned()
-                    .collect();
-                available.dedup();
-                loop {
-                    let mut items: Vec<String> = form
-                        .peer_groups
-                        .iter()
-                        .map(|pg| {
-                            qta(
-                                "cli-quickstart-peer-group-row",
-                                &[
-                                    ("channel", &pg.channel),
-                                    ("name", &pg.name),
-                                    ("count", &pg.external_peers.len().to_string()),
-                                ],
-                            )
-                        })
-                        .collect();
-                    let drafts = items.len();
-                    if !available.is_empty() {
-                        items.push(t("cli-quickstart-add-peer-group", "+ Add peer group"));
-                    }
-                    items.push(t("cli-quickstart-done", "Done"));
-                    let Some(pick) = FuzzySelect::new()
-                        .with_prompt(t(
-                            "cli-quickstart-peer-groups-prompt",
-                            "Peer groups (Enter on a row to remove, + Add to create)",
-                        ))
-                        .items(&items)
-                        .default(items.len() - 1)
-                        .max_length(items.len())
-                        .interact_opt()?
-                    else {
-                        break;
-                    };
-                    if pick < drafts {
-                        form.peer_groups.remove(pick);
-                        continue;
-                    }
-                    if pick == drafts && !available.is_empty() {
-                        let Some(ch_idx) = FuzzySelect::new()
-                            .with_prompt(t(
-                                "cli-quickstart-channel-to-authorize-prompt",
-                                "Channel to authorize",
-                            ))
-                            .items(&available)
-                            .default(0)
-                            .max_length(available.len())
-                            .interact_opt()?
-                        else {
-                            continue;
-                        };
-                        let channel = available[ch_idx].clone();
-                        let (ch_type, ch_alias) = match channel.split_once('.') {
-                            Some(parts) => parts,
-                            None => continue,
-                        };
-                        let name = format!("{ch_type}_{ch_alias}_default");
-                        let Ok(peers_raw) = Input::<String>::new()
-                            .with_prompt(t(
-                                "cli-quickstart-external-peers-prompt",
-                                "External peers (comma- or newline-separated, blank for none)",
-                            ))
-                            .allow_empty(true)
-                            .interact_text()
-                        else {
-                            continue;
-                        };
-                        let external_peers: Vec<String> = peers_raw
-                            .split([',', '\n'])
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                        form.peer_groups
-                            .push(kinetic_config::presets::QuickstartPeerGroup {
-                                name,
-                                channel,
-                                external_peers,
-                                ignore: Vec::new(),
-                            });
-                        // The channel just got claimed; refresh the available list.
-                        available = staged_refs
-                            .iter()
-                            .chain(state.unassigned_channels.iter())
-                            .filter(|r| !form.peer_groups.iter().any(|pg| &pg.channel == *r))
-                            .cloned()
-                            .collect();
-                        available.dedup();
-                        continue;
-                    }
-                    // Done.
-                    form.peer_groups_visited = true;
-                    break;
-                }
-            }
-            QuickstartChecklistAction::Agent => {
-                let default_name = form
-                    .agent
-                    .as_ref()
-                    .map(|a| a.name.clone())
-                    .unwrap_or_default();
-                let mut input = Input::<String>::new()
-                    .with_prompt(t("cli-quickstart-agent-alias-prompt", "Agent alias"))
-                    .allow_empty(false)
-                    .validate_with(|input: &String| {
-                        kinetic_config::helpers::validate_alias_key(input)
-                    });
-                if !default_name.is_empty() {
-                    input = input.default(default_name);
-                }
-                let Ok(name) = input.interact_text() else {
-                    continue;
-                };
-                let mut system_prompt = form
-                    .agent
-                    .as_ref()
-                    .map(|a| a.system_prompt.clone())
-                    .unwrap_or_default();
-                let edit = Confirm::new()
-                    .with_prompt(t(
-                        "cli-quickstart-edit-system-prompt",
-                        "Edit system prompt in $EDITOR? (blank if you skip)",
-                    ))
-                    .default(false)
-                    .interact_opt()?;
-                if let Some(true) = edit
-                    && let Some(edited) = Editor::new().edit(&system_prompt)?
-                {
-                    system_prompt = edited;
-                }
-                // Personality files. The canonical list comes from the
-                // snapshot — no hardcoded filenames. Pre-seed buffers
-                // from any previously-staged content so re-entering
-                // Agent doesn't drop the user's edits.
-                let prior_files: std::collections::HashMap<String, String> = form
-                    .agent
-                    .as_ref()
-                    .map(|a| {
-                        a.personality_files
-                            .iter()
-                            .map(|f| (f.filename.clone(), f.content.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                // Pre-render the default template set once; the per-file
-                // [t] Use template option seeds the editor from this map.
-                let template_ctx = kinetic_runtime::agent::personality_templates::TemplateContext {
-                    agent: trimmed_agent_name_for_templates(
-                        form.agent.as_ref().map(|a| a.name.as_str()),
-                    ),
-                    ..Default::default()
-                };
-                let templates: std::collections::HashMap<String, String> =
-                    kinetic_runtime::agent::personality_templates::render_preset_default(
-                        &template_ctx,
-                    )
-                    .into_iter()
-                    .map(|(filename, content)| (filename.to_string(), content))
-                    .collect();
-                let mut personality_results: std::collections::HashMap<String, String> =
-                    std::collections::HashMap::new();
-
-                #[derive(Clone, Copy)]
-                enum PersonalityAction {
-                    StartWithTemplate,
-                    StartFromScratch,
-                    Skip,
-                }
-                impl PersonalityAction {
-                    fn label(self, has_staged: bool) -> String {
-                        match self {
-                            Self::StartWithTemplate => t(
-                                "cli-quickstart-personality-start-template",
-                                "Start with template (open in $EDITOR)",
-                            ),
-                            Self::StartFromScratch => {
-                                if has_staged {
-                                    t(
-                                        "cli-quickstart-personality-start-current",
-                                        "Start from current content (open in $EDITOR)",
-                                    )
-                                } else {
-                                    t(
-                                        "cli-quickstart-personality-start-scratch",
-                                        "Start from scratch (open in $EDITOR)",
-                                    )
-                                }
-                            }
-                            Self::Skip => t("cli-quickstart-personality-skip", "Skip"),
-                        }
-                    }
-                }
-
-                let files = state.personality_files;
-                let mut idx: usize = 0;
-                let mut back_to_checklist = false;
-                while idx < files.len() {
-                    let filename = files[idx];
-                    // Prefer a decision made earlier in this loop (e.g. after
-                    // stepping back), else fall back to any pre-staged content.
-                    let staged = personality_results
-                        .get(filename)
-                        .or_else(|| prior_files.get(filename))
-                        .cloned()
-                        .unwrap_or_default();
-                    let template_available = templates.contains_key(filename);
-
-                    let mut actions: Vec<PersonalityAction> = Vec::with_capacity(3);
-                    if template_available {
-                        actions.push(PersonalityAction::StartWithTemplate);
-                    }
-                    actions.push(PersonalityAction::StartFromScratch);
-                    actions.push(PersonalityAction::Skip);
-                    let has_staged = !staged.is_empty();
-                    let choices: Vec<String> =
-                        actions.iter().map(|a| a.label(has_staged)).collect();
-                    let position = if files.len() > 1 {
-                        format!(" [{}/{}]", idx + 1, files.len())
-                    } else {
-                        String::new()
-                    };
-                    let back_hint = if idx > 0 {
-                        t("cli-quickstart-esc-go-back", " (Esc to go back)")
-                    } else {
-                        t(
-                            "cli-quickstart-esc-return-checklist",
-                            " (Esc to return to checklist)",
-                        )
-                    };
-                    let label = qta(
-                        "cli-quickstart-personality-file-prompt",
-                        &[
-                            ("filename", filename),
-                            ("position", &position),
-                            ("back_hint", &back_hint),
-                        ],
-                    );
-                    let Some(pick) = FuzzySelect::new()
-                        .with_prompt(label)
-                        .items(&choices)
-                        .default(0)
-                        .max_length(choices.len())
-                        .interact_opt()?
-                    else {
-                        // Esc steps back one file in the stack. On the first
-                        // file there's nowhere earlier to go, so it returns to
-                        // the base checklist.
-                        if idx == 0 {
-                            back_to_checklist = true;
-                            break;
-                        }
-                        idx -= 1;
-                        continue;
-                    };
-                    match actions[pick] {
-                        PersonalityAction::StartWithTemplate => {
-                            let seed = templates
-                                .get(filename)
-                                .cloned()
-                                .unwrap_or_else(|| staged.clone());
-                            if let Some(edited) = Editor::new().edit(&seed)?
-                                && !edited.trim().is_empty()
-                            {
-                                personality_results.insert(filename.to_string(), edited);
-                            }
-                        }
-                        PersonalityAction::StartFromScratch => {
-                            if let Some(edited) = Editor::new().edit(&staged)?
-                                && !edited.trim().is_empty()
-                            {
-                                personality_results.insert(filename.to_string(), edited);
-                            }
-                        }
-                        PersonalityAction::Skip => {
-                            // Keep any previously-staged content rather than
-                            // dropping it silently.
-                            if has_staged {
-                                personality_results.insert(filename.to_string(), staged);
-                            }
-                        }
-                    }
-                    idx += 1;
-                }
-                if back_to_checklist {
-                    continue;
-                }
-                // Materialize in canonical file order; only files with content.
-                let personality_files: Vec<kinetic_config::presets::QuickstartPersonalityFile> =
-                    files
-                        .iter()
-                        .filter_map(|filename| {
-                            personality_results.get(*filename).map(|content| {
-                                kinetic_config::presets::QuickstartPersonalityFile {
-                                    filename: (*filename).to_string(),
-                                    content: content.clone(),
-                                }
-                            })
-                        })
-                        .collect();
-                form.agent = Some(AgentChoice {
-                    name,
-                    system_prompt,
-                    personality_files,
-                });
-            }
+        let value = input.interact_text()?.trim().to_string();
+        if accept(&value) {
+            return Ok(value);
         }
-    }
-
-    // ── Assemble submission ─────────────────────────────────────
-    let inline_auth = match form.provider.as_ref() {
-        Some(ProviderChoice::Fresh {
-            kind,
-            alias,
-            fields,
-            ..
-        }) => quickstart_inline_auth(kind, alias, fields),
-        _ => None,
-    };
-
-    let provider = form.provider.expect("provider satisfied");
-    let provider_type = match &provider {
-        ProviderChoice::Fresh { kind, .. } => kind.as_str(),
-        ProviderChoice::Existing { alias_ref } => alias_ref
-            .split_once('.')
-            .map(|(provider_type, _)| provider_type)
-            .unwrap_or(alias_ref),
-    };
-    let runtime_profile = SelectorChoice::Fresh(quickstart_runtime_profile_for_provider(
-        provider_type,
-        providers,
-        &state.default_runtime_profile,
-    ));
-    let model_provider = match provider {
-        ProviderChoice::Fresh {
-            kind,
-            alias,
-            model,
-            fields,
-            ..
-        } => SelectorChoice::Fresh(ModelProviderChoice {
-            provider_type: kind,
-            alias,
-            model,
-            fields,
-        }),
-        ProviderChoice::Existing { alias_ref } => SelectorChoice::Existing(alias_ref),
-    };
-    let risk_profile = match form.risk.expect("risk satisfied") {
-        PresetChoice::Fresh(n) => SelectorChoice::Fresh(n.to_string()),
-        PresetChoice::Existing(a) => SelectorChoice::Existing(a),
-    };
-    let memory = SelectorChoice::Fresh(form.memory.expect("memory satisfied"));
-    let channels = form
-        .channels
-        .into_iter()
-        .map(|c| match c {
-            ChannelChoice::Fresh {
-                kind,
-                alias,
-                extras,
-                ..
-            } => SelectorChoice::Fresh(ChannelQuickStart {
-                channel_type: kind,
-                alias,
-                fields: extras.into_iter().collect(),
-            }),
-            ChannelChoice::Existing { alias_ref } => SelectorChoice::Existing(alias_ref),
-        })
-        .collect();
-    let agent_choice = form.agent.expect("agent satisfied");
-    let submission = BuilderSubmission {
-        model_provider,
-        risk_profile,
-        runtime_profile,
-        memory,
-        channels,
-        peer_groups: form.peer_groups,
-        agent: AgentIdentity {
-            name: agent_choice.name.clone(),
-            system_prompt: agent_choice.system_prompt,
-            personality_file: None,
-            personality_files: agent_choice.personality_files,
-        },
-    };
-
-    match Box::pin(apply_with_surface(submission, &mut cfg, Surface::Cli)).await {
-        Ok(applied) => {
-            println!();
-            println!(
-                "{}",
-                ta(
-                    "cli-quickstart-complete",
-                    &[("alias", &applied.alias)],
-                    "Quickstart complete."
-                )
-            );
-            if let Some(auth) = inline_auth {
-                Box::pin(run_inline_provider_auth(auth, &mut cfg)).await;
-            }
-            println!();
-            println!("{}", t("cli-next-steps", "Next steps:"));
-            println!(
-                "{}",
-                qta(
-                    "cli-quickstart-next-agent-command",
-                    &[("alias", &applied.alias)]
-                )
-            );
-            if which_zerocode_on_path() {
-                println!("  zerocode                   # launch the TUI"); // i18n-exempt: literal command/identifier example
-            }
-            Ok(())
-        }
-        Err(errs) => {
-            eprintln!();
-            eprintln!(
-                "{}",
-                t(
-                    "cli-agent-not-created",
-                    "Your agent was not created — and nothing on disk was changed."
-                )
-            );
-            eprintln!(
-                "{}",
-                t(
-                    "cli-quickstart-fix-and-rerun",
-                    "Your existing config is untouched. Fix the following and run quickstart again:",
-                )
-            );
-            eprintln!();
-            for e in &errs {
-                eprintln!("  • {}: {}", quickstart_step_label(e.step), e.message);
-            }
-            eprintln!();
-            anyhow::bail!(
-                "{}",
-                qta(
-                    "cli-quickstart-could-not-finish",
-                    &[("count", &errs.len().to_string())],
-                )
-            )
-        }
+        println!("{}", t(reject_key, reject_fallback));
     }
 }
 
 #[cfg(feature = "agent-runtime")]
+fn prompt_daily_cap(per_tx: &str) -> anyhow::Result<String> {
+    use dialoguer::Input;
+    let prompt = t("cli-quickstart-ask-daily", "Daily cap (MON)");
+    loop {
+        let value = Input::<String>::new()
+            .with_prompt(&prompt)
+            .default("1".to_string())
+            .interact_text()?
+            .trim()
+            .to_string();
+        if !kinetic_runtime::device_setup::accepts_cap(&value) {
+            println!(
+                "{}",
+                t(
+                    "cli-setup-bad-cap",
+                    "Enter the cap as a MON amount, such as 0.05."
+                )
+            );
+            continue;
+        }
+        if !kinetic_runtime::device_setup::caps_fit(per_tx, &value) {
+            println!(
+                "{}",
+                t(
+                    "cli-setup-cap-order",
+                    "The per-transaction cap cannot be higher than the daily cap."
+                )
+            );
+            continue;
+        }
+        return Ok(value);
+    }
+}
+
+#[cfg(feature = "agent-runtime")]
+fn selected_provider(
+    providers: &[kinetic_providers::ModelProviderInfo],
+    preset: Option<&str>,
+) -> anyhow::Result<String> {
+    use dialoguer::FuzzySelect;
+    if let Some(given) = preset.map(str::trim).filter(|value| !value.is_empty()) {
+        if kinetic_runtime::quickstart::resolve_model_provider_type(given).is_none() {
+            anyhow::bail!(
+                "{}",
+                t(
+                    "cli-setup-bad-provider",
+                    "That model provider is not available."
+                )
+            );
+        }
+        return Ok(given.to_string());
+    }
+    let labels: Vec<&str> = providers.iter().map(|info| info.display_name).collect();
+    let index = FuzzySelect::new()
+        .with_prompt(t("cli-quickstart-ask-provider", "Model provider"))
+        .items(&labels)
+        .default(0)
+        .interact()?;
+    Ok(providers[index].name.to_string())
+}
+
+#[cfg(feature = "agent-runtime")]
+fn provider_api_key(
+    providers: &[kinetic_providers::ModelProviderInfo],
+    provider: &str,
+    preset: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let Some((name, codex)) = kinetic_runtime::quickstart::resolve_model_provider_type(provider)
+    else {
+        anyhow::bail!(
+            "{}",
+            t(
+                "cli-setup-bad-provider",
+                "That model provider is not available."
+            )
+        );
+    };
+    let local = providers.iter().any(|info| info.name == name && info.local);
+    if local || codex {
+        return Ok(None);
+    }
+    if let Some(given) = preset.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok(Some(given.to_string()));
+    }
+    Ok(Some(secret_prompt(
+        &t("cli-quickstart-ask-key", "API key"),
+        false,
+    )?))
+}
+
+#[cfg(feature = "agent-runtime")]
+async fn print_device_card(
+    config: &crate::config::schema::Config,
+    json: bool,
+) -> anyhow::Result<()> {
+    let mut card = kinetic_runtime::device_card::from_config(config).map_err(anyhow::Error::msg)?;
+    kinetic_runtime::device_card::read_claim(config, &mut card).await;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&card)?);
+    } else {
+        println!("{}", kinetic_runtime::device_card::render(&card));
+    }
+    Ok(())
+}
+
 fn model_path_provider_type(path: &str) -> Option<&'static str> {
     let parts: Vec<&str> = path.split('.').collect();
     if parts.len() != 5 || parts[0] != "providers" || parts[1] != "models" || parts[4] != "model" {
@@ -3128,153 +1592,6 @@ fn ensure_map_key_for_prop_path(config: &mut Config, prop_path: &str) -> Result<
         config.mark_dirty(&format!("{section_path}.{key}"));
     }
     Ok(created)
-}
-
-#[cfg(feature = "agent-runtime")]
-fn trimmed_agent_name_for_templates(prior_name: Option<&str>) -> String {
-    prior_name
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            kinetic_runtime::agent::personality_templates::TemplateContext::default().agent
-        })
-}
-
-#[cfg(feature = "agent-runtime")]
-fn prompt_for_field(
-    desc: &kinetic_runtime::quickstart::FieldDescriptor,
-    seed: Option<&str>,
-) -> anyhow::Result<Option<String>> {
-    use dialoguer::{FuzzySelect, Input};
-    use kinetic_config::traits::PropKind;
-    if !desc.help.is_empty() {
-        println!("  {}", desc.help);
-    }
-    let prompt = desc.label.clone();
-    if desc.is_secret {
-        match secret_prompt(&prompt, true) {
-            Ok(pw) => {
-                if !pw.is_empty() {
-                    eprintln!("{}", ta("cli-secret-received", &[], "  ✓ Secret received"));
-                }
-                return Ok(Some(pw));
-            }
-            Err(e) => {
-                if e.downcast_ref::<std::io::Error>()
-                    .is_some_and(|io| io.kind() == std::io::ErrorKind::Interrupted)
-                {
-                    return Ok(None);
-                }
-                return Err(e);
-            }
-        }
-    }
-    if let (PropKind::Enum, Some(variants)) = (&desc.kind, &desc.enum_variants) {
-        let Some(i) = FuzzySelect::new()
-            .with_prompt(prompt)
-            .items(variants)
-            .default(0)
-            .max_length(variants.len().max(1))
-            .interact_opt()?
-        else {
-            return Ok(None);
-        };
-        return Ok(Some(variants[i].clone()));
-    }
-    let mut input = Input::<String>::new()
-        .with_prompt(prompt)
-        .allow_empty(!desc.required);
-    if let Some(s) = seed {
-        input = input.default(s.to_string());
-    } else if let Some(d) = desc.default.as_deref()
-        && !d.is_empty()
-        && d != kinetic_config::traits::UNSET_DISPLAY
-    {
-        // `<unset>` is a display placeholder for an unset Option, not a
-        // real default. Seeding it pre-fills the prompt so a bare Enter
-        // submits `<unset>`, which the daemon then validates against the
-        // field's true type (e.g. a bool) and rejects.
-        input = input.default(d.to_string());
-    }
-    // Same Ctrl+C-as-cancel mapping as the secret prompt branch above.
-    match input.interact_text() {
-        Ok(v) => Ok(Some(v)),
-        Err(e) => {
-            let io: std::io::Error = e.into();
-            if io.kind() == std::io::ErrorKind::Interrupted {
-                Ok(None)
-            } else {
-                Err(io.into())
-            }
-        }
-    }
-}
-
-#[cfg(feature = "agent-runtime")]
-fn pick_preset(
-    prompt: &str,
-    presets: Vec<(&'static str, &'static str, &'static str)>,
-    existing: &[String],
-) -> anyhow::Result<Option<Result<&'static str, String>>> {
-    use dialoguer::FuzzySelect;
-    let mut mode_labels: Vec<String> = Vec::new();
-    let mut mode_kinds: Vec<&str> = Vec::new();
-    if !existing.is_empty() {
-        mode_labels.push(t("cli-quickstart-use-existing", "Use existing"));
-        mode_kinds.push("existing");
-    }
-    mode_labels.push(t("cli-quickstart-pick-preset", "Pick a preset"));
-    mode_kinds.push("preset");
-    let mode = if mode_labels.len() == 1 {
-        Some(0)
-    } else {
-        FuzzySelect::new()
-            .with_prompt(prompt)
-            .items(&mode_labels)
-            .default(0)
-            .max_length(mode_labels.len())
-            .interact_opt()?
-    };
-    let Some(mi) = mode else { return Ok(None) };
-    if mode_kinds[mi] == "existing" {
-        let Some(i) = FuzzySelect::new()
-            .with_prompt(qta(
-                "cli-quickstart-pick-existing-prompt",
-                &[("prompt", prompt)],
-            ))
-            .items(existing)
-            .default(0)
-            .max_length(existing.len().max(1))
-            .interact_opt()?
-        else {
-            return Ok(None);
-        };
-        return Ok(Some(Err(existing[i].clone())));
-    }
-    let labels: Vec<String> = presets
-        .iter()
-        .map(|(_, label, help)| format!("{label}  —  {help}"))
-        .collect();
-    let Some(i) = FuzzySelect::new()
-        .with_prompt(qta(
-            "cli-quickstart-pick-preset-prompt",
-            &[("prompt", prompt)],
-        ))
-        .items(&labels)
-        .default(0)
-        .max_length(labels.len().max(1))
-        .interact_opt()?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(Ok(presets[i].0)))
-}
-
-#[cfg(feature = "agent-runtime")]
-fn which_zerocode_on_path() -> bool {
-    std::env::var_os("PATH")
-        .map(|paths| std::env::split_paths(&paths).any(|p| p.join("zerocode").is_file()))
-        .unwrap_or(false)
 }
 
 #[cfg(feature = "plugins-wasm")]
@@ -4490,10 +2807,10 @@ enum ConfigCommands {
         #[arg(long)]
         secrets: bool,
     },
-    /// Get a config property value
+    /// Print the device card, or one property when a path is given
     Get {
-        /// Property path (e.g. channels.telegram.mention-only)
-        path: String,
+        /// Property path (e.g. channels.telegram.mention-only). Omit it to print the device card.
+        path: Option<String>,
         /// Emit a structured JSON envelope ({path, value} or {path, populated}) instead of plain text.
         #[arg(long)]
         json: bool,
@@ -6225,6 +4542,12 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
         _ => {}
     }
 
+    #[cfg(feature = "agent-runtime")]
+    if let Commands::Update { force } = &cli.command {
+        Box::pin(run_update(*force)).await?;
+        return Ok(());
+    }
+
     let default_floor = match &cli.command {
         Commands::Daemon {
             ephemeral: true, ..
@@ -6735,7 +5058,8 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
         Commands::Onboard { .. }
         | Commands::Completions { .. }
         | Commands::MarkdownHelp
-        | Commands::MarkdownSchema => {
+        | Commands::MarkdownSchema
+        | Commands::Update { .. } => {
             anyhow::bail!("pre-runtime command was not handled before runtime dispatch")
         }
 
@@ -9233,6 +7557,10 @@ Add pricing to the active provider profile or supply a catalog entry."
                 Ok(())
             }
             ConfigCommands::Get { path, json } => {
+                let Some(path) = path else {
+                    print_device_card(&config, json).await?;
+                    return Ok(());
+                };
                 let known_paths: Vec<String> =
                     config.prop_fields().into_iter().map(|f| f.name).collect();
                 let path = kinetic_config::helpers::resolve_field_path(&known_paths, &path);
@@ -11341,158 +9669,6 @@ fn format_expiry(profile: &auth::profiles::AuthProfile) -> String {
     }
 }
 
-#[cfg(feature = "agent-runtime")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum InlineProviderAuth {
-    Codex,
-    AnthropicSetupToken { alias: String },
-}
-
-#[cfg(feature = "agent-runtime")]
-fn quickstart_field_value_eq(
-    fields: &std::collections::HashMap<String, String>,
-    key: &str,
-    expected: &str,
-) -> bool {
-    fields
-        .get(key)
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
-}
-
-#[cfg(feature = "agent-runtime")]
-fn quickstart_inline_auth(
-    kind: &str,
-    alias: &str,
-    fields: &std::collections::HashMap<String, String>,
-) -> Option<InlineProviderAuth> {
-    if kind == "openai" && quickstart_field_value_eq(fields, "auth_mode", "codex") {
-        return Some(InlineProviderAuth::Codex);
-    }
-    if kind == "anthropic" && quickstart_field_value_eq(fields, "auth_mode", "setup_token") {
-        return Some(InlineProviderAuth::AnthropicSetupToken {
-            alias: alias.to_string(),
-        });
-    }
-    None
-}
-
-/// `~/.codex/auth.json` — the credential file the upstream Codex CLI writes.
-/// When present, offer a direct import instead of starting a fresh browser flow.
-#[cfg(feature = "agent-runtime")]
-fn codex_auth_json_path() -> Option<std::path::PathBuf> {
-    directories::UserDirs::new().map(|u| u.home_dir().join(".codex").join("auth.json"))
-}
-
-#[cfg(feature = "agent-runtime")]
-async fn run_inline_provider_auth(auth: InlineProviderAuth, config: &mut Config) {
-    use dialoguer::Confirm;
-
-    let codex_import = match &auth {
-        InlineProviderAuth::Codex => codex_auth_json_path().filter(|path| path.exists()),
-        InlineProviderAuth::AnthropicSetupToken { .. } => None,
-    };
-    let (prompt, skip_hint) = match &auth {
-        InlineProviderAuth::Codex => (
-            if codex_import.is_some() {
-                t(
-                    "cli-quickstart-auth-codex-import-prompt",
-                    "Found an existing Codex login (~/.codex/auth.json) — import it now?",
-                )
-            } else {
-                t(
-                    "cli-quickstart-auth-codex-prompt",
-                    "Sign in to OpenAI Codex with your ChatGPT account now?",
-                )
-            },
-            t(
-                "cli-quickstart-auth-codex-skip-hint",
-                "  Finish later with: kinetic auth login --model-provider openai-codex",
-            ),
-        ),
-        InlineProviderAuth::AnthropicSetupToken { alias } => (
-            ta(
-                "cli-quickstart-auth-anthropic-prompt",
-                &[("alias", alias)],
-                "Run `claude setup-token` for this Anthropic provider now?",
-            ),
-            ta(
-                "cli-quickstart-auth-anthropic-skip-hint",
-                &[("alias", alias)],
-                "  Finish later with: claude setup-token",
-            ),
-        ),
-    };
-    if !Confirm::new()
-        .with_prompt(prompt)
-        .default(true)
-        .interact()
-        .unwrap_or(false)
-    {
-        println!("{skip_hint}");
-        return;
-    }
-
-    let result = match auth {
-        InlineProviderAuth::Codex => {
-            let cmd = AuthCommands::Login {
-                model_provider: "openai-codex".to_string(),
-                profile: "default".to_string(),
-                device_code: false,
-                import: codex_import,
-            };
-            handle_auth_command(cmd, config).await
-        }
-        InlineProviderAuth::AnthropicSetupToken { alias } => {
-            Box::pin(run_anthropic_setup_token_inline(&alias, config)).await
-        }
-    };
-    if let Err(error) = result {
-        let error = error.to_string();
-        eprintln!(
-            "{}",
-            ta(
-                "cli-quickstart-auth-failed",
-                &[("error", &error)],
-                "  Auth setup didn't complete.",
-            )
-        );
-        println!("{skip_hint}");
-    }
-}
-
-#[cfg(feature = "agent-runtime")]
-async fn run_anthropic_setup_token_inline(alias: &str, config: &mut Config) -> Result<()> {
-    let status = tokio::process::Command::new("claude")
-        .arg("setup-token")
-        .status()
-        .await
-        .context("failed to run `claude setup-token`; is the Claude CLI installed and on PATH?")?;
-    if !status.success() {
-        bail!("`claude setup-token` exited with status {status}");
-    }
-
-    let token = read_auth_input(&t(
-        "cli-quickstart-auth-anthropic-token-prompt",
-        "Paste the token from `claude setup-token`",
-    ))?;
-    if token.trim().is_empty() {
-        bail!("Token cannot be empty");
-    }
-
-    let path = format!("providers.models.anthropic.{alias}.api_key");
-    config.set_prop_persistent(&path, token.trim())?;
-    Box::pin(config.save_dirty()).await?;
-    println!(
-        "{}",
-        ta(
-            "cli-quickstart-auth-anthropic-saved",
-            &[("alias", alias)],
-            "  Saved Claude setup token.",
-        )
-    );
-    Ok(())
-}
-
 /// Spawn `program` with `args` detached from this process's standard streams.
 ///
 /// `oidc login` prints the access token on stdout and callers capture that
@@ -13087,855 +11263,6 @@ mod tests {
         assert_eq!(device_poll_wait(60, Duration::ZERO), Duration::ZERO);
     }
 
-    #[cfg(feature = "agent-runtime")]
-    struct SelectorTestTerminal {
-        size: Option<(u16, u16)>,
-        keys: std::collections::VecDeque<std::io::Result<QuickstartSelectorKey>>,
-        actions: Vec<&'static str>,
-        fail_action: Option<&'static str>,
-    }
-
-    #[cfg(feature = "agent-runtime")]
-    impl SelectorTestTerminal {
-        fn new(
-            size: Option<(u16, u16)>,
-            keys: impl IntoIterator<Item = std::io::Result<QuickstartSelectorKey>>,
-        ) -> Self {
-            Self {
-                size,
-                keys: keys.into_iter().collect(),
-                actions: Vec::new(),
-                fail_action: None,
-            }
-        }
-
-        fn perform(&mut self, action: &'static str) -> std::io::Result<()> {
-            self.actions.push(action);
-            if self.fail_action == Some(action) {
-                return Err(std::io::Error::other(format!("injected {action} failure")));
-            }
-            Ok(())
-        }
-    }
-
-    #[cfg(feature = "agent-runtime")]
-    impl QuickstartSelectorTerminal for SelectorTestTerminal {
-        fn size_checked(&mut self) -> Option<(u16, u16)> {
-            self.size
-        }
-
-        fn enter_alternate_screen(&mut self) -> std::io::Result<()> {
-            self.perform("enter_alternate_screen")
-        }
-
-        fn clear_screen(&mut self) -> std::io::Result<()> {
-            self.perform("clear_screen")
-        }
-
-        fn move_cursor_to_origin(&mut self) -> std::io::Result<()> {
-            self.perform("move_cursor_to_origin")
-        }
-
-        fn hide_cursor(&mut self) -> std::io::Result<()> {
-            self.perform("hide_cursor")
-        }
-
-        fn show_cursor(&mut self) -> std::io::Result<()> {
-            self.perform("show_cursor")
-        }
-
-        fn leave_alternate_screen(&mut self) -> std::io::Result<()> {
-            self.perform("leave_alternate_screen")
-        }
-
-        fn write_line(&mut self, _line: &str) -> std::io::Result<()> {
-            self.perform("write_line")
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            self.perform("flush")
-        }
-
-        fn read_key(&mut self) -> std::io::Result<QuickstartSelectorKey> {
-            self.actions.push("read_key");
-            self.keys.pop_front().unwrap_or_else(|| {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "no injected selector key",
-                ))
-            })
-        }
-    }
-
-    /// One step of a deterministic PTY interaction: a key press, or a resize
-    /// of the output terminal applied between key presses the way a terminal
-    /// emulator changes a window while the selector waits for input.
-    #[cfg(all(feature = "agent-runtime", unix))]
-    enum PtyStep {
-        Key(QuickstartSelectorKey),
-        ResizeOutput { rows: u16, columns: u16 },
-    }
-
-    /// Injected input for the production Crossterm adapter.
-    ///
-    /// Keys are queued rather than read from the process-global event source
-    /// so the regression runs under a test harness without racing a
-    /// controlling terminal. Resizes are applied to the PTY master exactly as
-    /// a terminal emulator would, so the adapter's own geometry query must
-    /// observe them.
-    #[cfg(all(feature = "agent-runtime", unix))]
-    struct PtyQuickstartInput {
-        master: std::fs::File,
-        steps: std::collections::VecDeque<PtyStep>,
-    }
-
-    #[cfg(all(feature = "agent-runtime", unix))]
-    impl QuickstartSelectorInput for PtyQuickstartInput {
-        fn read_key(&mut self) -> std::io::Result<QuickstartSelectorKey> {
-            loop {
-                match self.steps.pop_front() {
-                    Some(PtyStep::Key(key)) => return Ok(key),
-                    Some(PtyStep::ResizeOutput { rows, columns }) => {
-                        set_pty_size(&self.master, rows, columns);
-                    }
-                    None => {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::UnexpectedEof,
-                            "no injected selector key",
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    /// Open a PTY pair sized `rows` by `columns`, returned as `(master, slave)`.
-    #[cfg(all(feature = "agent-runtime", unix))]
-    fn open_pty(rows: u16, columns: u16) -> (std::fs::File, std::fs::File) {
-        use std::os::fd::FromRawFd;
-
-        let mut master_fd = -1;
-        let mut slave_fd = -1;
-        let mut dimensions = libc::winsize {
-            ws_row: rows,
-            ws_col: columns,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        // SAFETY: both descriptor pointers refer to live `c_int` storage. The
-        // optional name and termios inputs are null, and `dimensions` remains
-        // live for the duration of the call.
-        let openpty_result = unsafe {
-            libc::openpty(
-                &raw mut master_fd,
-                &raw mut slave_fd,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &raw mut dimensions,
-            )
-        };
-        assert_eq!(openpty_result, 0, "openpty failed");
-
-        // SAFETY: `openpty` returned two distinct, live descriptors. Each is
-        // transferred to exactly one `File`, which closes it exactly once.
-        unsafe {
-            (
-                std::fs::File::from_raw_fd(master_fd),
-                std::fs::File::from_raw_fd(slave_fd),
-            )
-        }
-    }
-
-    #[cfg(all(feature = "agent-runtime", unix))]
-    fn set_pty_size(pty: &std::fs::File, rows: u16, columns: u16) {
-        use std::os::fd::AsRawFd;
-
-        let dimensions = libc::winsize {
-            ws_row: rows,
-            ws_col: columns,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        // SAFETY: `pty` owns a live PTY descriptor and `dimensions` is a fully
-        // initialized `winsize` that outlives the call.
-        let result =
-            unsafe { libc::ioctl(pty.as_raw_fd(), libc::TIOCSWINSZ, &raw const dimensions) };
-        assert_eq!(result, 0, "TIOCSWINSZ failed");
-    }
-
-    /// Build the production Crossterm adapter over a PTY slave with injected
-    /// input, so the exact production escape sequences and geometry query run.
-    #[cfg(all(feature = "agent-runtime", unix))]
-    fn pty_quickstart_terminal(
-        master: &std::fs::File,
-        slave: std::fs::File,
-        steps: impl IntoIterator<Item = PtyStep>,
-    ) -> CrosstermQuickstartTerminal<std::fs::File, PtyQuickstartInput> {
-        CrosstermQuickstartTerminal {
-            output: slave,
-            input: PtyQuickstartInput {
-                master: master.try_clone().expect("PTY master should be clonable"),
-                steps: steps.into_iter().collect(),
-            },
-        }
-    }
-
-    /// Read everything written to the PTY, returning once the output is idle.
-    #[cfg(all(feature = "agent-runtime", unix))]
-    fn drain_pty_output(master: &mut std::fs::File) -> String {
-        use std::os::fd::AsRawFd;
-
-        // SAFETY: the PTY master descriptor is live; preserving its current
-        // flags and adding O_NONBLOCK prevents a spurious poll wakeup from
-        // hanging the test.
-        let master_flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
-        assert!(master_flags >= 0, "reading PTY master flags failed");
-        assert_eq!(
-            unsafe {
-                libc::fcntl(
-                    master.as_raw_fd(),
-                    libc::F_SETFL,
-                    master_flags | libc::O_NONBLOCK,
-                )
-            },
-            0,
-            "setting PTY master nonblocking mode failed"
-        );
-
-        let mut output = Vec::new();
-        let mut buffer = [0u8; 4096];
-        loop {
-            let mut poll_fd = libc::pollfd {
-                fd: master.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            // SAFETY: `poll_fd` points to one initialized poll descriptor.
-            let ready = unsafe { libc::poll(&raw mut poll_fd, 1, 100) };
-            assert!(ready >= 0, "polling PTY output failed");
-            if ready == 0 || poll_fd.revents & libc::POLLIN == 0 {
-                break;
-            }
-            match master.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(read) => output.extend_from_slice(&buffer[..read]),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) => panic!("failed to read PTY output: {error}"),
-            }
-        }
-        String::from_utf8(output).expect("selector output should be UTF-8")
-    }
-
-    #[cfg(all(feature = "agent-runtime", unix))]
-    const PTY_CLEAR_AND_HOME: &str = "\u{1b}[2J\u{1b}[1;1H";
-
-    #[cfg(all(feature = "agent-runtime", unix))]
-    const PTY_SHOW_CURSOR_AND_LEAVE_SCREEN: &str = "\u{1b}[?25h\u{1b}[?1049l";
-
-    #[cfg(all(feature = "agent-runtime", unix))]
-    #[test]
-    fn quickstart_selector_repeated_navigation_redraws_at_pty_origin() {
-        let (mut master, slave) = open_pty(20, 80);
-        let mut term = pty_quickstart_terminal(
-            &master,
-            slave,
-            [
-                PtyStep::Key(QuickstartSelectorKey::Down),
-                PtyStep::Key(QuickstartSelectorKey::Down),
-                PtyStep::Key(QuickstartSelectorKey::Up),
-                PtyStep::Key(QuickstartSelectorKey::Cancel),
-            ],
-        );
-
-        let outcome = interact_quickstart_selector(
-            &mut term,
-            &["first".to_string(), "second".to_string()],
-            "Choose",
-            (20, 80),
-        )
-        .expect("repeated PTY navigation should succeed");
-        assert_eq!(outcome, QuickstartSelectorOutcome::Pick(None));
-
-        let output = drain_pty_output(&mut master);
-        drop(term);
-
-        assert_eq!(
-            output.matches(PTY_CLEAR_AND_HOME).count(),
-            4,
-            "the initial frame and all three navigation redraws must begin at the PTY origin; \
-             output: {output:?}"
-        );
-    }
-
-    /// Quickstart accepts distinct input and output terminals. The frame must
-    /// be fitted to the terminal that receives it: a process-global query can
-    /// describe the controlling terminal while stderr is a narrower one.
-    #[cfg(all(feature = "agent-runtime", unix))]
-    #[test]
-    fn quickstart_selector_measures_the_terminal_that_receives_the_frame() {
-        let (controlling_master, controlling_slave) = open_pty(20, 80);
-        let (mut output_master, output_slave) = open_pty(20, 40);
-
-        let mut controlling = pty_quickstart_terminal(&controlling_master, controlling_slave, []);
-        assert_eq!(
-            controlling.size_checked(),
-            Some((20, 80)),
-            "the adapter over the controlling PTY reports that PTY's geometry"
-        );
-
-        let mut term = pty_quickstart_terminal(
-            &output_master,
-            output_slave,
-            [
-                PtyStep::Key(QuickstartSelectorKey::Down),
-                PtyStep::Key(QuickstartSelectorKey::Cancel),
-            ],
-        );
-        let output_size = quickstart_selector_terminal_size(&mut term)
-            .expect("the output PTY reports its geometry");
-        assert_eq!(
-            output_size,
-            (20, 40),
-            "the adapter over the output PTY must report the output PTY, not the controlling one"
-        );
-
-        // Fit exactly as the Quickstart caller does, from the sampled output
-        // geometry, with content that only fits the wider terminal unfitted.
-        let row_budget = quickstart_selector_row_budget(usize::from(output_size.1))
-            .expect("40 columns is a supported width");
-        let prompt = "Open a selector (Enter), or pick Create. Esc to quit.";
-        let fitted_prompt = fit_quickstart_selector_row(prompt, row_budget);
-        assert_ne!(
-            fitted_prompt, prompt,
-            "the prompt needs fitting at 40 columns"
-        );
-        let label = "[ ] Model provider — not yet chosen (pick one to continue)";
-        let fitted_label = fit_quickstart_selector_row(label, row_budget);
-        assert_ne!(fitted_label, label, "the row needs fitting at 40 columns");
-
-        let outcome = interact_quickstart_selector(
-            &mut term,
-            std::slice::from_ref(&fitted_label),
-            &fitted_prompt,
-            output_size,
-        )
-        .expect("navigation on the output PTY should succeed");
-        assert_eq!(outcome, QuickstartSelectorOutcome::Pick(None));
-
-        let output = drain_pty_output(&mut output_master);
-        drop(term);
-        drop(controlling);
-
-        assert!(
-            output.contains(&format!("? {fitted_prompt}")) && output.contains(&fitted_label),
-            "the fitted prompt and row must reach the output terminal; output: {output:?}"
-        );
-        assert!(
-            !output.contains(prompt) && !output.contains(label),
-            "unfitted text must never reach the 40-column output terminal; output: {output:?}"
-        );
-        for line in output.split("\r\n") {
-            assert!(
-                console::measure_text_width(line) <= 40,
-                "{line:?} exceeds the 40-column output terminal"
-            );
-        }
-    }
-
-    /// A resize of the output terminal alone raises no Crossterm resize event,
-    /// so the recheck on the next key must read the output terminal itself.
-    #[cfg(all(feature = "agent-runtime", unix))]
-    #[test]
-    fn quickstart_selector_fails_closed_when_only_the_output_terminal_resizes() {
-        let (mut master, slave) = open_pty(20, 40);
-        let mut term = pty_quickstart_terminal(
-            &master,
-            slave,
-            [
-                PtyStep::Key(QuickstartSelectorKey::Down),
-                PtyStep::ResizeOutput {
-                    rows: 20,
-                    columns: 30,
-                },
-                PtyStep::Key(QuickstartSelectorKey::Down),
-                PtyStep::Key(QuickstartSelectorKey::Cancel),
-            ],
-        );
-        let initial_size = quickstart_selector_terminal_size(&mut term)
-            .expect("the output PTY reports its geometry");
-        assert_eq!(initial_size, (20, 40));
-
-        let error = interact_quickstart_selector(
-            &mut term,
-            &["first".to_string(), "second".to_string()],
-            "Choose",
-            initial_size,
-        )
-        .expect_err("an output-only resize must stop the selector");
-        assert_eq!(
-            error.to_string(),
-            quickstart_selector_resize_error((20, 40), (20, 30)).to_string(),
-            "the recheck must report the output terminal's new geometry"
-        );
-
-        let output = drain_pty_output(&mut master);
-        drop(term);
-
-        assert_eq!(
-            output.matches(PTY_CLEAR_AND_HOME).count(),
-            2,
-            "only the initial frame and the pre-resize redraw may be drawn; output: {output:?}"
-        );
-        assert!(
-            output.ends_with(PTY_SHOW_CURSOR_AND_LEAVE_SCREEN),
-            "the cursor and main screen must be restored after the resize; output: {output:?}"
-        );
-    }
-
-    #[cfg(all(feature = "agent-runtime", unix))]
-    #[test]
-    fn quickstart_output_terminal_size_is_unknown_without_reported_geometry() {
-        let not_a_terminal = tempfile::tempfile().expect("temporary file");
-        assert_eq!(quickstart_output_terminal_size(&not_a_terminal), None);
-
-        let (_unset_master, unset_slave) = open_pty(0, 0);
-        assert_eq!(quickstart_output_terminal_size(&unset_slave), None);
-
-        let (_master, slave) = open_pty(9, 20);
-        assert_eq!(quickstart_output_terminal_size(&slave), Some((9, 20)));
-    }
-
-    #[cfg(feature = "agent-runtime")]
-    #[test]
-    fn fit_quickstart_selector_row_respects_byte_and_display_budgets() {
-        let short = "[ ] Memory — not yet chosen";
-        assert_eq!(fit_quickstart_selector_row(short, 80), short);
-
-        let rows = [
-            "[✓] Model provider — Anthropic (alias: main, model: claude-sonnet-4-5)",
-            "[✓] モデルプロバイダー — Anthropic（モデル：長い名前）",
-            "[✓] 模型提供方 — 提供商与模型摘要",
-            "emoji 👩‍💻 and combining e\u{301} text",
-            "line one\nline two\twith controls",
-        ];
-        for row in rows {
-            for budget in 0..=64 {
-                let fitted = fit_quickstart_selector_row(row, budget);
-                assert!(
-                    fitted.len() <= budget,
-                    "{fitted:?} uses {} bytes with budget {budget}",
-                    fitted.len()
-                );
-                assert!(
-                    console::measure_text_width(&fitted) <= budget,
-                    "{fitted:?} uses {} columns with budget {budget}",
-                    console::measure_text_width(&fitted)
-                );
-                assert!(
-                    fitted.chars().all(|ch| !ch.is_control()),
-                    "{fitted:?} contains a terminal control character"
-                );
-            }
-        }
-
-        let long = rows[0];
-        assert_eq!(fit_quickstart_selector_row(long, 0), "");
-        assert_eq!(fit_quickstart_selector_row(long, 1), ".");
-        assert_eq!(fit_quickstart_selector_row(long, 2), "[.");
-        assert!(fit_quickstart_selector_row(long, 40).ends_with('…'));
-    }
-
-    #[cfg(feature = "agent-runtime")]
-    #[test]
-    fn quickstart_selector_budget_rejects_unsafe_terminal_widths() {
-        assert!(
-            (0..QUICKSTART_SELECTOR_MIN_WIDTH)
-                .all(|width| quickstart_selector_row_budget(width).is_none())
-        );
-        assert_eq!(quickstart_selector_row_budget(20), Some(17));
-        assert_eq!(quickstart_selector_row_budget(21), Some(18));
-    }
-
-    #[cfg(feature = "agent-runtime")]
-    #[test]
-    fn quickstart_selector_minimum_width_keeps_actions_identifiable() {
-        let budget = quickstart_selector_row_budget(QUICKSTART_SELECTOR_MIN_WIDTH).unwrap();
-        let rows = [
-            ("[ ] Model provider — not yet chosen", "[ ] Model"),
-            ("[ ] Risk profile — not yet chosen", "[ ] Risk"),
-            ("[ ] Memory — not yet chosen", "[ ] Memory"),
-            ("[ ] Channels (0) — not yet chosen", "[ ] Channels"),
-            ("[ ] Peer groups — not yet chosen", "[ ] Peer"),
-            ("[ ] Agent identity — not yet chosen", "[ ] Agent"),
-            ("── Create agent", "── Create"),
-        ];
-
-        for (row, identifiable_prefix) in rows {
-            let fitted = fit_quickstart_selector_row(row, budget);
-            assert!(
-                fitted.starts_with(identifiable_prefix),
-                "{fitted:?} does not identify {row:?}"
-            );
-        }
-    }
-
-    /// The checklist rows exactly as a committed locale ships them.
-    ///
-    /// The identifiability guarantee is about the strings users actually see,
-    /// so these are read from the committed catalogues rather than retyped:
-    /// a hand-written approximation can stay distinguishable at a width where
-    /// the real, longer, column-padded row has already collapsed.
-    #[cfg(feature = "agent-runtime")]
-    fn quickstart_checklist_rows_for_locale(cli_ftl: &str) -> Vec<String> {
-        const ROW_KEYS: [&str; 6] = [
-            "cli-quickstart-row-model-provider",
-            "cli-quickstart-row-risk-profile",
-            "cli-quickstart-row-memory",
-            "cli-quickstart-row-channels",
-            "cli-quickstart-row-peer-groups",
-            "cli-quickstart-row-agent-identity",
-        ];
-
-        let value_for = |key: &str| -> String {
-            cli_ftl
-                .lines()
-                .find_map(|line| line.strip_prefix(&format!("{key} = ")))
-                .unwrap_or_else(|| panic!("{key} should be defined in the catalogue"))
-                .to_string()
-        };
-
-        let mut rows: Vec<String> = ROW_KEYS
-            .iter()
-            .map(|key| {
-                value_for(key)
-                    .replace("{$glyph}", "[ ]")
-                    .replace("{$summary}", "not yet chosen")
-            })
-            .collect();
-        rows.push(value_for("cli-quickstart-create-agent"));
-        rows
-    }
-
-    #[cfg(feature = "agent-runtime")]
-    #[test]
-    fn quickstart_selector_accepted_widths_keep_every_action_distinguishable() {
-        // The blocker this guards: a width floor chosen only for arithmetic
-        // safety left widths 3 and 4 "supported" while every fitted row
-        // collapsed to "" or ".", producing an interactive menu in which the
-        // user could not tell Provider from Risk from Create — and could
-        // commit real config chosen blind. Accepting a width must therefore
-        // mean the rows stay individually readable, in every locale we ship,
-        // not merely that the budget subtraction did not underflow.
-        let locales: [(&str, &str); 5] = [
-            (
-                "en",
-                include_str!("../crates/kinetic-runtime/locales/en/cli.ftl"),
-            ),
-            (
-                "es",
-                include_str!("../crates/kinetic-runtime/locales/es/cli.ftl"),
-            ),
-            (
-                "fr",
-                include_str!("../crates/kinetic-runtime/locales/fr/cli.ftl"),
-            ),
-            (
-                "ja",
-                include_str!("../crates/kinetic-runtime/locales/ja/cli.ftl"),
-            ),
-            (
-                "zh-CN",
-                include_str!("../crates/kinetic-runtime/locales/zh-CN/cli.ftl"),
-            ),
-        ];
-
-        for (locale, cli_ftl) in locales {
-            let rows = quickstart_checklist_rows_for_locale(cli_ftl);
-            assert_eq!(rows.len(), 7, "{locale}: expected seven checklist rows");
-
-            for width in 0..=120usize {
-                let Some(budget) = quickstart_selector_row_budget(width) else {
-                    continue;
-                };
-
-                let fitted: Vec<String> = rows
-                    .iter()
-                    .map(|row| fit_quickstart_selector_row(row, budget))
-                    .collect();
-
-                for (row, label) in rows.iter().zip(&fitted) {
-                    assert!(
-                        !label.is_empty(),
-                        "{locale}: width {width} accepted but {row:?} fits to an empty label"
-                    );
-                    assert!(
-                        label.chars().any(|ch| ch.is_alphanumeric()),
-                        "{locale}: width {width} accepted but {row:?} fits to {label:?}, \
-                         which carries no readable text"
-                    );
-                }
-
-                let distinct: std::collections::HashSet<&str> =
-                    fitted.iter().map(String::as_str).collect();
-                assert_eq!(
-                    distinct.len(),
-                    fitted.len(),
-                    "{locale}: width {width} accepted but the fitted rows are not all \
-                     distinguishable: {fitted:?}"
-                );
-            }
-        }
-    }
-
-    #[cfg(feature = "agent-runtime")]
-    #[test]
-    fn quickstart_selector_rejects_widths_that_erase_action_labels() {
-        // The specific widths the previous floor blessed. At width 3 the row
-        // budget was 0 and every label fitted to ""; at width 4 the budget was
-        // 1 and every label fitted to ".". Both must now be rejected before
-        // any interaction can start.
-        let rows = quickstart_checklist_rows_for_locale(include_str!(
-            "../crates/kinetic-runtime/locales/en/cli.ftl"
-        ));
-
-        for width in [0usize, 1, 2, 3, 4, 5, 10, 19] {
-            assert_eq!(
-                quickstart_selector_row_budget(width),
-                None,
-                "width {width} must be rejected, not fitted"
-            );
-        }
-
-        // Demonstrate what acceptance at those widths would have meant, so the
-        // rejection above is anchored to the user-visible failure rather than
-        // to an arbitrary constant.
-        for (collapsed_budget, expected) in [(0usize, ""), (1, ".")] {
-            let fitted: std::collections::HashSet<String> = rows
-                .iter()
-                .map(|row| fit_quickstart_selector_row(row, collapsed_budget))
-                .collect();
-            assert_eq!(
-                fitted,
-                std::collections::HashSet::from([expected.to_string()]),
-                "budget {collapsed_budget} collapses every action to {expected:?}"
-            );
-        }
-
-        assert!(
-            quickstart_selector_row_budget(QUICKSTART_SELECTOR_MIN_WIDTH).is_some(),
-            "the floor itself must remain usable"
-        );
-    }
-
-    #[cfg(feature = "agent-runtime")]
-    #[test]
-    fn quickstart_selector_height_prevents_paging_suffixes() {
-        let item_count = 7;
-        let min_height = quickstart_selector_min_height(item_count);
-
-        assert_eq!(min_height, 9);
-        assert!((0..min_height).all(|height| !quickstart_selector_fits_height(height, item_count)));
-        assert!(quickstart_selector_fits_height(min_height, item_count));
-        assert!(quickstart_selector_fits_height(min_height + 1, item_count));
-        assert_eq!(
-            quickstart_selector_min_height(usize::MAX),
-            usize::MAX,
-            "the terminal guard must not wrap on an unexpected item count"
-        );
-    }
-
-    #[cfg(feature = "agent-runtime")]
-    #[test]
-    fn quickstart_selector_prompt_stays_within_final_terminal_budget() {
-        let prompts = [
-            "Open a selector (Enter), or pick Create. Esc to quit.",
-            "選択肢を開くには Enter、終了するには Esc を押してください。",
-            "Open a selector\nwithout adding a physical terminal row.",
-        ];
-
-        for terminal_width in [20, 40, 80] {
-            let budget = quickstart_selector_row_budget(terminal_width).unwrap();
-            for prompt in prompts {
-                let fitted = fit_quickstart_selector_row(prompt, budget);
-                assert!(
-                    fitted.len() <= budget,
-                    "{fitted:?} uses {} bytes with budget {budget}",
-                    fitted.len()
-                );
-                assert!(
-                    console::measure_text_width(&fitted) <= budget,
-                    "{fitted:?} uses {} columns with budget {budget}",
-                    console::measure_text_width(&fitted)
-                );
-                assert!(
-                    fitted.chars().all(|ch| !ch.is_control()),
-                    "{fitted:?} contains a terminal control character"
-                );
-            }
-        }
-    }
-
-    #[cfg(feature = "agent-runtime")]
-    #[test]
-    fn quickstart_selector_unknown_terminal_size_fails_closed() {
-        // A narrow terminal with an unavailable size must not get rows fitted
-        // against a guessed geometry.
-        assert!(
-            !quickstart_selector_size_is_usable(None),
-            "an unknown terminal size must not be accepted for fitting"
-        );
-        assert!(
-            quickstart_selector_size_is_usable(Some((24, 80))),
-            "a reported size must still be accepted"
-        );
-
-        let mut term = SelectorTestTerminal::new(None, []);
-        assert_eq!(
-            quickstart_selector_terminal_size(&mut term),
-            None,
-            "the selector must preserve a failed terminal size query"
-        );
-    }
-
-    #[cfg(feature = "agent-runtime")]
-    #[test]
-    fn quickstart_selector_recheck_rejects_resize_and_unknown_size() {
-        let initial = (24u16, 80u16);
-
-        assert!(
-            quickstart_selector_recheck_size(initial, Some(initial)).is_ok(),
-            "an unchanged size must allow the interaction to continue"
-        );
-
-        let resized = quickstart_selector_recheck_size(initial, Some((24, 40)))
-            .expect_err("a changed size must abort the interaction");
-        assert!(
-            resized.to_string().contains("40"),
-            "the resize error should name the new width; got {resized}"
-        );
-
-        // The important half: unknown is not evidence the geometry still
-        // matches. Without the checked query this branch would compare the
-        // fabricated (24, 80) against the initial sample, find them equal, and
-        // keep redrawing rows fitted for a terminal it can no longer see.
-        let unknown = quickstart_selector_recheck_size(initial, None)
-            .expect_err("an unavailable size must abort the interaction");
-        assert_eq!(
-            unknown.to_string(),
-            qta("cli-quickstart-terminal-size-unknown", &[]),
-            "unknown size must surface the localized size-unknown error"
-        );
-    }
-
-    #[cfg(feature = "agent-runtime")]
-    #[test]
-    fn quickstart_selector_ctrl_c_restores_screen_even_when_cursor_restore_fails() {
-        let mut term =
-            SelectorTestTerminal::new(Some((20, 80)), [Ok(QuickstartSelectorKey::Interrupt)]);
-        term.fail_action = Some("show_cursor");
-
-        let outcome = interact_quickstart_selector(
-            &mut term,
-            &["first".to_string(), "second".to_string()],
-            "Choose",
-            (20, 80),
-        )
-        .expect("cleanup failure must not replace Ctrl+C interrupt semantics");
-
-        assert_eq!(outcome, QuickstartSelectorOutcome::Interrupt);
-        let show = term
-            .actions
-            .iter()
-            .position(|action| *action == "show_cursor")
-            .expect("cursor restoration must be attempted");
-        let leave = term
-            .actions
-            .iter()
-            .position(|action| *action == "leave_alternate_screen")
-            .expect("alternate-screen restoration must be attempted");
-        assert!(
-            show < leave,
-            "cleanup attempts should retain their safe order"
-        );
-        assert_eq!(term.actions.last(), Some(&"flush"));
-    }
-
-    #[cfg(feature = "agent-runtime")]
-    #[test]
-    fn quickstart_selector_partial_entry_failure_still_restores_screen() {
-        let mut term = SelectorTestTerminal::new(Some((20, 80)), []);
-        term.fail_action = Some("clear_screen");
-
-        let error = match QuickstartSelectorScreen::enter(&mut term) {
-            Ok(_) => panic!("injected clear failure should abort entry"),
-            Err(error) => error,
-        };
-        assert!(error.to_string().contains("clear_screen"));
-        assert_eq!(
-            term.actions,
-            [
-                "enter_alternate_screen",
-                "clear_screen",
-                "show_cursor",
-                "leave_alternate_screen",
-                "flush",
-            ]
-        );
-    }
-
-    #[cfg(feature = "agent-runtime")]
-    #[test]
-    fn quickstart_selector_read_error_still_restores_screen() {
-        let mut term = SelectorTestTerminal::new(
-            Some((20, 80)),
-            [Err(std::io::Error::other("injected read failure"))],
-        );
-
-        let error =
-            interact_quickstart_selector(&mut term, &["first".to_string()], "Choose", (20, 80))
-                .expect_err("injected read failure should surface");
-        assert!(error.to_string().contains("injected read failure"));
-        assert!(term.actions.contains(&"show_cursor"));
-        assert!(term.actions.contains(&"leave_alternate_screen"));
-        assert_eq!(term.actions.last(), Some(&"flush"));
-    }
-
-    #[cfg(feature = "agent-runtime")]
-    #[test]
-    fn quickstart_selection_maps_by_index_when_fitted_labels_are_identical() {
-        let actions = [
-            QuickstartChecklistAction::Provider,
-            QuickstartChecklistAction::Risk,
-            QuickstartChecklistAction::Memory,
-            QuickstartChecklistAction::Channels,
-            QuickstartChecklistAction::PeerGroups,
-            QuickstartChecklistAction::Agent,
-            QuickstartChecklistAction::Create,
-        ];
-        let choices: Vec<(QuickstartChecklistAction, String)> = actions
-            .iter()
-            .copied()
-            .map(|action| (action, "same row".to_string()))
-            .collect();
-        let fitted: Vec<String> = choices
-            .iter()
-            .map(|(_, label)| fit_quickstart_selector_row(label, 0))
-            .collect();
-        assert!(fitted.windows(2).all(|pair| pair[0] == pair[1]));
-
-        for (index, expected) in actions.into_iter().enumerate() {
-            assert_eq!(quickstart_action_for_pick(&choices, Some(index)), expected);
-        }
-        assert_eq!(
-            quickstart_action_for_pick(&choices, None),
-            QuickstartChecklistAction::Quit
-        );
-        assert_eq!(
-            quickstart_action_for_pick(&choices, Some(choices.len())),
-            QuickstartChecklistAction::Quit
-        );
-    }
-
     #[cfg(all(feature = "agent-runtime", target_os = "linux"))]
     #[test]
     fn kinetic_desktop_exec_reads_appimage_from_entry() {
@@ -14666,54 +11993,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "agent-runtime")]
-    fn cli_quickstart_uses_advertised_local_provider_runtime_default() {
-        let providers = vec![kinetic_runtime::quickstart::QuickstartTypeOption {
-            kind: "lmstudio".into(),
-            display_name: "LM Studio".into(),
-            local: true,
-            default_runtime_profile: Some("local_small".into()),
-        }];
-
-        assert_eq!(
-            quickstart_runtime_profile_for_provider("lmstudio", &providers, "unbounded"),
-            "local_small"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "agent-runtime")]
-    fn cli_quickstart_uses_advertised_remote_provider_runtime_default() {
-        let providers = vec![kinetic_runtime::quickstart::QuickstartTypeOption {
-            kind: "anthropic".into(),
-            display_name: "Anthropic".into(),
-            local: false,
-            default_runtime_profile: Some("unbounded".into()),
-        }];
-
-        assert_eq!(
-            quickstart_runtime_profile_for_provider("anthropic", &providers, "unbounded"),
-            "unbounded"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "agent-runtime")]
-    fn cli_quickstart_uses_state_fallback_when_provider_has_no_override() {
-        let providers = vec![kinetic_runtime::quickstart::QuickstartTypeOption {
-            kind: "ollama".into(),
-            display_name: "Ollama".into(),
-            local: true,
-            default_runtime_profile: None,
-        }];
-
-        assert_eq!(
-            quickstart_runtime_profile_for_provider("ollama", &providers, "unbounded"),
-            "unbounded"
-        );
-    }
-
-    #[test]
     fn cap_line_utf8_safe_no_panic_on_multibyte_boundary() {
         // Neutral multi-byte placeholder text; each CJK char is 3 bytes, so a
         // byte cap can land inside a character. Pre-fix this panicked via the
@@ -14755,28 +12034,6 @@ mod tests {
     #[cfg(feature = "agent-runtime")]
     fn cli_definition_has_no_flag_conflicts() {
         Cli::command().debug_assert();
-    }
-
-    #[test]
-    #[cfg(feature = "agent-runtime")]
-    fn quickstart_inline_auth_uses_auth_mode_field() {
-        let fields =
-            std::collections::HashMap::from([("auth_mode".to_string(), " codex ".to_string())]);
-        assert_eq!(
-            quickstart_inline_auth("openai", "codex", &fields),
-            Some(InlineProviderAuth::Codex)
-        );
-
-        let fields =
-            std::collections::HashMap::from([("auth_mode".to_string(), "setup_token".to_string())]);
-        assert_eq!(
-            quickstart_inline_auth("anthropic", "max", &fields),
-            Some(InlineProviderAuth::AnthropicSetupToken {
-                alias: "max".to_string()
-            })
-        );
-
-        assert_eq!(quickstart_inline_auth("openai", "api", &fields), None);
     }
 
     #[test]

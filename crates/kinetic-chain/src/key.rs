@@ -34,6 +34,22 @@ impl std::fmt::Debug for SoftwareKey {
 }
 
 impl SoftwareKey {
+    /// Load the encrypted device key when the file is already there.
+    ///
+    /// A missing file returns `Ok(None)` and does not create a directory or a key.
+    pub fn open_existing(dir: &Path) -> Result<Option<Self>> {
+        let path = dir.join(DEVICE_KEY_FILE);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        Ok(Some(Self::load(&path, dir)?))
+    }
+
+    /// Address of the stored device key, when the file already exists.
+    pub fn address_if_present(dir: &Path) -> Result<Option<Address>> {
+        Ok(Self::open_existing(dir)?.map(|key| key.address()))
+    }
+
     /// Load the encrypted device key, or create one when the file is absent.
     pub fn load_or_create(dir: &Path) -> Result<Self> {
         fs::create_dir_all(dir).context("failed to create the device key directory")?;
@@ -156,6 +172,16 @@ fn temp_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reading_a_missing_key_does_not_create_one() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("absent");
+        let address = SoftwareKey::address_if_present(&missing).expect("read");
+        assert!(address.is_none());
+        assert!(!missing.exists());
+        assert!(!missing.join(DEVICE_KEY_FILE).exists());
+    }
 
     #[test]
     fn first_boot_creates_an_encrypted_key_and_the_next_boot_keeps_it() {

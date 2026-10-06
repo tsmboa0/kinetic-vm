@@ -42,6 +42,7 @@ crossterm = "0.29"
 dialoguer = { version = "0.12", features = ["fuzzy-select"] }
 directories = "6.0"
 encoding_rs = "0.8"
+flate2 = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 glob = "0.3"
 hex = "0.4"

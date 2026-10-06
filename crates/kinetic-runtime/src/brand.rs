@@ -9,32 +9,67 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const PURPLE: &str = "38;2;168;85;247";
 const WHITE: &str = "97";
+const DIM: &str = "38;2;161;161;170";
 const BAR_WIDTH: usize = 18;
 const BAR_SLIDER: usize = 4;
+
+/// How long an interactive quickstart leaves the mark up before the prompts.
+pub const MARK_HOLD: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// True when the environment allows ANSI color.
 pub fn ansi_color_enabled() -> bool {
     std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
 }
 
-/// Write the mark and a blank line.
+/// Write a blank line, the mark, and a blank line.
 pub fn write_mark<W: Write>(mut out: W, color: bool) -> io::Result<()> {
+    writeln!(out)?;
     for line in render_mark(color) {
         writeln!(out, "{line}")?;
     }
     writeln!(out)
 }
 
-pub fn render_mark(color: bool) -> [String; 5] {
+/// Leave the mark on screen before an interactive prompt takes over.
+pub async fn hold_mark() {
+    tokio::time::sleep(MARK_HOLD).await;
+}
+
+pub fn render_mark(color: bool) -> Vec<String> {
     let kinetic = compose("KINETIC");
     let vm = compose("VM");
-    std::array::from_fn(|row| {
-        format!(
-            "  {}  {}",
-            paint(&kinetic[row], color, PURPLE),
-            paint(&vm[row], color, WHITE)
-        )
-    })
+    let body: Vec<String> = (0..kinetic.len())
+        .map(|row| format!("  {}   {}", kinetic[row], vm[row]))
+        .collect();
+    let tagline = crate::i18n::get_required_cli_string("cli-brand-tagline");
+    let width = body
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(tagline.chars().count());
+    let mut lines: Vec<String> = body
+        .iter()
+        .enumerate()
+        .map(|(row, plain)| {
+            let (left, right) = side_pad(plain.chars().count(), width);
+            format!(
+                "{left}  {}   {}{right}",
+                paint(&kinetic[row], color, PURPLE),
+                paint(&vm[row], color, WHITE),
+            )
+        })
+        .collect();
+    lines.push(paint(&"─".repeat(width), color, DIM));
+    let (left, right) = side_pad(tagline.chars().count(), width);
+    lines.push(format!("{left}{}{right}", paint(&tagline, color, DIM)));
+    lines
+}
+
+fn side_pad(len: usize, width: usize) -> (String, String) {
+    let extra = width.saturating_sub(len);
+    let left = extra / 2;
+    (" ".repeat(left), " ".repeat(extra - left))
 }
 
 /// One frame of the indeterminate bar. `tick` slides the purple block.
@@ -119,14 +154,9 @@ fn paint(text: &str, color: bool, code: &str) -> String {
     }
 }
 
-fn compose(word: &str) -> [String; 5] {
-    let mut rows = std::array::from_fn::<String, 5, _>(|_| String::new());
-    for (index, ch) in word.chars().enumerate() {
-        if index > 0 {
-            for row in &mut rows {
-                row.push(' ');
-            }
-        }
+fn compose(word: &str) -> [String; 6] {
+    let mut rows = std::array::from_fn::<String, 6, _>(|_| String::new());
+    for ch in word.chars() {
         for (row_index, glyph_row) in glyph(ch).into_iter().enumerate() {
             rows[row_index].push_str(glyph_row);
         }
@@ -134,17 +164,66 @@ fn compose(word: &str) -> [String; 5] {
     rows
 }
 
-fn glyph(ch: char) -> [&'static str; 5] {
+fn glyph(ch: char) -> [&'static str; 6] {
     match ch {
-        'K' => ["█   █", "█  █ ", "███  ", "█  █ ", "█   █"],
-        'I' => ["█████", "  █  ", "  █  ", "  █  ", "█████"],
-        'N' => ["█   █", "██  █", "█ █ █", "█  ██", "█   █"],
-        'E' => ["█████", "█    ", "███  ", "█    ", "█████"],
-        'T' => ["█████", "  █  ", "  █  ", "  █  ", "  █  "],
-        'C' => ["█████", "█    ", "█    ", "█    ", "█████"],
-        'V' => ["█   █", "█   █", "█   █", " █ █ ", "  █  "],
-        'M' => ["█   █", "██ ██", "█ █ █", "█   █", "█   █"],
-        _ => ["     ", "     ", "     ", "     ", "     "],
+        'K' => [
+            "██╗  ██╗",
+            "██║ ██╔╝",
+            "█████╔╝ ",
+            "██╔═██╗ ",
+            "██║  ██╗",
+            "╚═╝  ╚═╝",
+        ],
+        'I' => ["██╗", "██║", "██║", "██║", "██║", "╚═╝"],
+        'N' => [
+            "███╗   ██╗",
+            "████╗  ██║",
+            "██╔██╗ ██║",
+            "██║╚██╗██║",
+            "██║ ╚████║",
+            "╚═╝  ╚═══╝",
+        ],
+        'E' => [
+            "███████╗",
+            "██╔════╝",
+            "█████╗  ",
+            "██╔══╝  ",
+            "███████╗",
+            "╚══════╝",
+        ],
+        'T' => [
+            "████████╗ ",
+            "╚══██╔══╝ ",
+            "   ██║    ",
+            "   ██║    ",
+            "   ██║    ",
+            "   ╚═╝    ",
+        ],
+        'C' => [
+            " ██████╗",
+            "██╔════╝",
+            "██║     ",
+            "██║     ",
+            "╚██████╗",
+            " ╚═════╝",
+        ],
+        'V' => [
+            "██╗   ██╗",
+            "██║   ██║",
+            "██║   ██║",
+            "╚██╗ ██╔╝",
+            " ╚████╔╝ ",
+            "  ╚═══╝  ",
+        ],
+        'M' => [
+            "███╗   ███╗",
+            "████╗ ████║",
+            "██╔████╔██║",
+            "██║╚██╔╝██║",
+            "██║ ╚═╝ ██║",
+            "╚═╝     ╚═╝",
+        ],
+        _ => [" ", " ", " ", " ", " ", " "],
     }
 }
 
@@ -153,10 +232,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_glyph_row_is_five_cells() {
+    fn the_written_mark_leaves_a_blank_line_above_the_letters() {
+        let mut buf = Vec::new();
+        write_mark(&mut buf, false).expect("mark");
+        let text = String::from_utf8(buf).expect("utf8");
+        assert!(text.starts_with("\n  "));
+        assert!(!text.starts_with("\n\n"));
+        assert!(text.contains('█'));
+    }
+
+    #[test]
+    fn every_glyph_row_shares_its_letter_width() {
         for ch in ['K', 'I', 'N', 'E', 'T', 'C', 'V', 'M'] {
-            for row in glyph(ch) {
-                assert_eq!(row.chars().count(), 5, "{ch}");
+            let rows = glyph(ch);
+            let width = rows[0].chars().count();
+            for row in rows {
+                assert_eq!(row.chars().count(), width, "{ch}");
             }
         }
     }
@@ -167,11 +258,16 @@ mod tests {
         let width = mark[0].chars().count();
         assert!(width <= 80, "{width}");
         for line in &mark {
-            assert_eq!(line.chars().count(), width);
+            assert_eq!(line.chars().count(), width, "{line}");
             assert!(!line.contains('\u{1b}'));
         }
         assert!(mark[0].contains('█'));
-        assert!(mark[2].contains("███"));
+        assert!(mark.iter().any(|line| line.contains('╚')));
+        assert!(
+            mark.last()
+                .is_some_and(|line| line.contains("physical device"))
+        );
+        assert_eq!(MARK_HOLD, std::time::Duration::from_secs(2));
     }
 
     #[test]

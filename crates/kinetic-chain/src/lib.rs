@@ -51,6 +51,20 @@ impl DeviceChain {
         Ok(Self { key, client })
     }
 
+    /// Connect with the key that is already stored. A missing file is an error
+    /// and this does not create one.
+    pub async fn open_existing(config: &ChainConfig, key_dir: &Path) -> Result<Self> {
+        if !config.enabled {
+            anyhow::bail!("the Monad chain client is disabled in config");
+        }
+        ensure_supported_network(config)?;
+        let Some(key) = SoftwareKey::open_existing(key_dir)? else {
+            anyhow::bail!("the device key has not been created");
+        };
+        let client = ChainClient::connect(config).await?;
+        Ok(Self { key, client })
+    }
+
     pub async fn sign_claim(&self, owner: Address, deadline: U256) -> Result<ClaimTicket> {
         self.client.sign_claim(&self.key, owner, deadline).await
     }
