@@ -652,13 +652,10 @@ pub struct ClaimPageQuery<'a> {
 
 pub fn claim_page_url(query: &ClaimPageQuery<'_>) -> Result<String> {
     ensure_public_claim_url(query.claim_url)?;
-    let mut url = query.claim_url.trim().to_string();
-    if let Some(hash) = url.find('#') {
-        url.truncate(hash);
+    if let Some(short) = compact_claim_url(query) {
+        return Ok(short);
     }
-    while url.ends_with('?') || url.ends_with('&') {
-        url.pop();
-    }
+    let mut url = claim_base(query.claim_url);
     let mut first = !url.contains('?');
     let signature = format!("0x{}", hex::encode(query.signature));
     let deadline = query.deadline.to_string();
@@ -685,6 +682,141 @@ pub fn claim_page_url(query: &ClaimPageQuery<'_>) -> Result<String> {
         url.push_str(&query_component(&value));
     }
     Ok(url)
+}
+
+/// Telegram's copy button holds 256 characters. The long query string does
+/// not, so a published testnet ticket is packed into `?t=`.
+const COPY_LINK_LIMIT: usize = 256;
+
+fn compact_claim_url(query: &ClaimPageQuery<'_>) -> Option<String> {
+    let payload = compact_payload(query)?;
+    let mut token = String::new();
+    encode_base64url(&payload, &mut token);
+    let mut url = claim_base(query.claim_url);
+    url.push(if url.contains('?') { '&' } else { '?' });
+    url.push_str("t=");
+    url.push_str(&token);
+    (url.chars().count() <= COPY_LINK_LIMIT).then_some(url)
+}
+
+fn compact_payload(query: &ClaimPageQuery<'_>) -> Option<Vec<u8>> {
+    if !published_testnet(query) {
+        return None;
+    }
+    let deadline = u64::try_from(query.deadline).ok()?;
+    let chain_id = u32::try_from(query.chain_id).ok()?;
+    let mut buf = Vec::with_capacity(160);
+    buf.push(1);
+    buf.extend_from_slice(&chain_id.to_be_bytes());
+    buf.extend_from_slice(&deadline.to_be_bytes());
+    buf.extend_from_slice(query.device.as_slice());
+    buf.extend_from_slice(query.owner.as_slice());
+    push_counted(&mut buf, query.signature)?;
+    push_counted(&mut buf, query.per_tx_cap.as_bytes())?;
+    push_counted(&mut buf, query.daily_cap.as_bytes())?;
+    push_counted(&mut buf, query.device_name.as_bytes())?;
+    Some(buf)
+}
+
+fn published_testnet(query: &ClaimPageQuery<'_>) -> bool {
+    // contracts/deployments/10143.json. A custom deployment keeps the long URL.
+    query.chain_id == 10_143
+        && same_address(query.registry, "0xBf2E634F8DA4C8C02979C1A2CcAD113eFb259132")
+        && same_address(query.vault, "0xD01eEa46c7E054f98dde0ed58DB5Da73ED4D22fD")
+        && same_address(query.attestor, "0xAb523187C7687743B29daf3468891E339CbF8f82")
+}
+
+fn same_address(left: &str, right: &str) -> bool {
+    left.trim().eq_ignore_ascii_case(right)
+}
+
+fn push_counted(buf: &mut Vec<u8>, bytes: &[u8]) -> Option<()> {
+    let len = u8::try_from(bytes.len()).ok()?;
+    buf.push(len);
+    buf.extend_from_slice(bytes);
+    Some(())
+}
+
+fn encode_base64url(data: &[u8], out: &mut String) {
+    const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut index = 0;
+    while index + 3 <= data.len() {
+        let n =
+            ((data[index] as u32) << 16) | ((data[index + 1] as u32) << 8) | data[index + 2] as u32;
+        out.push(ALPHA[((n >> 18) & 63) as usize] as char);
+        out.push(ALPHA[((n >> 12) & 63) as usize] as char);
+        out.push(ALPHA[((n >> 6) & 63) as usize] as char);
+        out.push(ALPHA[(n & 63) as usize] as char);
+        index += 3;
+    }
+    let rest = &data[index..];
+    if rest.len() == 1 {
+        let n = (rest[0] as u32) << 16;
+        out.push(ALPHA[((n >> 18) & 63) as usize] as char);
+        out.push(ALPHA[((n >> 12) & 63) as usize] as char);
+    } else if rest.len() == 2 {
+        let n = ((rest[0] as u32) << 16) | ((rest[1] as u32) << 8);
+        out.push(ALPHA[((n >> 18) & 63) as usize] as char);
+        out.push(ALPHA[((n >> 12) & 63) as usize] as char);
+        out.push(ALPHA[((n >> 6) & 63) as usize] as char);
+    }
+}
+
+#[cfg(test)]
+fn decode_base64url(token: &str) -> Option<Vec<u8>> {
+    fn val(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'-' => Some(62),
+            b'_' => Some(63),
+            _ => None,
+        }
+    }
+    let raw = token.as_bytes();
+    if raw.is_empty() || raw.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index + 4 <= raw.len() {
+        let n = ((val(raw[index])? as u32) << 18)
+            | ((val(raw[index + 1])? as u32) << 12)
+            | ((val(raw[index + 2])? as u32) << 6)
+            | val(raw[index + 3])? as u32;
+        out.push((n >> 16) as u8);
+        out.push((n >> 8) as u8);
+        out.push(n as u8);
+        index += 4;
+    }
+    match raw.len() - index {
+        0 => {}
+        2 => {
+            let n = ((val(raw[index])? as u32) << 18) | ((val(raw[index + 1])? as u32) << 12);
+            out.push((n >> 16) as u8);
+        }
+        3 => {
+            let n = ((val(raw[index])? as u32) << 18)
+                | ((val(raw[index + 1])? as u32) << 12)
+                | ((val(raw[index + 2])? as u32) << 6);
+            out.push((n >> 16) as u8);
+            out.push((n >> 8) as u8);
+        }
+        _ => return None,
+    }
+    Some(out)
+}
+
+fn claim_base(claim_url: &str) -> String {
+    let mut url = claim_url.trim().to_string();
+    if let Some(hash) = url.find('#') {
+        url.truncate(hash);
+    }
+    while url.ends_with('?') || url.ends_with('&') {
+        url.pop();
+    }
+    url
 }
 
 fn claim_url_host(claim_url: &str) -> Option<&str> {
@@ -781,7 +913,8 @@ mod tests {
 
     #[test]
     fn the_claim_page_carries_the_ticket_and_the_deployment() {
-        let config = ChainConfig::default();
+        let mut config = ChainConfig::default();
+        config.registry = "0x0000000000000000000000000000000000000001".into();
         let device: Address = "0x00000000000000000000000000000000000000a1"
             .parse()
             .expect("device");
@@ -816,6 +949,56 @@ mod tests {
         assert!(url.contains(&format!("registry={}", config.registry)));
         assert!(url.contains(&format!("attestor={}", config.attestor)));
         assert!(!url.contains("never-the-key"));
+        assert!(!url.contains("?t="));
+    }
+
+    #[test]
+    fn a_published_claim_link_is_short_enough_to_copy() {
+        let config = ChainConfig::default();
+        let device: Address = "0x00000000000000000000000000000000000000a1"
+            .parse()
+            .expect("device");
+        let owner: Address = "0x00000000000000000000000000000000000000b2"
+            .parse()
+            .expect("owner");
+        let signature = [0x11u8; 65];
+        let url = claim_page_url(&ClaimPageQuery {
+            claim_url: &config.claim_url,
+            device,
+            owner,
+            signature: &signature,
+            deadline: U256::from(1_900_000_000u64),
+            per_tx_cap: "5",
+            daily_cap: "50",
+            chain_id: config.chain_id,
+            device_name: "Newton Vending Machine",
+            registry: &config.registry,
+            vault: &config.vault,
+            attestor: &config.attestor,
+            rpc_url: &config.rpc_url,
+        })
+        .expect("claim url");
+        let token = url
+            .strip_prefix("https://claim.kineticvm.xyz?t=")
+            .expect("short token");
+        assert!(url.chars().count() <= 256);
+        let bytes = decode_base64url(token).expect("token");
+        assert_eq!(bytes[0], 1);
+        assert_eq!(
+            u32::from_be_bytes(bytes[1..5].try_into().expect("chain")),
+            10_143
+        );
+        assert_eq!(
+            u64::from_be_bytes(bytes[5..13].try_into().expect("deadline")),
+            1_900_000_000
+        );
+        assert_eq!(&bytes[13..33], device.as_slice());
+        assert_eq!(&bytes[33..53], owner.as_slice());
+        assert_eq!(bytes[53], 65);
+        assert_eq!(&bytes[54..119], &signature);
+        assert_eq!(&bytes[120..121], b"5");
+        assert_eq!(&bytes[122..124], b"50");
+        assert_eq!(&bytes[125..], b"Newton Vending Machine");
     }
 
     #[test]

@@ -27,16 +27,30 @@ pub enum Advance {
         text: String,
         url: String,
     },
-    /// The mint landed after the link was sent.
-    Claimed { chat_id: String, text: String },
-    /// Already claimed, or there is nothing to watch. Stop.
+    /// The mint just landed. Tell the chat, then show the device is ready.
+    Claimed(ClaimFacts),
+    /// The device was already claimed when this process started.
+    Ready(ClaimFacts),
+    /// Nothing to watch. Stop.
     Settled,
+}
+
+/// The claimed device, for the terminal and the Telegram summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimFacts {
+    pub chat_id: String,
+    pub name: String,
+    pub agent_id: String,
+    pub device: String,
+    pub owner: String,
+    pub vault: String,
 }
 
 /// One tick of the claim watcher.
 ///
 /// `link_sent` is true after the claim URL was delivered. A device that is
-/// already claimed when the process starts settles without nagging the chat.
+/// already claimed when the process starts prints the ready banner without
+/// sending another Telegram note.
 pub async fn advance(config: &Config, alias: &str, link_sent: bool) -> Advance {
     if !config.chain.enabled {
         return Advance::Settled;
@@ -52,17 +66,24 @@ pub async fn advance(config: &Config, alias: &str, link_sent: bool) -> Advance {
     {
         match Box::pin(DeviceChain::open_existing(&config.chain, dir)).await {
             Ok(chain) => match Box::pin(chain.identity()).await {
-                Ok(BootReport::Claimed { .. }) => {
+                Ok(BootReport::Claimed {
+                    device,
+                    agent_id,
+                    owner,
+                    ..
+                }) => {
+                    let facts = ClaimFacts {
+                        chat_id: chat_id.unwrap_or_default(),
+                        name: device_label(config),
+                        agent_id: agent_id.to_string(),
+                        device: device.to_string(),
+                        owner: owner.to_string(),
+                        vault: config.chain.vault.clone(),
+                    };
                     return if link_sent {
-                        match chat_id {
-                            Some(chat_id) => Advance::Claimed {
-                                chat_id,
-                                text: claimed_message(&device_label(config)),
-                            },
-                            None => Advance::Settled,
-                        }
+                        Advance::Claimed(facts)
                     } else {
-                        Advance::Settled
+                        Advance::Ready(facts)
                     };
                 }
                 Ok(BootReport::Unclaimed { .. }) => {}
@@ -131,14 +152,110 @@ pub fn device_label(config: &Config) -> String {
     }
 }
 
-fn offer_message(name: &str) -> String {
-    let name = escape_html(name);
-    get_required_cli_string_with_args("cli-claim-watch-offer", &[("name", name.as_str())])
+/// Telegram copies at most this many characters from a button.
+const COPY_TEXT_LIMIT: usize = 256;
+
+/// The claim note and the buttons under it.
+pub struct ClaimNote {
+    pub text: String,
+    pub markup: serde_json::Value,
 }
 
-fn claimed_message(name: &str) -> String {
+fn offer_message(name: &str) -> String {
     let name = escape_html(name);
-    get_required_cli_string_with_args("cli-claim-watch-claimed", &[("name", name.as_str())])
+    let title = get_required_cli_string_with_args(
+        "cli-claim-watch-offer-title",
+        &[("name", name.as_str())],
+    );
+    let body = get_required_cli_string("cli-claim-watch-offer-body");
+    format!("<b>{title}</b>\n\n{body}")
+}
+
+pub fn offer_delivery(name: &str, page: &str) -> ClaimNote {
+    let open = get_required_cli_string("cli-claim-watch-button");
+    let mut rows = vec![vec![serde_json::json!({ "text": open, "url": page })]];
+    let mut text = offer_message(name);
+    if page.chars().count() <= COPY_TEXT_LIMIT {
+        let copy = get_required_cli_string("cli-claim-watch-copy-link");
+        rows.push(vec![
+            serde_json::json!({ "text": copy, "copy_text": { "text": page } }),
+        ]);
+    } else {
+        let hint = get_required_cli_string("cli-claim-watch-copy-hint");
+        let page = escape_html(page);
+        text = format!("{text}\n\n{hint}\n<code>{page}</code>");
+    }
+    ClaimNote {
+        text,
+        markup: serde_json::json!({ "inline_keyboard": rows }),
+    }
+}
+
+pub fn funding_markup(facts: &ClaimFacts) -> serde_json::Value {
+    let vault = get_required_cli_string("cli-claim-watch-copy-vault");
+    let key = get_required_cli_string("cli-claim-watch-copy-key");
+    serde_json::json!({
+        "inline_keyboard": [
+            [{ "text": vault, "copy_text": { "text": facts.vault } }],
+            [{ "text": key, "copy_text": { "text": facts.device } }]
+        ]
+    })
+}
+
+/// Print the claimed device, then the line that means it is waiting for work.
+pub fn print_ready(facts: &ClaimFacts) {
+    println!(
+        "{}",
+        get_required_cli_string_with_args(
+            "cli-daemon-claim-done",
+            &[("name", facts.name.as_str())]
+        )
+    );
+    println!(
+        "   {}",
+        get_required_cli_string_with_args(
+            "cli-daemon-agent-id",
+            &[("agent", facts.agent_id.as_str())]
+        )
+    );
+    println!(
+        "   {}",
+        get_required_cli_string_with_args(
+            "cli-daemon-agent-key",
+            &[("key", facts.device.as_str())]
+        )
+    );
+    println!(
+        "   {}",
+        get_required_cli_string_with_args("cli-daemon-vault", &[("vault", facts.vault.as_str())])
+    );
+    println!();
+    println!("{}", get_required_cli_string("cli-daemon-ready-title"));
+    println!("   {}", get_required_cli_string("cli-daemon-listening"));
+}
+
+pub fn claimed_html(facts: &ClaimFacts) -> String {
+    let name = escape_html(&facts.name);
+    let title = get_required_cli_string_with_args(
+        "cli-claim-watch-claimed-title",
+        &[("name", name.as_str())],
+    );
+    let summary = get_required_cli_string("cli-claim-watch-claimed-summary");
+    let owner = escape_html(&facts.owner);
+    let owner_label = get_required_cli_string("cli-claim-watch-owner");
+    let owner_line = format!("{owner_label} <code>{owner}</code>");
+    let agent = get_required_cli_string_with_args(
+        "cli-daemon-agent-id",
+        &[("agent", facts.agent_id.as_str())],
+    );
+    let next = get_required_cli_string("cli-claim-watch-next");
+    let fund_vault = get_required_cli_string("cli-claim-watch-fund-vault");
+    let fund_gas = get_required_cli_string("cli-claim-watch-fund-gas");
+    let device = escape_html(&facts.device);
+    let vault = escape_html(&facts.vault);
+    format!(
+        "✅ <b>{title}</b>\n\n{summary}\n{agent}\n{owner_line}\n\n<b>{next}</b>\n\n{fund_vault}\n<code>{vault}</code>\n\n{fund_gas}\n<code>{device}</code>"
+    )
 }
 
 fn escape_html(value: &str) -> String {
@@ -154,7 +271,10 @@ mod tests {
     use kinetic_config::providers::ChannelRef;
     use kinetic_config::schema::Config;
 
-    use super::{Advance, advance, bound_chat, offer_message};
+    use super::{
+        Advance, ClaimFacts, advance, bound_chat, claimed_html, funding_markup, offer_delivery,
+        offer_message,
+    };
 
     fn config() -> (tempfile::TempDir, Config) {
         let dir = tempfile::tempdir().expect("temp");
@@ -216,8 +336,73 @@ mod tests {
     #[test]
     fn the_claim_offer_is_html_with_paragraphs() {
         let text = offer_message("Vending <lab>");
-        assert!(text.contains("<b>Claim Vending &lt;lab&gt;</b>"));
+        assert!(text.starts_with("<b>Claim Vending &lt;lab&gt;</b>"));
+        assert!(text.contains("Tap the button to claim this device"));
         assert!(text.contains("\n\n"));
-        assert!(!text.contains("http"));
+        assert!(!text.contains("{cli-"));
+    }
+
+    #[test]
+    fn the_claimed_note_names_the_vault_and_the_agent_key() {
+        let text = claimed_html(&ClaimFacts {
+            chat_id: "42".to_string(),
+            name: "Newton".to_string(),
+            agent_id: "7".to_string(),
+            device: "0x1111111111111111111111111111111111111111".to_string(),
+            owner: "0x2222222222222222222222222222222222222222".to_string(),
+            vault: "0x3333333333333333333333333333333333333333".to_string(),
+        });
+        assert!(text.contains("Newton is claimed"));
+        assert!(text.contains("<b>Next step</b>"));
+        assert!(text.contains("<code>0x3333333333333333333333333333333333333333</code>"));
+        assert!(text.contains("<code>0x1111111111111111111111111111111111111111</code>"));
+        assert!(text.contains("pay gas"));
+        assert!(text.contains("<code>0x2222222222222222222222222222222222222222</code>"));
+        assert!(!text.contains("{cli-"));
+    }
+
+    #[test]
+    fn the_claim_note_has_a_button_that_copies_the_link() {
+        let page = "https://claim.kineticvm.xyz?t=abc";
+        let note = offer_delivery("Vending <lab>", page);
+        let rows = note.markup["inline_keyboard"].as_array().expect("rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0]["url"], page);
+        assert_eq!(rows[1][0]["text"], "[ Click to copy link ]");
+        assert_eq!(rows[1][0]["copy_text"]["text"], page);
+        assert!(!note.text.contains("http"));
+    }
+
+    #[test]
+    fn a_long_claim_link_is_copied_from_the_message() {
+        let page = format!("https://claim.kineticvm.xyz?x={}", "a".repeat(300));
+        let note = offer_delivery("Vending", &page);
+        assert!(note.text.contains("Tap the link to copy it"));
+        assert!(note.text.contains("<code>https://claim.kineticvm.xyz?x="));
+        let rows = note.markup["inline_keyboard"].as_array().expect("rows");
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn the_funding_buttons_copy_the_vault_and_the_agent_key() {
+        let markup = funding_markup(&ClaimFacts {
+            chat_id: "42".to_string(),
+            name: "Newton".to_string(),
+            agent_id: "7".to_string(),
+            device: "0x1111111111111111111111111111111111111111".to_string(),
+            owner: "0x2222222222222222222222222222222222222222".to_string(),
+            vault: "0x3333333333333333333333333333333333333333".to_string(),
+        });
+        let rows = markup["inline_keyboard"].as_array().expect("rows");
+        assert_eq!(rows[0][0]["text"], "[ Click to copy vault ]");
+        assert_eq!(
+            rows[0][0]["copy_text"]["text"],
+            "0x3333333333333333333333333333333333333333"
+        );
+        assert_eq!(rows[1][0]["text"], "[ Click to copy agent key ]");
+        assert_eq!(
+            rows[1][0]["copy_text"]["text"],
+            "0x1111111111111111111111111111111111111111"
+        );
     }
 }

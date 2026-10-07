@@ -7042,22 +7042,13 @@ async fn watch_claim(
             kinetic_runtime::claim_watch::Advance::Wait => {}
             kinetic_runtime::claim_watch::Advance::Deliver {
                 chat_id,
-                text,
+                text: _,
                 url: page,
             } => {
-                let button =
-                    kinetic_runtime::i18n::get_required_cli_string("cli-claim-watch-button");
-                if send_claim_text(
-                    &client,
-                    &url,
-                    &chat_id,
-                    &text,
-                    Some((button.as_str(), page.as_str())),
-                )
-                .await
-                {
+                let name = kinetic_runtime::claim_watch::device_label(&config);
+                let note = kinetic_runtime::claim_watch::offer_delivery(&name, &page);
+                if send_claim_text(&client, &url, &chat_id, &note.text, Some(note.markup)).await {
                     link_sent = true;
-                    let name = kinetic_runtime::claim_watch::device_label(&config);
                     println!(
                         "{}",
                         kinetic_runtime::i18n::get_required_cli_string_with_args(
@@ -7072,16 +7063,9 @@ async fn watch_claim(
                     );
                 }
             }
-            kinetic_runtime::claim_watch::Advance::Claimed { chat_id, text } => {
+            kinetic_runtime::claim_watch::Advance::Claimed(facts) => {
                 if !claim_logged {
-                    let name = kinetic_runtime::claim_watch::device_label(&config);
-                    println!(
-                        "{}",
-                        kinetic_runtime::i18n::get_required_cli_string_with_args(
-                            "cli-daemon-claim-done",
-                            &[("name", name.as_str())]
-                        )
-                    );
+                    kinetic_runtime::claim_watch::print_ready(&facts);
                     ::kinetic_log::record!(
                         INFO,
                         ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note),
@@ -7089,9 +7073,18 @@ async fn watch_claim(
                     );
                     claim_logged = true;
                 }
-                if send_claim_text(&client, &url, &chat_id, &text, None).await {
+                if facts.chat_id.is_empty() {
                     break;
                 }
+                let text = kinetic_runtime::claim_watch::claimed_html(&facts);
+                let markup = kinetic_runtime::claim_watch::funding_markup(&facts);
+                if send_claim_text(&client, &url, &facts.chat_id, &text, Some(markup)).await {
+                    break;
+                }
+            }
+            kinetic_runtime::claim_watch::Advance::Ready(facts) => {
+                kinetic_runtime::claim_watch::print_ready(&facts);
+                break;
             }
             kinetic_runtime::claim_watch::Advance::Settled => break,
         }
@@ -7104,17 +7097,15 @@ async fn send_claim_text(
     url: &str,
     chat_id: &str,
     text: &str,
-    button: Option<(&str, &str)>,
+    markup: Option<serde_json::Value>,
 ) -> bool {
     let mut body = serde_json::json!({
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "HTML",
     });
-    if let Some((label, page)) = button {
-        body["reply_markup"] = serde_json::json!({
-            "inline_keyboard": [[{ "text": label, "url": page }]]
-        });
+    if let Some(markup) = markup {
+        body["reply_markup"] = markup;
     }
     if post_claim(client, url, &body).await {
         return true;

@@ -1384,14 +1384,17 @@ pub async fn run_with_authority(
                     if let Some(readiness) = readiness {
                         if stderr_is_interactive_foreground() {
                             crate::brand::stage_beat().await;
-                            let mut stderr = std::io::stderr().lock();
-                            let _ = echo_daemon_ready_title(&mut stderr);
-                            let _ = stderr.flush();
-                            drop(stderr);
+                            {
+                                let mut stderr = std::io::stderr().lock();
+                                let _ = echo_daemon_ready_title(&mut stderr);
+                                let _ = stderr.flush();
+                            }
                             crate::brand::stage_beat().await;
-                            let mut stderr = std::io::stderr().lock();
-                            let _ = echo_daemon_ready_detail(&config, readiness, &mut stderr);
-                            let _ = stderr.flush();
+                            {
+                                let mut stderr = std::io::stderr().lock();
+                                let _ = echo_daemon_ready_detail(&config, readiness, &mut stderr);
+                                let _ = stderr.flush();
+                            }
                         } else {
                             let mut stderr = std::io::stderr().lock();
                             let _ = echo_daemon_ready_to_terminal(&config, readiness, &mut stderr);

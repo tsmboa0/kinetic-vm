@@ -1,0 +1,414 @@
+@import "tailwindcss";
+
+:root {
+  --background: #12081c;
+  --foreground: #f4f0ff;
+  --violet: #a855f7;
+  --violet-deep: #6d28d9;
+  --violet-hot: #e9d5ff;
+  --dim: #d4cce0;
+  --line: rgba(233, 213, 255, 0.16);
+  --raise: rgba(28, 16, 43, 0.72);
+  --paper: #f4f0ff;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-violet: var(--violet);
+  --color-violet-deep: var(--violet-deep);
+  --color-violet-hot: var(--violet-hot);
+  --color-dim: var(--dim);
+  --color-line: var(--line);
+  --color-raise: var(--raise);
+  --color-paper: var(--paper);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), sans-serif;
+}
+
+.atmosphere {
+  position: fixed;
+  inset: 0;
+  z-index: -10;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.sky {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -10%, rgba(147, 51, 234, 0.55), transparent 55%),
+    radial-gradient(ellipse 45% 40% at 12% 90%, rgba(88, 28, 135, 0.5), transparent 60%),
+    radial-gradient(ellipse 40% 35% at 92% 70%, rgba(168, 85, 247, 0.28), transparent 62%),
+    var(--background);
+}
+
+.fog {
+  position: absolute;
+  border-radius: 999px;
+  filter: blur(70px);
+  opacity: 0.85;
+}
+
+.fog-a {
+  top: -12%;
+  left: -8%;
+  width: 55vw;
+  height: 42vh;
+  background: radial-gradient(circle, rgba(168, 85, 247, 0.55), transparent 68%);
+  animation: drift-a 22s ease-in-out infinite;
+}
+
+.fog-b {
+  right: -12%;
+  bottom: -8%;
+  width: 48vw;
+  height: 46vh;
+  background: radial-gradient(circle, rgba(109, 40, 217, 0.5), transparent 70%);
+  animation: drift-b 28s ease-in-out infinite;
+}
+
+.fog-c {
+  top: 30%;
+  left: 28%;
+  width: 42vw;
+  height: 36vh;
+  background: radial-gradient(circle, rgba(233, 213, 255, 0.16), transparent 70%);
+  animation: drift-c 18s ease-in-out infinite;
+}
+
+.storm,
+.flash,
+.vignette {
+  position: absolute;
+  inset: 0;
+}
+
+.flash {
+  opacity: 0;
+  background: radial-gradient(ellipse at 50% 18%, rgba(244, 240, 255, 0.72), rgba(168, 85, 247, 0.28) 36%, transparent 68%);
+  transition: opacity 420ms ease;
+}
+
+.vignette {
+  background: radial-gradient(ellipse at center, transparent 28%, rgba(18, 8, 28, 0.55) 78%, rgba(18, 8, 28, 0.82) 100%);
+}
+
+.wordmark {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: clamp(10px, 2vw, 22px);
+  line-height: 1.08;
+  white-space: pre;
+  font-variant-ligatures: none;
+  scrollbar-width: none;
+}
+
+.wordmark::-webkit-scrollbar {
+  display: none;
+}
+
+.caret {
+  animation: blink 1s steps(1) infinite;
+}
+
+.btn-white,
+.btn-ghost {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 1.25rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.btn-white {
+  background: var(--paper);
+  color: var(--violet-deep);
+  transition: background-color 160ms ease;
+}
+
+.btn-white:hover {
+  background: #ffffff;
+}
+
+.btn-ghost {
+  border: 1px solid rgba(244, 240, 255, 0.28);
+  color: var(--foreground);
+  background: transparent;
+  transition: border-color 160ms ease, background-color 160ms ease;
+}
+
+.btn-ghost:hover {
+  border-color: rgba(244, 240, 255, 0.7);
+  background: rgba(244, 240, 255, 0.06);
+}
+
+.btn-white:focus-visible,
+.btn-ghost:focus-visible,
+.nav-link:focus-visible {
+  outline: 2px solid var(--violet-hot);
+  outline-offset: 4px;
+}
+
+.btn-white:disabled {
+  opacity: 0.55;
+}
+
+.btn-success {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 1.25rem;
+  border-radius: 999px;
+  border: 1px solid #ecfdf5;
+  background: linear-gradient(180deg, #f0fdf4 0%, #bbf7d0 100%);
+  color: #14532d;
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.9),
+    0 5px 0 #166534,
+    0 10px 16px rgba(22, 101, 52, 0.35);
+}
+
+.btn-success:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.btn-success:focus-visible {
+  outline: 2px solid #4ade80;
+  outline-offset: 4px;
+}
+
+.claim-done {
+  border-color: #4ade80;
+  box-shadow: 0 0 0 1px rgba(74, 222, 128, 0.45);
+}
+
+.claim-failed {
+  border-color: #fb7185;
+}
+
+.claim-alert {
+  border: 1px solid rgba(251, 113, 133, 0.7);
+  background: rgba(136, 19, 55, 0.35);
+  color: #ffe4e6;
+  padding: 0.75rem 0.9rem;
+}
+
+.text-success {
+  color: #86efac;
+}
+
+.btn-connect {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 1.35rem;
+  border-radius: 999px;
+  border: 1px solid #ffffff;
+  background: linear-gradient(180deg, #ffffff 0%, #f7f2ff 48%, #e9d5ff 100%);
+  color: var(--violet-deep);
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 -2px 0 #d8b4fe,
+    0 5px 0 #5b21b6,
+    0 10px 16px rgba(91, 33, 182, 0.4);
+  transform: translateY(0);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+.btn-connect:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    inset 0 -2px 0 #d8b4fe,
+    0 7px 0 #5b21b6,
+    0 14px 20px rgba(91, 33, 182, 0.45);
+}
+
+.btn-connect:active {
+  transform: translateY(4px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.8),
+    inset 0 -1px 0 #d8b4fe,
+    0 1px 0 #5b21b6,
+    0 3px 8px rgba(91, 33, 182, 0.3);
+}
+
+.btn-connect:focus-visible {
+  outline: 2px solid var(--violet-hot);
+  outline-offset: 4px;
+}
+
+.btn-connect:disabled {
+  opacity: 0.6;
+  transform: none;
+}
+
+.wallet-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 10px);
+  z-index: 20;
+  width: 16rem;
+  max-width: calc(100vw - 2.5rem);
+  border: 1px solid var(--line);
+  background: var(--raise);
+  padding: 0.35rem;
+  backdrop-filter: blur(12px);
+  transform-origin: top right;
+  animation: wallet-in 140ms ease;
+}
+
+.wallet-item {
+  display: flex;
+  min-height: 44px;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0 0.75rem;
+  text-align: left;
+  font-size: 0.875rem;
+  color: inherit;
+}
+
+.wallet-name {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.wallet-logo {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 6px;
+  object-fit: contain;
+}
+
+.wallet-logo-empty {
+  border: 1px solid var(--line);
+}
+
+.wallet-item:hover {
+  background: rgba(244, 240, 255, 0.06);
+}
+
+.wallet-item:focus-visible {
+  outline: 2px solid var(--violet-hot);
+  outline-offset: -2px;
+}
+
+.wallet-item:disabled {
+  opacity: 0.55;
+}
+
+.brand {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  font-size: 0.875rem;
+  letter-spacing: 0.28em;
+  color: var(--violet-hot);
+}
+
+.brand:focus-visible {
+  outline: 2px solid var(--violet-hot);
+  outline-offset: 4px;
+}
+
+.nav-link {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  padding: 0 0.75rem;
+  color: var(--dim);
+  font-size: 0.875rem;
+}
+
+.nav-link:hover {
+  color: var(--foreground);
+}
+
+@keyframes drift-a {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(12%, 10%, 0) scale(1.18);
+  }
+}
+
+@keyframes drift-b {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(-14%, -8%, 0) scale(1.12);
+  }
+}
+
+@keyframes drift-c {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(8%, -12%, 0) scale(1.2);
+  }
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@keyframes wallet-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fog,
+  .caret,
+  .flash,
+  .btn-connect,
+  .wallet-menu {
+    animation: none;
+    transition: none;
+  }
+
+  .btn-connect:hover,
+  .btn-connect:active {
+    transform: none;
+  }
+}
