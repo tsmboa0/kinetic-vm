@@ -1,29 +1,17 @@
 //! Telegram commands for the onchain owner.
 //!
-//! The chat id is a local fact: the chain does not know Telegram. `owner.link`
-//! records which chat the owner personal-signed. Every command still re-reads
-//! `ownerOf` and stops if that address no longer matches.
+//! The bound chat is the owner chat. Every command still re-reads `ownerOf`.
+//! Spending changes still need an owner-wallet signature.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use kinetic_chain::{
-    Address, B256, BootReport, DeviceChain, U256, format_mon, owner_link_message, parse_mon,
-    recover_personal_signer,
-};
+use kinetic_chain::{Address, B256, BootReport, DeviceChain, U256, format_mon, parse_mon};
 use kinetic_config::schema::Config;
 
 use crate::i18n::{get_required_cli_string, get_required_cli_string_with_args};
 
-const LINK_FILE: &str = "owner.link";
 const SIGNATURE_TTL_SECS: u64 = 60 * 60;
 const TESTNET_CHAIN_ID: u64 = 10143;
-
-struct OwnerLink {
-    telegram_id: String,
-    owner: Address,
-}
 
 enum CapChange {
     Same,
@@ -33,7 +21,7 @@ enum CapChange {
 }
 
 /// Reply for one Telegram owner command. Chain work runs only when `[chain]`
-/// is enabled, and only after the local link check except for `/link`.
+/// is enabled and the sender is the paired Telegram chat.
 pub async fn handle(config: &Config, telegram_id: &str, line: &str) -> String {
     if !config.chain.enabled {
         return text("cli-chain-disabled");
@@ -48,75 +36,40 @@ pub async fn handle(config: &Config, telegram_id: &str, line: &str) -> String {
         return chain_err();
     };
     match name.as_str() {
-        "link" => link_command(config, dir, telegram_id, &args).await,
+        "link" => text("cli-owner-link-retired"),
         "status" | "pause" | "resume" | "limits" | "approve" => {
-            let Some(link) = read_link(dir) else {
-                return text("cli-owner-not-linked");
-            };
-            if link.telegram_id != telegram_id {
-                return text("cli-owner-not-you");
+            if !bound_owner_chat(config, telegram_id) {
+                return text("cli-owner-not-bound");
             }
-            owned_command(config, dir, &link, &name, &args).await
+            owned_command(config, dir, &name, &args).await
         }
         _ => text("cli-owner-usage-link"),
     }
 }
 
-async fn link_command(config: &Config, dir: &Path, telegram_id: &str, args: &[String]) -> String {
-    match args {
-        [] => {}
-        [signature] if looks_like_signature(signature) => {
-            return finish_link(config, dir, telegram_id, signature).await;
+fn bound_owner_chat(config: &Config, telegram_id: &str) -> bool {
+    config.peer_groups.values().any(|group| {
+        let channel = group.channel.as_str();
+        let telegram = channel == "telegram" || channel.starts_with("telegram.");
+        if !telegram {
+            return false;
         }
-        _ => return text("cli-owner-usage-link"),
-    }
-    let Some(claimed) = open_claimed(config, dir).await else {
-        return claimed_or_err(config, dir).await;
-    };
-    let message = owner_link_message(claimed.chain_id, claimed.agent_id, telegram_id);
-    text_with("cli-owner-link-prompt", &[("message", &message)])
+        let ignored: Vec<String> = group
+            .ignore
+            .iter()
+            .map(|peer| peer.as_str().trim().trim_start_matches('@').to_string())
+            .collect();
+        group.external_peers.iter().any(|peer| {
+            let id = peer.as_str().trim().trim_start_matches('@');
+            id == telegram_id && !ignored.iter().any(|item| item == id)
+        })
+    })
 }
 
-async fn finish_link(config: &Config, dir: &Path, telegram_id: &str, signature: &str) -> String {
+async fn owned_command(config: &Config, dir: &Path, name: &str, args: &[String]) -> String {
     let Some(claimed) = open_claimed(config, dir).await else {
         return claimed_or_err(config, dir).await;
     };
-    let message = owner_link_message(claimed.chain_id, claimed.agent_id, telegram_id);
-    let recovered = match recover_personal_signer(&message, signature) {
-        Ok(address) => address,
-        Err(_) => return text("cli-owner-bad-signature"),
-    };
-    if recovered != claimed.owner {
-        return text("cli-owner-bad-signature");
-    }
-    let link = OwnerLink {
-        telegram_id: telegram_id.to_string(),
-        owner: claimed.owner,
-    };
-    if write_link(dir, &link).is_err() {
-        return chain_err();
-    }
-    let owner = claimed.owner.to_string();
-    let agent = claimed.agent_id.to_string();
-    text_with(
-        "cli-owner-linked",
-        &[("owner", owner.as_str()), ("agent", agent.as_str())],
-    )
-}
-
-async fn owned_command(
-    config: &Config,
-    dir: &Path,
-    link: &OwnerLink,
-    name: &str,
-    args: &[String],
-) -> String {
-    let Some(claimed) = open_claimed(config, dir).await else {
-        return claimed_or_err(config, dir).await;
-    };
-    if claimed.owner != link.owner {
-        return text("cli-owner-changed");
-    }
     match name {
         "status" => status_text(&claimed).await,
         "pause" => pause_text(&claimed),
@@ -567,59 +520,6 @@ fn config_dir(config: &Config) -> Option<&Path> {
     }
 }
 
-fn read_link(dir: &Path) -> Option<OwnerLink> {
-    let stored = fs::read_to_string(dir.join(LINK_FILE)).ok()?;
-    let mut lines = stored.lines();
-    if lines.next()? != "v1" {
-        return None;
-    }
-    let telegram_id = lines.next()?.to_string();
-    if !valid_telegram_id(&telegram_id) {
-        return None;
-    }
-    let owner = lines.next()?.parse().ok()?;
-    Some(OwnerLink { telegram_id, owner })
-}
-
-fn write_link(dir: &Path, link: &OwnerLink) -> std::io::Result<()> {
-    let body = format!("v1\n{}\n{}\n", link.telegram_id, link.owner);
-    write_private(&dir.join(LINK_FILE), body.as_bytes())
-}
-
-fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let tmp = temp_path(path);
-    let _ = fs::remove_file(&tmp);
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&tmp)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    if let Err(error) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(error);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
-}
-
-fn temp_path(path: &Path) -> PathBuf {
-    let mut name = path
-        .file_name()
-        .map(|name| name.to_os_string())
-        .unwrap_or_else(|| LINK_FILE.into());
-    name.push(".tmp");
-    path.with_file_name(name)
-}
-
 fn text(key: &str) -> String {
     get_required_cli_string(key)
 }
@@ -653,36 +553,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_without_a_link_does_not_open_the_chain() {
+    async fn status_without_a_bound_chat_does_not_open_the_chain() {
         let dir = tempfile::tempdir().expect("temp dir");
         let config = test_config(dir.path(), true);
         let reply = handle(&config, "42", "/status@kinetic_bot").await;
-        assert_eq!(reply, text("cli-owner-not-linked"));
+        assert_eq!(reply, text("cli-owner-not-bound"));
         assert!(!dir.path().join("device.key").exists());
-        assert!(!dir.path().join(LINK_FILE).exists());
     }
 
     #[tokio::test]
     async fn a_different_chat_is_rejected_before_the_chain() {
         let dir = tempfile::tempdir().expect("temp dir");
-        let config = test_config(dir.path(), true);
-        fs::write(
-            dir.path().join(LINK_FILE),
-            "v1\n42\n0x64772107fC23f7370C90EA0aBd29ee6117B97f77\n",
-        )
-        .expect("link");
+        let mut config = test_config(dir.path(), true);
+        bind_chat(&mut config, "42");
         let reply = handle(&config, "99", "/pause").await;
-        assert_eq!(reply, text("cli-owner-not-you"));
+        assert_eq!(reply, text("cli-owner-not-bound"));
         assert!(!dir.path().join("device.key").exists());
     }
 
     #[tokio::test]
-    async fn a_corrupt_link_file_asks_for_a_new_link() {
+    async fn a_stale_link_file_does_not_open_the_chain() {
         let dir = tempfile::tempdir().expect("temp dir");
         let config = test_config(dir.path(), true);
-        fs::write(dir.path().join(LINK_FILE), "nope\n").expect("link");
+        std::fs::write(dir.path().join("owner.link"), "nope\n").expect("link");
         let reply = handle(&config, "42", "/limits").await;
-        assert_eq!(reply, text("cli-owner-not-linked"));
+        assert_eq!(reply, text("cli-owner-not-bound"));
+        assert!(!dir.path().join("device.key").exists());
+    }
+
+    #[tokio::test]
+    async fn link_is_retired() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut config = test_config(dir.path(), true);
+        bind_chat(&mut config, "42");
+        let reply = handle(&config, "42", "/link").await;
+        assert_eq!(reply, text("cli-owner-link-retired"));
         assert!(!dir.path().join("device.key").exists());
     }
 
@@ -695,32 +600,17 @@ mod tests {
         assert!(!dir.path().join("device.key").exists());
     }
 
-    #[test]
-    fn the_link_file_round_trips_the_chat_and_owner() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let owner: Address = "0x64772107fC23f7370C90EA0aBd29ee6117B97f77"
-            .parse()
-            .expect("address");
-        write_link(
-            dir.path(),
-            &OwnerLink {
-                telegram_id: "42".to_string(),
-                owner,
+    fn bind_chat(config: &mut Config, id: &str) {
+        use kinetic_config::multi_agent::{PeerGroupConfig, PeerUsername};
+        use kinetic_config::providers::ChannelRef;
+        config.peer_groups.insert(
+            "owner".to_string(),
+            PeerGroupConfig {
+                channel: ChannelRef::new("telegram.default".to_string()),
+                external_peers: vec![PeerUsername::new(id)],
+                ..PeerGroupConfig::default()
             },
-        )
-        .expect("write");
-        let loaded = read_link(dir.path()).expect("read");
-        assert_eq!(loaded.telegram_id, "42");
-        assert_eq!(loaded.owner, owner);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(dir.path().join(LINK_FILE))
-                .expect("metadata")
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o777, 0o600);
-        }
+        );
     }
 
     #[test]

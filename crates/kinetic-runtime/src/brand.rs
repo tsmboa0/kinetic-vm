@@ -16,6 +16,81 @@ const BAR_SLIDER: usize = 4;
 /// How long an interactive quickstart leaves the mark up before the prompts.
 pub const MARK_HOLD: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How long an interactive daemon leaves one startup line up before the next.
+pub const STAGE_BEAT: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// Pause so a person can read the line that just printed.
+pub async fn stage_beat() {
+    tokio::time::sleep(STAGE_BEAT).await;
+}
+
+struct Narration {
+    armed: bool,
+    open: bool,
+    line: Option<String>,
+}
+
+static NARRATION: std::sync::Mutex<Narration> = std::sync::Mutex::new(Narration {
+    armed: false,
+    open: true,
+    line: None,
+});
+
+fn narration() -> std::sync::MutexGuard<'static, Narration> {
+    NARRATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Hold later terminal lines until the startup banner has finished.
+pub struct NarrationHold {
+    released: bool,
+}
+
+impl NarrationHold {
+    /// Print anything queued, and let later lines print immediately.
+    pub fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        let line = {
+            let mut guard = narration();
+            guard.open = true;
+            guard.line.take()
+        };
+        if let Some(line) = line {
+            println!("{line}");
+        }
+    }
+}
+
+impl Drop for NarrationHold {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Start holding terminal lines. Drop or [`NarrationHold::release`] prints them.
+pub fn arm_terminal_narration() -> NarrationHold {
+    let mut guard = narration();
+    guard.armed = true;
+    guard.open = false;
+    guard.line = None;
+    NarrationHold { released: false }
+}
+
+/// Print now, or after the startup banner when narration is armed.
+pub fn queue_terminal_line(line: String) {
+    let mut guard = narration();
+    if !guard.armed || guard.open {
+        drop(guard);
+        println!("{line}");
+        return;
+    }
+    guard.line = Some(line);
+}
+
 /// True when the environment allows ANSI color.
 pub fn ansi_color_enabled() -> bool {
     std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())

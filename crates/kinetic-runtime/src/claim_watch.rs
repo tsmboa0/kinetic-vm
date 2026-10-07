@@ -1,9 +1,8 @@
 //! Background claim for a bound Telegram chat.
 //!
 //! The device key is created only after a chat is bound. The watcher then
-//! sends the claim link once and polls until the mint lands. `/link` still
-//! follows: bind proves the chat saw the pairing code, and `chain.owner` is
-//! only who the mint is addressed to.
+//! sends the claim link once and polls until the mint lands. The bound chat
+//! is the owner chat. Spending changes still need the owner wallet.
 
 use std::time::Duration;
 
@@ -23,8 +22,12 @@ pub enum Advance {
     /// Nothing to send. Keep polling.
     Wait,
     /// Send the claim link to the bound chat. The key now exists.
-    Deliver { chat_id: String, text: String },
-    /// The mint landed after the link was sent. Tell the chat to `/link`.
+    Deliver {
+        chat_id: String,
+        text: String,
+        url: String,
+    },
+    /// The mint landed after the link was sent.
     Claimed { chat_id: String, text: String },
     /// Already claimed, or there is nothing to watch. Stop.
     Settled,
@@ -54,7 +57,7 @@ pub async fn advance(config: &Config, alias: &str, link_sent: bool) -> Advance {
                         match chat_id {
                             Some(chat_id) => Advance::Claimed {
                                 chat_id,
-                                text: claimed_message(),
+                                text: claimed_message(&device_label(config)),
                             },
                             None => Advance::Settled,
                         }
@@ -77,7 +80,8 @@ pub async fn advance(config: &Config, alias: &str, link_sent: bool) -> Advance {
     match Box::pin(claim_link::build(config)).await {
         Ok(url) => Advance::Deliver {
             chat_id,
-            text: offer_message(&url),
+            text: offer_message(&device_label(config)),
+            url,
         },
         Err(_) => Advance::Wait,
     }
@@ -118,12 +122,30 @@ fn normalize(value: &str) -> String {
     value.trim().trim_start_matches('@').to_string()
 }
 
-fn offer_message(url: &str) -> String {
-    get_required_cli_string_with_args("cli-claim-watch-offer", &[("url", url)])
+pub fn device_label(config: &Config) -> String {
+    let name = config.chain.device_name.trim();
+    if name.is_empty() {
+        "device".to_string()
+    } else {
+        name.to_string()
+    }
 }
 
-fn claimed_message() -> String {
-    get_required_cli_string("cli-claim-watch-claimed")
+fn offer_message(name: &str) -> String {
+    let name = escape_html(name);
+    get_required_cli_string_with_args("cli-claim-watch-offer", &[("name", name.as_str())])
+}
+
+fn claimed_message(name: &str) -> String {
+    let name = escape_html(name);
+    get_required_cli_string_with_args("cli-claim-watch-claimed", &[("name", name.as_str())])
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(test)]
@@ -132,7 +154,7 @@ mod tests {
     use kinetic_config::providers::ChannelRef;
     use kinetic_config::schema::Config;
 
-    use super::{Advance, advance, bound_chat};
+    use super::{Advance, advance, bound_chat, offer_message};
 
     fn config() -> (tempfile::TempDir, Config) {
         let dir = tempfile::tempdir().expect("temp");
@@ -189,5 +211,13 @@ mod tests {
         );
         assert_eq!(advance(&config, "default", false).await, Advance::Wait);
         assert!(!dir.path().join("device.key").exists());
+    }
+
+    #[test]
+    fn the_claim_offer_is_html_with_paragraphs() {
+        let text = offer_message("Vending <lab>");
+        assert!(text.contains("<b>Claim Vending &lt;lab&gt;</b>"));
+        assert!(text.contains("\n\n"));
+        assert!(!text.contains("http"));
     }
 }

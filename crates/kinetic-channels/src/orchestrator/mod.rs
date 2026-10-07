@@ -14617,25 +14617,13 @@ pub async fn start_channels_with_authority_and_plugin_webhooks(
                 return Ok(());
             }
 
-            println!("🦀 KineticVM Channel Server");
-            println!("  🤖 Model:    {model} (agent: {agent_alias})");
-            let effective_backend = config.resolve_active_storage().kind();
-            println!(
-                "  🧠 Memory:   {} (auto-save: {})",
-                effective_backend,
-                if config.memory.auto_save { "on" } else { "off" }
-            );
             let channel_labels: Vec<String> = configured_channels
                 .iter()
                 .map(|cc| composite_channel_key(cc.channel.name(), cc.alias.as_deref()))
                 .collect();
             collected_channel_keys = channel_labels.clone();
-            println!("  📡 Channels: {}", channel_labels.join(", "));
-            println!("  🤖 Agents:   {}", enabled_agents.join(", "));
-            println!();
             let in_flight =
                 max_in_flight_messages_for_config(configured_channels.len(), &config.channels);
-            println!("  🚦 In-flight message limit: {in_flight}");
 
             max_in_flight_messages = Some(in_flight);
             channels_by_name_shared = Some(channels_by_name);
@@ -14930,8 +14918,6 @@ pub async fn start_channels_with_authority_and_plugin_webhooks(
     drop(tx);
     drop(publication_guard);
     kinetic_runtime::health::mark_component_ok("channels");
-    println!("  Listening for messages... (Ctrl+C to stop)");
-    println!();
     let max_in_flight =
         max_in_flight_messages.expect("max_in_flight initialized by first agent's channel setup");
     // Declared before the dispatch loop so it drops after it: on any

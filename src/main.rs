@@ -5582,6 +5582,9 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                 if startup_feedback_enabled && daemon::stderr_is_interactive_foreground() {
                     let mut stderr = std::io::stderr().lock();
                     let _ = daemon::echo_daemon_starting_to_terminal(&mut stderr);
+                    let _ = stderr.flush();
+                    drop(stderr);
+                    kinetic_runtime::brand::stage_beat().await;
                 }
 
                 // Per-iteration clones so the subsystem closures (which

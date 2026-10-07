@@ -2550,8 +2550,10 @@ impl TelegramChannel {
                         })),
                     "Telegram pairing required; one-time bind code issued"
                 );
-                println!("  🔐 Telegram pairing required. One-time bind code: {code}");
-                println!("     Send `{TELEGRAM_BIND_COMMAND} <code>` from your Telegram account.");
+                kinetic_runtime::brand::queue_terminal_line(format!(
+                    "  🔐 Telegram pairing required. One-time bind code: {code}\n     \
+                     Send `{TELEGRAM_BIND_COMMAND} <code>` from your Telegram account."
+                ));
             }
             Some(guard)
         };
@@ -4542,12 +4544,11 @@ impl TelegramChannel {
                                     // Durable write landed, so the pairing may
                                     // now consume the code and mint the token.
                                     let _ = reservation.commit();
-                                    let _ = self
-                                        .send(&SendMessage::new(
-                                            "✅ Telegram account bound successfully. You can talk to KineticVM now.",
-                                            &chat_id,
-                                        ))
-                                        .await;
+                                    let paired = kinetic_runtime::i18n::get_required_cli_string(
+                                        "cli-daemon-paired",
+                                    );
+                                    println!("{}", paired);
+                                    let _ = self.send(&SendMessage::new(paired, &chat_id)).await;
                                     ::kinetic_log::record!(
                                         INFO,
                                         ::kinetic_log::Event::new(
@@ -7039,9 +7040,31 @@ async fn watch_claim(
         .await
         {
             kinetic_runtime::claim_watch::Advance::Wait => {}
-            kinetic_runtime::claim_watch::Advance::Deliver { chat_id, text } => {
-                if send_claim_text(&client, &url, &chat_id, &text).await {
+            kinetic_runtime::claim_watch::Advance::Deliver {
+                chat_id,
+                text,
+                url: page,
+            } => {
+                let button =
+                    kinetic_runtime::i18n::get_required_cli_string("cli-claim-watch-button");
+                if send_claim_text(
+                    &client,
+                    &url,
+                    &chat_id,
+                    &text,
+                    Some((button.as_str(), page.as_str())),
+                )
+                .await
+                {
                     link_sent = true;
+                    let name = kinetic_runtime::claim_watch::device_label(&config);
+                    println!(
+                        "{}",
+                        kinetic_runtime::i18n::get_required_cli_string_with_args(
+                            "cli-daemon-claim-follow",
+                            &[("name", name.as_str())]
+                        )
+                    );
                     ::kinetic_log::record!(
                         INFO,
                         ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note),
@@ -7051,6 +7074,14 @@ async fn watch_claim(
             }
             kinetic_runtime::claim_watch::Advance::Claimed { chat_id, text } => {
                 if !claim_logged {
+                    let name = kinetic_runtime::claim_watch::device_label(&config);
+                    println!(
+                        "{}",
+                        kinetic_runtime::i18n::get_required_cli_string_with_args(
+                            "cli-daemon-claim-done",
+                            &[("name", name.as_str())]
+                        )
+                    );
                     ::kinetic_log::record!(
                         INFO,
                         ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note),
@@ -7058,7 +7089,7 @@ async fn watch_claim(
                     );
                     claim_logged = true;
                 }
-                if send_claim_text(&client, &url, &chat_id, &text).await {
+                if send_claim_text(&client, &url, &chat_id, &text, None).await {
                     break;
                 }
             }
@@ -7068,12 +7099,35 @@ async fn watch_claim(
     }
 }
 
-async fn send_claim_text(client: &reqwest::Client, url: &str, chat_id: &str, text: &str) -> bool {
-    let body = serde_json::json!({
+async fn send_claim_text(
+    client: &reqwest::Client,
+    url: &str,
+    chat_id: &str,
+    text: &str,
+    button: Option<(&str, &str)>,
+) -> bool {
+    let mut body = serde_json::json!({
         "chat_id": chat_id,
         "text": text,
+        "parse_mode": "HTML",
     });
-    match client.post(url).json(&body).send().await {
+    if let Some((label, page)) = button {
+        body["reply_markup"] = serde_json::json!({
+            "inline_keyboard": [[{ "text": label, "url": page }]]
+        });
+    }
+    if post_claim(client, url, &body).await {
+        return true;
+    }
+    let plain = serde_json::json!({
+        "chat_id": chat_id,
+        "text": strip_html(text),
+    });
+    post_claim(client, url, &plain).await
+}
+
+async fn post_claim(client: &reqwest::Client, url: &str, body: &serde_json::Value) -> bool {
+    match client.post(url).json(body).send().await {
         Ok(response) if response.status().is_success() => true,
         Ok(response) => {
             ::kinetic_log::record!(
@@ -7095,6 +7149,20 @@ async fn send_claim_text(client: &reqwest::Client, url: &str, chat_id: &str, tex
             false
         }
     }
+}
+
+fn strip_html(value: &str) -> String {
+    let mut out = String::new();
+    let mut inside = false;
+    for ch in value.chars() {
+        match ch {
+            '<' => inside = true,
+            '>' => inside = false,
+            _ if !inside => out.push(ch),
+            _ => {}
+        }
+    }
+    out
 }
 
 impl ::kinetic_api::attribution::Attributable for TelegramChannel {

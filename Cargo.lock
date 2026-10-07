@@ -4369,7 +4369,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4438,7 +4438,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-api"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4457,11 +4457,11 @@ dependencies = [
 
 [[package]]
 name = "kinetic-buildinfo"
-version = "0.8.5"
+version = "0.8.7"
 
 [[package]]
 name = "kinetic-chain"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "alloy",
  "anyhow",
@@ -4492,7 +4492,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-channels"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4547,14 +4547,14 @@ dependencies = [
 
 [[package]]
 name = "kinetic-commands"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "kinetic-config"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4609,7 +4609,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-eval"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4626,7 +4626,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-gateway"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4680,7 +4680,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-hardware"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4715,7 +4715,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-infra"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4735,7 +4735,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-log"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4757,7 +4757,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-log-attribution-macro-consumer"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "kinetic-log",
  "kinetic-log-attribution-macro-support",
@@ -4765,14 +4765,14 @@ dependencies = [
 
 [[package]]
 name = "kinetic-log-attribution-macro-support"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "kinetic-api",
 ]
 
 [[package]]
 name = "kinetic-macros"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4781,7 +4781,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-memory"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4809,7 +4809,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-plugins"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4846,7 +4846,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-providers"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4890,7 +4890,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-relay-proto"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -4898,7 +4898,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-runtime"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4995,7 +4995,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-sop-graph"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "schemars 1.2.2",
  "serde",
@@ -5006,7 +5006,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-spawn"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "kinetic-log",
  "serde_json",
@@ -5017,7 +5017,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-tls"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "chacha20poly1305",
@@ -5040,7 +5040,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-tool-call-parser"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "kinetic-api",
  "kinetic-log",
@@ -5102,7 +5102,7 @@ dependencies = [
 
 [[package]]
 name = "kinetic-tools"
-version = "0.8.5"
+version = "0.8.7"
 dependencies = [
  "anyhow",
  "async-imap",

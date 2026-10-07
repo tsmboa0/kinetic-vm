@@ -905,6 +905,12 @@ pub async fn run_with_authority(
         crate::health::mark_component_ok("control-plane");
     }
 
+    let mut narration_hold = if startup_feedback_enabled && stderr_is_interactive_foreground() {
+        Some(crate::brand::arm_terminal_narration())
+    } else {
+        None
+    };
+
     if let Some(channels_start) = registry.take_channels_start() {
         if has_supervised_channels(&config) {
             let channels_start = std::sync::Arc::new(channels_start);
@@ -1352,6 +1358,11 @@ pub async fn run_with_authority(
         Ok(Some(exit)) => Ok(exit),
         Ok(None) if startup_feedback_enabled => {
             record_daemon_started(&config, &host, port);
+            if stderr_is_interactive_foreground() {
+                let mut stderr = std::io::stderr().lock();
+                let _ = echo_daemon_preparing_to_terminal(&mut stderr);
+                let _ = stderr.flush();
+            }
             let bar = crate::brand::ConnectBar::start(
                 crate::i18n::get_required_cli_string("cli-brand-connecting"),
                 stderr_is_interactive_foreground(),
@@ -1369,11 +1380,24 @@ pub async fn run_with_authority(
             match waited {
                 Waited::Exit(exit) => exit,
                 Waited::Ready(readiness) => {
-                    if let Some(readiness) = readiness
-                        && stderr_is_interactive_foreground()
-                    {
-                        let mut stderr = std::io::stderr().lock();
-                        let _ = echo_daemon_ready_to_terminal(&config, readiness, &mut stderr);
+                    if let Some(readiness) = readiness {
+                        if stderr_is_interactive_foreground() {
+                            crate::brand::stage_beat().await;
+                            let mut stderr = std::io::stderr().lock();
+                            let _ = echo_daemon_ready_title(&mut stderr);
+                            let _ = stderr.flush();
+                            drop(stderr);
+                            crate::brand::stage_beat().await;
+                            let mut stderr = std::io::stderr().lock();
+                            let _ = echo_daemon_ready_detail(&config, readiness, &mut stderr);
+                            let _ = stderr.flush();
+                        } else {
+                            let mut stderr = std::io::stderr().lock();
+                            let _ = echo_daemon_ready_to_terminal(&config, readiness, &mut stderr);
+                        }
+                    }
+                    if let Some(hold) = narration_hold.as_mut() {
+                        hold.release();
                     }
                     exit.await
                 }
@@ -1563,12 +1587,32 @@ fn stderr_foreground_decision(foreground_pgrp: i32, own_pgrp: i32) -> bool {
 pub fn echo_daemon_starting_to_terminal<W: std::io::Write>(mut out: W) -> std::io::Result<()> {
     use crate::i18n::get_required_cli_string as cli_t;
 
-    writeln!(out, "{}", cli_t("cli-daemon-starting-title"))?;
+    writeln!(out, "{}", cli_t("cli-daemon-starting-title"))
+}
+
+/// The preparing lines that sit with the loading bar.
+pub fn echo_daemon_preparing_to_terminal<W: std::io::Write>(mut out: W) -> std::io::Result<()> {
+    use crate::i18n::get_required_cli_string as cli_t;
+
     writeln!(out, "   {}", cli_t("cli-daemon-starting-detail"))?;
     writeln!(out, "   {}", cli_t("cli-daemon-started-stop"))
 }
 
+fn echo_daemon_ready_title<W: std::io::Write>(mut out: W) -> std::io::Result<()> {
+    use crate::i18n::get_required_cli_string as cli_t;
+    writeln!(out, "{}", cli_t("cli-daemon-started-title"))
+}
+
 fn echo_daemon_ready_to_terminal<W: std::io::Write>(
+    config: &Config,
+    readiness: StartupReadiness,
+    mut out: W,
+) -> std::io::Result<()> {
+    echo_daemon_ready_title(&mut out)?;
+    echo_daemon_ready_detail(config, readiness, &mut out)
+}
+
+fn echo_daemon_ready_detail<W: std::io::Write>(
     config: &Config,
     readiness: StartupReadiness,
     mut out: W,
@@ -1577,7 +1621,6 @@ fn echo_daemon_ready_to_terminal<W: std::io::Write>(
         get_required_cli_string as cli_t, get_required_cli_string_with_args as cli_ta,
     };
 
-    writeln!(out, "{}", cli_t("cli-daemon-started-title"))?;
     if let Some(addr) = readiness.gateway_addr {
         let scheme = if config.gateway.tls.as_ref().is_some_and(|tls| tls.enabled) {
             "https"

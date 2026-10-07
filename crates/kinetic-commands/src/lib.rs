@@ -221,7 +221,7 @@ static BUILTIN_COMMANDS: &[CommandSpec] = &[
         id: BuiltinCommandId::Link,
         name: "link",
         aliases: &[],
-        usage: "/link [signature]",
+        usage: "/link",
         description_key: "channel-telegram-cmd-link-desc",
         surfaces: CHANNEL_ONLY,
         execution: CommandExecution::RuntimeCommand,
