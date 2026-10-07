@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use kinetic_config::schema::Config;
+use std::io::Write;
 use std::path::PathBuf;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
