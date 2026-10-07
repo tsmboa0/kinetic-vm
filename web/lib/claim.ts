@@ -35,9 +35,9 @@ const REQUIRED = [
 
 /** Published KineticVM contracts. Same addresses as contracts/deployments/10143.json. */
 const TESTNET_KINETIC = {
-  registry: "0xBf2E634F8DA4C8C02979C1A2CcAD113eFb259132",
-  vault: "0xD01eEa46c7E054f98dde0ed58DB5Da73ED4D22fD",
-  attestor: "0xAb523187C7687743B29daf3468891E339CbF8f82",
+  registry: "0xa361931269F7e0b1957175a48669F14735E61EDA",
+  vault: "0x77102fCAC7927bB64507DF82bf1ae659465B4EE5",
+  attestor: "0x6e46d149b7d3396b42E874765Cf5a1bb26BD5bA5",
   rpc: "https://testnet-rpc.monad.xyz",
 } as const;
 

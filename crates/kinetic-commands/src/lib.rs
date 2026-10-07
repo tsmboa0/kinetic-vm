@@ -50,6 +50,10 @@ pub enum BuiltinCommandId {
     Limits,
     /// Allow a vault payment recipient.
     Approve,
+    /// Send the vault deposit page.
+    Deposit,
+    /// Send the vault withdraw page.
+    Withdraw,
 }
 
 impl BuiltinCommandId {
@@ -70,6 +74,8 @@ impl BuiltinCommandId {
             Self::Resume => "resume",
             Self::Limits => "limits",
             Self::Approve => "approve",
+            Self::Deposit => "deposit",
+            Self::Withdraw => "withdraw",
         }
     }
 }
@@ -271,6 +277,24 @@ static BUILTIN_COMMANDS: &[CommandSpec] = &[
         surfaces: CHANNEL_ONLY,
         execution: CommandExecution::RuntimeCommand,
     },
+    CommandSpec {
+        id: BuiltinCommandId::Deposit,
+        name: "deposit",
+        aliases: &[],
+        usage: "/deposit",
+        description_key: "channel-telegram-cmd-deposit-desc",
+        surfaces: CHANNEL_ONLY,
+        execution: CommandExecution::RuntimeCommand,
+    },
+    CommandSpec {
+        id: BuiltinCommandId::Withdraw,
+        name: "withdraw",
+        aliases: &[],
+        usage: "/withdraw",
+        description_key: "channel-telegram-cmd-withdraw-desc",
+        surfaces: CHANNEL_ONLY,
+        execution: CommandExecution::RuntimeCommand,
+    },
 ];
 
 pub fn builtin_commands() -> &'static [CommandSpec] {
@@ -412,6 +436,8 @@ mod tests {
         assert!(parse_command_token("/resume", CommandSurface::Channel).is_some());
         assert!(parse_command_token("/limits", CommandSurface::Channel).is_some());
         assert!(parse_command_token("/approve", CommandSurface::Channel).is_some());
+        assert!(parse_command_token("/deposit", CommandSurface::Channel).is_some());
+        assert!(parse_command_token("/withdraw", CommandSurface::Channel).is_some());
         assert!(parse_command_token("/status", CommandSurface::Tui).is_none());
         assert!(parse_command_token("/link", CommandSurface::Cli).is_none());
     }

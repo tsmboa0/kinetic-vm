@@ -164,6 +164,22 @@ body {
   opacity: 0.55;
 }
 
+.field {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--foreground);
+  padding: 0 0.9rem;
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 0.875rem;
+}
+
+.field:focus-visible {
+  outline: 2px solid var(--violet-hot);
+  outline-offset: 3px;
+}
+
 .btn-success {
   display: inline-flex;
   min-height: 44px;

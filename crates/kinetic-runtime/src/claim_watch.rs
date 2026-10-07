@@ -192,12 +192,14 @@ pub fn offer_delivery(name: &str, page: &str) -> ClaimNote {
 }
 
 pub fn funding_markup(facts: &ClaimFacts) -> serde_json::Value {
-    let vault = get_required_cli_string("cli-claim-watch-copy-vault");
-    let key = get_required_cli_string("cli-claim-watch-copy-key");
+    let deposit = get_required_cli_string("cli-claim-watch-deposit-button");
+    let page = format!(
+        "https://vault-deposit.kineticvm.xyz?address={}&agent={}",
+        facts.vault, facts.agent_id
+    );
     serde_json::json!({
         "inline_keyboard": [
-            [{ "text": vault, "copy_text": { "text": facts.vault } }],
-            [{ "text": key, "copy_text": { "text": facts.device } }]
+            [{ "text": deposit, "url": page }]
         ]
     })
 }
@@ -249,12 +251,11 @@ pub fn claimed_html(facts: &ClaimFacts) -> String {
         &[("agent", facts.agent_id.as_str())],
     );
     let next = get_required_cli_string("cli-claim-watch-next");
-    let fund_vault = get_required_cli_string("cli-claim-watch-fund-vault");
-    let fund_gas = get_required_cli_string("cli-claim-watch-fund-gas");
-    let device = escape_html(&facts.device);
+    let deposit = get_required_cli_string("cli-claim-watch-deposit");
+    let vault_label = get_required_cli_string("cli-claim-watch-device-vault");
     let vault = escape_html(&facts.vault);
     format!(
-        "✅ <b>{title}</b>\n\n{summary}\n{agent}\n{owner_line}\n\n<b>{next}</b>\n\n{fund_vault}\n<code>{vault}</code>\n\n{fund_gas}\n<code>{device}</code>"
+        "✅ <b>{title}</b>\n\n{summary}\n{agent}\n{owner_line}\n\n<b>{next}</b>\n\n{deposit}\n{vault_label}: <code>{vault}</code>"
     )
 }
 
@@ -353,10 +354,13 @@ mod tests {
             vault: "0x3333333333333333333333333333333333333333".to_string(),
         });
         assert!(text.contains("Newton is claimed"));
+        assert!(text.contains("The identity NFT is in the owner wallet."));
         assert!(text.contains("<b>Next step</b>"));
-        assert!(text.contains("<code>0x3333333333333333333333333333333333333333</code>"));
-        assert!(text.contains("<code>0x1111111111111111111111111111111111111111</code>"));
-        assert!(text.contains("pay gas"));
+        assert!(text.contains("Click the link below to send MON to the device vault"));
+        assert!(
+            text.contains("Device Vault: <code>0x3333333333333333333333333333333333333333</code>")
+        );
+        assert!(!text.contains("pay gas"));
         assert!(text.contains("<code>0x2222222222222222222222222222222222222222</code>"));
         assert!(!text.contains("{cli-"));
     }
@@ -394,15 +398,11 @@ mod tests {
             vault: "0x3333333333333333333333333333333333333333".to_string(),
         });
         let rows = markup["inline_keyboard"].as_array().expect("rows");
-        assert_eq!(rows[0][0]["text"], "[ Click to copy vault ]");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0]["text"], "Deposit");
         assert_eq!(
-            rows[0][0]["copy_text"]["text"],
-            "0x3333333333333333333333333333333333333333"
-        );
-        assert_eq!(rows[1][0]["text"], "[ Click to copy agent key ]");
-        assert_eq!(
-            rows[1][0]["copy_text"]["text"],
-            "0x1111111111111111111111111111111111111111"
+            rows[0][0]["url"],
+            "https://vault-deposit.kineticvm.xyz?address=0x3333333333333333333333333333333333333333&agent=7"
         );
     }
 }

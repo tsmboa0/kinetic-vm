@@ -3,8 +3,8 @@
 import { motion, useReducedMotion } from "framer-motion";
 import Link from "next/link";
 import { useState } from "react";
-import { createPublicClient, decodeEventLog, http, type Hash, type Log } from "viem";
-import { useChainId, useConnect, useConnection, useConnectors, useDisconnect, useSwitchChain, useWriteContract, type Connector } from "wagmi";
+import { createPublicClient, decodeEventLog, http, parseEther, type Hash, type Log } from "viem";
+import { useChainId, useConnect, useConnection, useConnectors, useDisconnect, useSendTransaction, useSwitchChain, useWriteContract, type Connector } from "wagmi";
 
 import { Atmosphere } from "@/components/storm";
 import { WalletPill } from "@/components/wallet-pill";
@@ -59,7 +59,7 @@ const erc721Abi = [
 
 const RISE = { type: "spring" as const, stiffness: 320, damping: 30 };
 
-type Step = "ready" | "claiming" | "approving" | "done";
+type Step = "ready" | "claiming" | "approving" | "funding" | "done";
 
 export function ClaimDesk({
   query,
@@ -77,6 +77,7 @@ export function ClaimDesk({
   const { disconnectAsync } = useDisconnect();
   const { switchChainAsync, isPending: switching } = useSwitchChain();
   const { writeContractAsync } = useWriteContract();
+  const { sendTransactionAsync } = useSendTransaction();
   const [step, setStep] = useState<Step>("ready");
   const [error, setError] = useState<string | null>(null);
   const [claimHash, setClaimHash] = useState<Hash | null>(null);
@@ -117,7 +118,7 @@ export function ClaimDesk({
         args: [claim.attestor, true],
       });
       setApprovalHash(approval);
-      setStep("done");
+      await fundGas();
     } catch (cause) {
       setStep("approving");
       setError(explain(cause));
@@ -126,9 +127,50 @@ export function ClaimDesk({
     }
   }
 
+  async function fundGas() {
+    if (!claim || (claim.chainId !== 10143 && claim.chainId !== 143)) return;
+    setError(null);
+    setStep("funding");
+    try {
+      const client = createPublicClient({
+        chain: claim.chainId === 143 ? monadMainnet : monadTestnet,
+        transport: http(),
+      });
+      const balance = await client.getBalance({ address: claim.device });
+      if (balance < parseEther("1")) {
+        const hash = await sendTransactionAsync({
+          to: claim.device,
+          value: parseEther("1"),
+          chainId: claim.chainId,
+        });
+        const settled = await client.waitForTransactionReceipt({ hash });
+        if (settled.status !== "success") {
+          setError("The gas transfer reverted. You can try again.");
+          return;
+        }
+      }
+      setStep("done");
+    } catch (cause) {
+      setStep("funding");
+      setError(explain(cause));
+    }
+  }
+
   async function run() {
     if (!claim || !identity || (claim.chainId !== 10143 && claim.chainId !== 143)) {
       setError("This chain has no KineticVM identity registry.");
+      return;
+    }
+    if (claimed && step === "funding") {
+      setBusy(true);
+      try {
+        await fundGas();
+      } catch (cause) {
+        setStep("funding");
+        setError(explain(cause));
+      } finally {
+        setBusy(false);
+      }
       return;
     }
     if (claimed) {
@@ -221,18 +263,21 @@ export function ClaimDesk({
               deadline={formatDeadline(claim.deadline)}
               connected={Boolean(connected)}
               claimed={claimed || done}
-              approved={done}
+              approved={step === "funding" || done}
+              funded={done}
               busy={busy || switching || step === "claiming"}
               done={done}
               canClaim={ownerMatches && Boolean(identity)}
               label={
                 step === "claiming"
                   ? "Confirm the claim"
-                  : claimed && step !== "done"
+                  : step === "approving"
                     ? "Approve the attestor"
-                    : done
-                      ? "Claimed"
-                      : "Claim this device"
+                    : step === "funding"
+                      ? "Confirm the gas"
+                      : done
+                        ? "Claimed"
+                        : "Claim this device"
               }
               onClaim={() => void run()}
               note={
@@ -294,6 +339,7 @@ function ClaimBody({
   connected,
   claimed,
   approved,
+  funded,
   busy,
   done,
   canClaim,
@@ -316,6 +362,7 @@ function ClaimBody({
   connected: boolean;
   claimed: boolean;
   approved: boolean;
+  funded: boolean;
   busy: boolean;
   done: boolean;
   canClaim: boolean;
@@ -333,7 +380,7 @@ function ClaimBody({
       <p className="font-mono text-xs tracking-[0.28em] text-violet">CLAIM</p>
       <h1 className="mt-3 text-3xl">{name}</h1>
       <p className="mt-3 text-sm leading-7 text-dim">
-        Two wallet requests. The device key never leaves the machine.
+        Three wallet requests. The last one sends 1 MON to the device for gas. The device key never leaves the machine.
       </p>
       <dl className="mt-8 divide-y divide-line border-y border-line">
         <Fact label="Owner" value={owner} />
@@ -349,6 +396,8 @@ function ClaimBody({
         <Mark on={claimed} label="Claim" />
         <span className="h-px flex-1 bg-line" />
         <Mark on={approved} label="Attestor" />
+        <span className="h-px flex-1 bg-line" />
+        <Mark on={funded} label="Gas" />
       </ol>
       <button
         type="button"
@@ -360,7 +409,7 @@ function ClaimBody({
       </button>
       {done ? (
         <p className="mt-4 text-sm leading-6 text-success">
-          Claimed. The identity is in the owner wallet, and the attestor can record what this device does.
+          Claimed. The identity is in the owner wallet, the attestor can record what this device does, and the device holds 1 MON for gas.
         </p>
       ) : null}
       {note ? <p className="mt-4 text-sm leading-6 text-dim">{note}</p> : null}

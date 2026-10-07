@@ -2623,7 +2623,8 @@ fn parse_runtime_command(channel_name: &str, content: &str) -> Option<ChannelRun
         "/config" if supports_runtime_model_switch(channel_name) => {
             Some(ChannelRuntimeCommand::ShowConfig)
         }
-        "/link" | "/status" | "/pause" | "/resume" | "/limits" | "/approve"
+        "/link" | "/status" | "/pause" | "/resume" | "/limits" | "/approve" | "/deposit"
+        | "/withdraw"
             if channel_name == "telegram" =>
         {
             Some(ChannelRuntimeCommand::Owner(trimmed.to_string()))

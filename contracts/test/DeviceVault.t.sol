@@ -55,7 +55,7 @@ contract DeviceVaultTest is KineticTestBase {
         vault.pay(agentId, recipient, 1);
 
         vm.prank(device);
-        vm.expectRevert(DeviceVault.NotOwner.selector);
+        vm.expectRevert(DeviceVault.DailyCap.selector);
         vault.topUpGas(agentId, 1);
 
         vm.prank(device);
@@ -68,7 +68,7 @@ contract DeviceVaultTest is KineticTestBase {
         vault.pause(agentId);
 
         vm.prank(device);
-        vm.expectRevert(DeviceVault.NotOwner.selector);
+        vm.expectRevert(DeviceVault.Paused.selector);
         vault.topUpGas(agentId, 1);
 
         vm.prank(owner);
@@ -183,6 +183,29 @@ contract DeviceVaultTest is KineticTestBase {
         assertFalse(vault.isAllowed(agentId, recipient));
         (,, bool paused) = vault.limitsOf(agentId);
         assertTrue(paused);
+    }
+
+    function test_device_tops_up_gas_through_the_existing_function() public {
+        vm.prank(owner);
+        vault.loosenCaps(agentId, 10 ether, 10 ether, 0, "");
+        vm.deal(owner, 20 ether);
+        vm.prank(owner);
+        vault.deposit{value: 10 ether}(agentId);
+
+        vm.deal(device, 1 ether);
+        vm.prank(device);
+        vault.topUpGas(agentId, 4 ether);
+        assertEq(device.balance, 5 ether);
+        assertEq(vault.spentToday(agentId), 4 ether);
+
+        vm.deal(device, 1 ether);
+        vm.prank(device);
+        vm.expectRevert(DeviceVault.GasCap.selector);
+        vault.topUpGas(agentId, 5 ether);
+
+        vm.prank(address(0xB0B));
+        vm.expectRevert(DeviceVault.NotOwner.selector);
+        vault.topUpGas(agentId, 1);
     }
 
     function test_raw_ether_is_rejected() public {

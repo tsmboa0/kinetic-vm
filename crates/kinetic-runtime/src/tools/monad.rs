@@ -8,7 +8,9 @@ use kinetic_api::tool::{Tool, ToolOutput, ToolResult, ToolSpec};
 use kinetic_chain::{
     Address, BootReport, DeviceChain, format_mon, parse_mon, unclaimed_claim_text,
 };
-use kinetic_config::schema::ChainConfig;
+use kinetic_config::schema::{ChainConfig, Config};
+
+use crate::owner_commands::OwnerPing;
 use serde_json::json;
 
 const ACTUATORS: &[&str] = &[
@@ -18,12 +20,18 @@ const ACTUATORS: &[&str] = &[
     "set_device",
 ];
 
-pub fn chain_tools(chain: ChainConfig, key_dir: PathBuf) -> Vec<Arc<dyn Tool>> {
+pub fn chain_tools(config: &Config, key_dir: PathBuf) -> Vec<Arc<dyn Tool>> {
+    let chain = config.chain.clone();
+    let ping = OwnerPing::from_config(config);
     vec![
         Arc::new(MonadIdentityTool::new(chain.clone(), key_dir.clone())),
-        Arc::new(MonadAttestTool::new(chain.clone(), key_dir.clone())),
+        Arc::new(MonadAttestTool::new(
+            chain.clone(),
+            key_dir.clone(),
+            ping.clone(),
+        )),
         Arc::new(VaultStatusTool::new(chain.clone(), key_dir.clone())),
-        Arc::new(VaultPayTool::new(chain, key_dir)),
+        Arc::new(VaultPayTool::new(chain, key_dir, ping)),
     ]
 }
 
@@ -43,11 +51,17 @@ pub fn attest_physical_actions(
         return tools;
     };
     let chain = config.chain.clone();
+    let ping = OwnerPing::from_config(config);
     tools
         .into_iter()
         .map(|tool| -> Box<dyn Tool> {
             if is_actuator(tool.name()) {
-                Box::new(AttestingTool::new(tool, chain.clone(), key_dir.clone()))
+                Box::new(AttestingTool::new(
+                    tool,
+                    chain.clone(),
+                    key_dir.clone(),
+                    ping.clone(),
+                ))
             } else {
                 tool
             }
@@ -232,12 +246,14 @@ impl Tool for VaultStatusTool {
 
 pub struct VaultPayTool {
     handle: ChainHandle,
+    ping: Option<OwnerPing>,
 }
 
 impl VaultPayTool {
-    pub fn new(chain: ChainConfig, key_dir: PathBuf) -> Self {
+    pub fn new(chain: ChainConfig, key_dir: PathBuf, ping: Option<OwnerPing>) -> Self {
         Self {
             handle: ChainHandle::new(chain, key_dir),
+            ping,
         }
     }
 }
@@ -304,19 +320,24 @@ impl Tool for VaultPayTool {
                     ("tx", &tx.to_string()),
                 ],
             ))),
-            Err(error) => Ok(ToolResult::err(failed(&error.to_string()))),
+            Err(error) => {
+                note_gas(&self.ping, &error, session.vault_address(), agent_id).await;
+                Ok(ToolResult::err(failed(&error.to_string())))
+            }
         }
     }
 }
 
 pub struct MonadAttestTool {
     handle: ChainHandle,
+    ping: Option<OwnerPing>,
 }
 
 impl MonadAttestTool {
-    pub fn new(chain: ChainConfig, key_dir: PathBuf) -> Self {
+    pub fn new(chain: ChainConfig, key_dir: PathBuf, ping: Option<OwnerPing>) -> Self {
         Self {
             handle: ChainHandle::new(chain, key_dir),
+            ping,
         }
     }
 }
@@ -381,7 +402,10 @@ impl Tool for MonadAttestTool {
                     ("request", &attestation.request_hash.to_string()),
                 ],
             ))),
-            Err(error) => Ok(ToolResult::err(failed(&error.to_string()))),
+            Err(error) => {
+                note_gas(&self.ping, &error, session.vault_address(), agent_id).await;
+                Ok(ToolResult::err(failed(&error.to_string())))
+            }
         }
     }
 }
@@ -389,13 +413,20 @@ impl Tool for MonadAttestTool {
 pub struct AttestingTool {
     inner: Box<dyn Tool>,
     handle: ChainHandle,
+    ping: Option<OwnerPing>,
 }
 
 impl AttestingTool {
-    pub fn new(inner: Box<dyn Tool>, chain: ChainConfig, key_dir: PathBuf) -> Self {
+    pub fn new(
+        inner: Box<dyn Tool>,
+        chain: ChainConfig,
+        key_dir: PathBuf,
+        ping: Option<OwnerPing>,
+    ) -> Self {
         Self {
             inner,
             handle: ChainHandle::new(chain, key_dir),
+            ping,
         }
     }
 }
@@ -471,11 +502,29 @@ impl AttestingTool {
         let BootReport::Claimed { agent_id, .. } = report else {
             return Err(text("cli-chain-not-claimed"));
         };
-        let attestation = session
-            .attest(agent_id, action, params, request_uri)
-            .await
-            .map_err(|error| failed(&error.to_string()))?;
+        let attestation = match session.attest(agent_id, action, params, request_uri).await {
+            Ok(attestation) => attestation,
+            Err(error) => {
+                note_gas(&self.ping, &error, session.vault_address(), agent_id).await;
+                return Err(failed(&error.to_string()));
+            }
+        };
         Ok(attestation.transaction_hash.to_string())
+    }
+}
+
+async fn note_gas(
+    ping: &Option<OwnerPing>,
+    error: &anyhow::Error,
+    vault: Address,
+    agent_id: kinetic_chain::U256,
+) {
+    if !kinetic_chain::is_vault_gas_short(error) {
+        return;
+    }
+    if let Some(ping) = ping {
+        ping.tell_vault_needs_funds(&vault.to_string(), &agent_id.to_string())
+            .await;
     }
 }
 
@@ -544,6 +593,7 @@ mod tests {
         let tool = VaultPayTool::new(
             ChainConfig::default(),
             PathBuf::from("/tmp/kinetic-chain-test"),
+            None,
         );
         let result = tool
             .execute(json!({"recipient": "0x0000000000000000000000000000000000000001", "amount": "nope"}))
@@ -568,6 +618,7 @@ mod tests {
                 ..ChainConfig::default()
             },
             PathBuf::from("/tmp/kinetic-chain-test"),
+            None,
         );
         let result = tool.execute(json!({"pin": 13})).await.expect("result");
         assert!(!result.success);

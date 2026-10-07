@@ -4,8 +4,10 @@
 //! Reading the card never creates the key.
 
 use kinetic_chain::{BootReport, DeviceChain, SoftwareKey, format_mon};
-use kinetic_config::schema::Config;
+use kinetic_config::schema::{Config, ModelProviderConfig};
 use serde::Serialize;
+
+const DEVICE_AGENT: &str = "device";
 
 use crate::i18n::{get_required_cli_string, get_required_cli_string_with_args};
 
@@ -28,6 +30,16 @@ pub struct DeviceCard {
     pub network: String,
     pub chain_enabled: bool,
     pub telegram: bool,
+    pub provider: String,
+    pub model: String,
+    pub api_key_set: bool,
+}
+
+/// Paths the short `kinetic config set --api-key` and `--model` commands write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceModelPaths {
+    pub api_key: String,
+    pub model: String,
 }
 
 /// Local card. A missing key stays missing.
@@ -39,6 +51,7 @@ pub fn from_config(config: &Config) -> Result<DeviceCard, String> {
         .transpose()
         .map_err(|_| text("cli-device-card-key-unreadable"))?
         .flatten();
+    let (provider, model, api_key_set) = model_view(config);
     Ok(DeviceCard {
         device_name: config.chain.device_name.clone(),
         claimed: if address.is_none() {
@@ -57,7 +70,90 @@ pub fn from_config(config: &Config) -> Result<DeviceCard, String> {
             .telegram
             .values()
             .any(|channel| channel.enabled),
+        provider,
+        model,
+        api_key_set,
     })
+}
+
+fn model_view(config: &Config) -> (String, String, bool) {
+    let Some((family, _, entry)) = config.resolved_model_provider_for_agent(DEVICE_AGENT) else {
+        return (String::new(), String::new(), false);
+    };
+    let model = entry
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    let api_key_set = entry
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|key| !key.is_empty());
+    (family.to_string(), model, api_key_set)
+}
+
+/// The provider profile quickstart stored for this device.
+pub fn device_model_paths(config: &Config) -> Result<DeviceModelPaths, String> {
+    let (family, alias, _) = resolved_device_model(config)?;
+    Ok(DeviceModelPaths {
+        api_key: format!("providers.models.{family}.{alias}.api_key"),
+        model: format!("providers.models.{family}.{alias}.model"),
+    })
+}
+
+/// Property path for `kinetic config set --provider`.
+pub fn device_provider_path() -> &'static str {
+    "agents.device.model_provider"
+}
+
+/// Turn `openai` or `openai.default` into a profile this install already has.
+pub fn provider_assignment(config: &Config, raw: &str) -> Result<String, String> {
+    if !config.agents.contains_key(DEVICE_AGENT) {
+        return Err(text("cli-config-set-no-model"));
+    }
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(text_with(
+            "cli-config-set-provider-unknown",
+            &[("provider", raw)],
+        ));
+    }
+    let (family_raw, alias_raw) = match raw.split_once('.') {
+        Some((family, alias)) => (family, Some(alias)),
+        None => (raw, None),
+    };
+    let hits: Vec<(&'static str, &str)> = config
+        .providers
+        .models
+        .iter_entries()
+        .filter(|(family, alias, _)| {
+            family.eq_ignore_ascii_case(family_raw)
+                && alias_raw.is_none_or(|wanted| alias.eq_ignore_ascii_case(wanted))
+        })
+        .map(|(family, alias, _)| (family, alias))
+        .collect();
+    let chosen = if alias_raw.is_some() {
+        hits.first().copied()
+    } else {
+        hits.iter()
+            .copied()
+            .find(|(_, alias)| *alias == "default")
+            .or_else(|| (hits.len() == 1).then(|| hits[0]))
+    };
+    chosen
+        .map(|(family, alias)| format!("{family}.{alias}"))
+        .ok_or_else(|| text_with("cli-config-set-provider-unknown", &[("provider", raw)]))
+}
+
+fn resolved_device_model(
+    config: &Config,
+) -> Result<(&'static str, &str, &ModelProviderConfig), String> {
+    config
+        .resolved_model_provider_for_agent(DEVICE_AGENT)
+        .ok_or_else(|| text("cli-config-set-no-model"))
 }
 
 /// Ask the chain whether this device is claimed. Does nothing when the key
@@ -122,6 +218,13 @@ pub fn render(card: &DeviceCard) -> String {
     } else {
         "cli-device-card-off"
     });
+    let provider = shown(&card.provider);
+    let model = shown(&card.model);
+    let api_key = text(if card.api_key_set {
+        "cli-device-card-set"
+    } else {
+        "cli-device-card-unset"
+    });
     [
         text_with("cli-device-card-name", &[("value", &card.device_name)]),
         text_with("cli-device-card-address", &[("value", &address)]),
@@ -134,8 +237,19 @@ pub fn render(card: &DeviceCard) -> String {
             &[("network", &card.network), ("state", &chain_state)],
         ),
         text_with("cli-device-card-telegram", &[("value", &telegram)]),
+        text_with("cli-device-card-provider", &[("value", &provider)]),
+        text_with("cli-device-card-model", &[("value", &model)]),
+        text_with("cli-device-card-api-key", &[("value", &api_key)]),
     ]
     .join("\n")
+}
+
+fn shown(value: &str) -> String {
+    if value.trim().is_empty() {
+        text("cli-device-card-unset")
+    } else {
+        value.to_string()
+    }
 }
 
 fn text(key: &str) -> String {
@@ -221,5 +335,54 @@ mod tests {
             kinetic_chain::parse_mon(&card.daily_cap).expect("daily"),
             U256::from(1_000_000_000_000_000_000u64)
         );
+    }
+
+    #[test]
+    fn the_card_names_the_model_and_whether_the_key_is_set() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut config = config_in(dir.path());
+        config.agents.insert(
+            "device".into(),
+            kinetic_config::schema::AliasedAgentConfig {
+                model_provider: "openai.default".into(),
+                ..Default::default()
+            },
+        );
+        config.providers.models.openai.insert(
+            "default".into(),
+            kinetic_config::schema::OpenAIModelProviderConfig {
+                base: kinetic_config::schema::ModelProviderConfig {
+                    model: Some("gpt-5.4-mini".into()),
+                    api_key: Some("sk-test-secret".into()),
+                    ..Default::default()
+                },
+            },
+        );
+        let card = from_config(&config).expect("card");
+        let rendered = render(&card);
+        assert!(rendered.contains("Provider: openai"));
+        assert!(rendered.contains("Model: gpt-5.4-mini"));
+        assert!(rendered.contains("API key: set"));
+        assert!(!rendered.contains("sk-test-secret"));
+        let paths = device_model_paths(&config).expect("paths");
+        assert_eq!(paths.api_key, "providers.models.openai.default.api_key");
+        assert_eq!(paths.model, "providers.models.openai.default.model");
+        assert_eq!(
+            provider_assignment(&config, "OpenAI").expect("provider"),
+            "openai.default"
+        );
+    }
+
+    #[test]
+    fn a_missing_model_stays_unset_and_cannot_be_retargeted() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = config_in(dir.path());
+        let card = from_config(&config).expect("card");
+        let rendered = render(&card);
+        assert!(rendered.contains("Provider: not set"));
+        assert!(rendered.contains("Model: not set"));
+        assert!(rendered.contains("API key: not set"));
+        assert!(device_model_paths(&config).is_err());
+        assert!(provider_assignment(&config, "openai").is_err());
     }
 }

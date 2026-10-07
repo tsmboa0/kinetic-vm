@@ -37,7 +37,7 @@ pub async fn handle(config: &Config, telegram_id: &str, line: &str) -> String {
     };
     match name.as_str() {
         "link" => text("cli-owner-link-retired"),
-        "status" | "pause" | "resume" | "limits" | "approve" => {
+        "status" | "pause" | "resume" | "limits" | "approve" | "deposit" | "withdraw" => {
             if !bound_owner_chat(config, telegram_id) {
                 return text("cli-owner-not-bound");
             }
@@ -73,9 +73,11 @@ async fn owned_command(config: &Config, dir: &Path, name: &str, args: &[String])
     match name {
         "status" => status_text(&claimed).await,
         "pause" => pause_text(&claimed),
-        "resume" => resume_command(&claimed, args).await,
-        "limits" => limits_command(&claimed, args).await,
-        "approve" => approve_command(&claimed, args).await,
+        "resume" => resume_command(config, &claimed, args).await,
+        "limits" => limits_command(config, &claimed, args).await,
+        "approve" => approve_command(config, &claimed, args).await,
+        "deposit" => vault_page(&claimed, "cli-owner-deposit", ""),
+        "withdraw" => vault_page(&claimed, "cli-owner-withdraw", "withdraw"),
         _ => text("cli-owner-not-linked"),
     }
 }
@@ -175,6 +177,84 @@ async fn attestation_text(claimed: &ClaimedSession) -> String {
     }
 }
 
+fn vault_page(claimed: &ClaimedSession, key: &str, path: &str) -> String {
+    let vault = claimed.chain.vault_address().to_string();
+    let agent = claimed.agent_id.to_string();
+    let url = if path.is_empty() {
+        format!("https://vault-deposit.kineticvm.xyz?address={vault}&agent={agent}")
+    } else {
+        format!("https://vault-deposit.kineticvm.xyz/{path}?address={vault}&agent={agent}")
+    };
+    text_with(key, &[("url", url.as_str())])
+}
+
+/// The paired Telegram chat, and the bot that can post into it.
+#[derive(Clone)]
+pub struct OwnerPing {
+    chat_id: String,
+    bot_token: String,
+}
+
+impl OwnerPing {
+    pub fn from_config(config: &Config) -> Option<Self> {
+        let chat_id = config.peer_groups.values().find_map(|group| {
+            let channel = group.channel.as_str();
+            if channel != "telegram" && !channel.starts_with("telegram.") {
+                return None;
+            }
+            group.external_peers.iter().find_map(|peer| {
+                let id = peer.as_str().trim().trim_start_matches('@');
+                if !id.is_empty() && id.chars().all(|c| c.is_ascii_digit()) {
+                    Some(id.to_string())
+                } else {
+                    None
+                }
+            })
+        })?;
+        let channel = config
+            .channels
+            .telegram
+            .get("default")
+            .or_else(|| config.channels.telegram.values().next())?;
+        let bot_token = channel.bot_token.trim();
+        if !channel.enabled || bot_token.is_empty() {
+            return None;
+        }
+        Some(Self {
+            chat_id,
+            bot_token: bot_token.to_string(),
+        })
+    }
+
+    pub async fn tell_vault_needs_funds(&self, vault: &str, agent_id: &str) {
+        let page = format!("https://vault-deposit.kineticvm.xyz?address={vault}&agent={agent_id}");
+        let text = text_with("cli-owner-gas-short", &[("url", page.as_str())]);
+        let endpoint = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
+        let Ok(client) = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+        else {
+            return;
+        };
+        if client
+            .post(endpoint)
+            .json(&serde_json::json!({
+                "chat_id": self.chat_id,
+                "text": text,
+            }))
+            .send()
+            .await
+            .is_err()
+        {
+            ::kinetic_log::record!(
+                WARN,
+                ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Note),
+                "failed to tell the owner the vault needs funds"
+            );
+        }
+    }
+}
+
 fn pause_text(claimed: &ClaimedSession) -> String {
     let agent = claimed.agent_id.to_string();
     let vault = claimed.chain.vault_address().to_string();
@@ -184,20 +264,19 @@ fn pause_text(claimed: &ClaimedSession) -> String {
     )
 }
 
-async fn resume_command(claimed: &ClaimedSession, args: &[String]) -> String {
+async fn resume_command(config: &Config, claimed: &ClaimedSession, args: &[String]) -> String {
     match args {
         [] => prepare_unpause(claimed).await,
         [deadline, signature] if looks_like_signature(signature) => {
             let Some(deadline) = parse_deadline(deadline) else {
                 return text("cli-owner-usage-resume");
             };
-            relay_text(
-                claimed
-                    .chain
-                    .relay_unpause(claimed.agent_id, U256::from(deadline), signature)
-                    .await,
-                "cli-owner-resumed",
-            )
+            let result = claimed
+                .chain
+                .relay_unpause(claimed.agent_id, U256::from(deadline), signature)
+                .await;
+            note_short(config, claimed, &result).await;
+            relay_text(result, "cli-owner-resumed")
         }
         _ => text("cli-owner-usage-resume"),
     }
@@ -219,11 +298,11 @@ async fn prepare_unpause(claimed: &ClaimedSession) -> String {
     sign_reply(&command, digest, parts.deadline_secs)
 }
 
-async fn limits_command(claimed: &ClaimedSession, args: &[String]) -> String {
+async fn limits_command(config: &Config, claimed: &ClaimedSession, args: &[String]) -> String {
     match args {
         [] => limits_view(claimed),
         [per_tx, daily, deadline, signature] if looks_like_signature(signature) => {
-            submit_loosen(claimed, per_tx, daily, deadline, signature).await
+            submit_loosen(config, claimed, per_tx, daily, deadline, signature).await
         }
         [per_tx, daily] => propose_caps(claimed, per_tx, daily).await,
         _ => text("cli-owner-usage-limits"),
@@ -305,6 +384,7 @@ async fn prepare_loosen(
 }
 
 async fn submit_loosen(
+    config: &Config,
     claimed: &ClaimedSession,
     per_tx: &str,
     daily: &str,
@@ -317,26 +397,25 @@ async fn submit_loosen(
     let Some(deadline) = parse_deadline(deadline) else {
         return text("cli-owner-usage-limits");
     };
-    relay_text(
-        claimed
-            .chain
-            .relay_loosen(
-                claimed.agent_id,
-                per_tx_cap,
-                daily_cap,
-                U256::from(deadline),
-                signature,
-            )
-            .await,
-        "cli-owner-loosened",
-    )
+    let result = claimed
+        .chain
+        .relay_loosen(
+            claimed.agent_id,
+            per_tx_cap,
+            daily_cap,
+            U256::from(deadline),
+            signature,
+        )
+        .await;
+    note_short(config, claimed, &result).await;
+    relay_text(result, "cli-owner-loosened")
 }
 
-async fn approve_command(claimed: &ClaimedSession, args: &[String]) -> String {
+async fn approve_command(config: &Config, claimed: &ClaimedSession, args: &[String]) -> String {
     match args {
         [] => text("cli-owner-approve-none"),
         [recipient, deadline, signature] if looks_like_signature(signature) => {
-            submit_allow(claimed, recipient, deadline, signature).await
+            submit_allow(config, claimed, recipient, deadline, signature).await
         }
         [recipient] => prepare_allow(claimed, recipient).await,
         _ => text("cli-owner-usage-approve"),
@@ -366,6 +445,7 @@ async fn prepare_allow(claimed: &ClaimedSession, recipient: &str) -> String {
 }
 
 async fn submit_allow(
+    config: &Config,
     claimed: &ClaimedSession,
     recipient: &str,
     deadline: &str,
@@ -389,6 +469,7 @@ async fn submit_allow(
             signature,
         )
         .await;
+    note_short(config, claimed, &result).await;
     match result {
         Ok(tx) => {
             let tx = tx.to_string();
@@ -429,6 +510,26 @@ fn sign_reply(command: &str, digest: B256, deadline: u64) -> String {
             ("deadline", deadline.as_str()),
         ],
     )
+}
+
+async fn note_short(
+    config: &Config,
+    claimed: &ClaimedSession,
+    result: &Result<B256, anyhow::Error>,
+) {
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(kinetic_chain::is_vault_gas_short)
+    {
+        if let Some(ping) = OwnerPing::from_config(config) {
+            ping.tell_vault_needs_funds(
+                &claimed.chain.vault_address().to_string(),
+                &claimed.agent_id.to_string(),
+            )
+            .await;
+        }
+    }
 }
 
 fn relay_text(result: Result<B256, anyhow::Error>, key: &str) -> String {
@@ -558,6 +659,17 @@ mod tests {
         let config = test_config(dir.path(), true);
         let reply = handle(&config, "42", "/status@kinetic_bot").await;
         assert_eq!(reply, text("cli-owner-not-bound"));
+        assert!(!dir.path().join("device.key").exists());
+    }
+
+    #[tokio::test]
+    async fn deposit_and_withdraw_without_a_bound_chat_do_not_open_the_chain() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = test_config(dir.path(), true);
+        let deposit = handle(&config, "42", "/deposit").await;
+        let withdraw = handle(&config, "42", "/withdraw").await;
+        assert_eq!(deposit, text("cli-owner-not-bound"));
+        assert_eq!(withdraw, text("cli-owner-not-bound"));
         assert!(!dir.path().join("device.key").exists());
     }
 

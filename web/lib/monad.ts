@@ -26,6 +26,14 @@ export const IDENTITY: Record<number, `0x${string}`> = {
   143: "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432",
 };
 
+/** Published KineticVM contracts. A plain transfer to the vault is rejected. */
+export const KINETIC: Record<number, { registry: `0x${string}`; vault: `0x${string}` }> = {
+  10143: {
+    registry: "0xa361931269F7e0b1957175a48669F14735E61EDA",
+    vault: "0x77102fCAC7927bB64507DF82bf1ae659465B4EE5",
+  },
+};
+
 export function explorerTx(chainId: number, hash: string): string | null {
   const chain = chainId === 10143 ? monadTestnet : chainId === 143 ? monadMainnet : null;
   if (!chain) return null;

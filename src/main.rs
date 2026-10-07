@@ -2817,10 +2817,19 @@ enum ConfigCommands {
     },
     /// Set a config property (secret fields auto-prompt for masked input)
     Set {
-        /// Property path
-        path: String,
+        /// Property path. Omit this when using --api-key, --model, or --provider.
+        path: Option<String>,
         /// New value (omit for secret fields to get masked input)
         value: Option<String>,
+        /// Replace the device model API key. Prompts with masked input.
+        #[arg(long, conflicts_with_all = ["path", "model", "provider"])]
+        api_key: bool,
+        /// Replace the device model id.
+        #[arg(long, conflicts_with_all = ["path", "api_key", "provider"])]
+        model: Option<String>,
+        /// Replace the device model provider (`openai` or `openai.default`).
+        #[arg(long, conflicts_with_all = ["path", "api_key", "model"])]
+        provider: Option<String>,
         /// Skip interactive prompts — require value on command line, accept raw strings for enums
         #[arg(long)]
         no_interactive: bool,
@@ -7639,10 +7648,53 @@ Add pricing to the active provider profile or supply a catalog entry."
             ConfigCommands::Set {
                 path,
                 value,
+                api_key,
+                model,
+                provider,
                 no_interactive,
                 comment,
                 json,
             } => {
+                if api_key && no_interactive {
+                    anyhow::bail!(
+                        "{}",
+                        t(
+                            "cli-config-set-api-key-tty",
+                            "The API key is typed at a masked prompt. Run `kinetic config set --api-key` from a terminal."
+                        )
+                    );
+                }
+                let (path, value) = if api_key {
+                    let paths = kinetic_runtime::device_card::device_model_paths(&config)
+                        .map_err(anyhow::Error::msg)?;
+                    (paths.api_key, None)
+                } else if let Some(model) = model {
+                    let model = model.trim().to_string();
+                    if model.is_empty() {
+                        anyhow::bail!("Value cannot be empty.");
+                    }
+                    let paths = kinetic_runtime::device_card::device_model_paths(&config)
+                        .map_err(anyhow::Error::msg)?;
+                    (paths.model, Some(model))
+                } else if let Some(provider) = provider {
+                    let assigned =
+                        kinetic_runtime::device_card::provider_assignment(&config, &provider)
+                            .map_err(anyhow::Error::msg)?;
+                    (
+                        kinetic_runtime::device_card::device_provider_path().to_string(),
+                        Some(assigned),
+                    )
+                } else if let Some(path) = path {
+                    (path, value)
+                } else {
+                    anyhow::bail!(
+                        "{}",
+                        t(
+                            "cli-config-set-usage",
+                            "Set one property with `kinetic config set <path> <value>`."
+                        )
+                    );
+                };
                 let known_paths: Vec<String> =
                     config.prop_fields().into_iter().map(|f| f.name).collect();
                 let mut path = kinetic_config::helpers::resolve_field_path(&known_paths, &path);

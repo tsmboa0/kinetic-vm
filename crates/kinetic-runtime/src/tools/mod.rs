@@ -1273,10 +1273,7 @@ fn all_tools_with_runtime_on_thread(
     if root_config.chain.enabled
         && let Some(key_dir) = root_config.config_path.parent()
     {
-        tool_arcs.extend(monad::chain_tools(
-            root_config.chain.clone(),
-            key_dir.to_path_buf(),
-        ));
+        tool_arcs.extend(monad::chain_tools(root_config, key_dir.to_path_buf()));
     }
 
     // A SubAgent runs as an ephemeral clone of its parent and inherits the

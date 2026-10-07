@@ -3041,15 +3041,15 @@ fn default_chain_rpc_url() -> String {
 
 fn default_chain_registry() -> String {
     // contracts/deployments/10143.json
-    "0xBf2E634F8DA4C8C02979C1A2CcAD113eFb259132".into()
+    "0xa361931269F7e0b1957175a48669F14735E61EDA".into()
 }
 
 fn default_chain_vault() -> String {
-    "0xD01eEa46c7E054f98dde0ed58DB5Da73ED4D22fD".into()
+    "0x77102fCAC7927bB64507DF82bf1ae659465B4EE5".into()
 }
 
 fn default_chain_attestor() -> String {
-    "0xAb523187C7687743B29daf3468891E339CbF8f82".into()
+    "0x6e46d149b7d3396b42E874765Cf5a1bb26BD5bA5".into()
 }
 
 fn default_chain_network() -> String {

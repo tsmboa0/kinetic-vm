@@ -30,6 +30,7 @@ sol! {
         function hashAllowRecipient(uint256 agentId, address recipient, uint256 nonce, uint256 deadline) external view returns (bytes32);
         function hashUnpause(uint256 agentId, uint256 nonce, uint256 deadline) external view returns (bytes32);
         function pay(uint256 agentId, address recipient, uint256 amount) external;
+        function topUpGas(uint256 agentId, uint256 amount) external;
         function loosenCaps(uint256 agentId, uint256 perTxCap, uint256 dailyCap, uint256 deadline, bytes signature) external;
         function allowRecipient(uint256 agentId, address recipient, uint256 deadline, bytes signature) external;
         function unpause(uint256 agentId, uint256 deadline, bytes signature) external;
@@ -50,6 +51,63 @@ sol! {
         function attest(ActionProof calldata proof, bytes calldata signature) external;
         function nonceUsed(uint256 agentId, uint256 nonce) external view returns (bool);
     }
+}
+
+/// The device acts while it holds more than 1 MON, and a refill never aims above 5 MON.
+pub const MIN_DEVICE_GAS_WEI: u128 = 1_000_000_000_000_000_000;
+pub const MAX_DEVICE_GAS_WEI: u128 = 5_000_000_000_000_000_000;
+const _: () = assert!(MAX_DEVICE_GAS_WEI > MIN_DEVICE_GAS_WEI);
+
+/// True when the device must take gas from the vault before the next transaction.
+pub fn needs_gas_refill(balance: U256) -> bool {
+    balance <= U256::from(MIN_DEVICE_GAS_WEI)
+}
+
+/// The vault cannot cover a gas top-up that would leave the device above 1 MON.
+#[derive(Debug, PartialEq, Eq)]
+pub struct VaultGasShort;
+
+impl std::fmt::Display for VaultGasShort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the vault does not have enough MON for device gas")
+    }
+}
+
+impl std::error::Error for VaultGasShort {}
+
+pub fn is_vault_gas_short(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| cause.is::<VaultGasShort>())
+}
+
+/// Amount the device should pass to `topUpGas`.
+///
+/// `Ok(None)` means the device already holds more than 1 MON, or the spending
+/// caps cannot lift it above 1 MON. `Err(VaultGasShort)` means the vault
+/// itself cannot.
+pub fn gas_top_up_amount(
+    balance: U256,
+    vault_balance: U256,
+    per_tx_cap: U256,
+    spent_today: U256,
+    daily_cap: U256,
+) -> Result<Option<U256>, VaultGasShort> {
+    if !needs_gas_refill(balance) {
+        return Ok(None);
+    }
+    let room = U256::from(MAX_DEVICE_GAS_WEI).saturating_sub(balance);
+    let daily_left = daily_cap.saturating_sub(spent_today);
+    let cap_amount = room.min(per_tx_cap).min(daily_left);
+    let amount = cap_amount.min(vault_balance);
+    if !amount.is_zero() && balance.saturating_add(amount) > U256::from(MIN_DEVICE_GAS_WEI) {
+        return Ok(Some(amount));
+    }
+    let minimum = U256::from(MIN_DEVICE_GAS_WEI)
+        .saturating_sub(balance)
+        .saturating_add(U256::from(1u64));
+    if vault_balance < minimum {
+        return Err(VaultGasShort);
+    }
+    Ok(None)
 }
 
 /// What the chain says about this device. Chain state wins over any local note.
@@ -274,6 +332,7 @@ impl ChainClient {
         if amount.is_zero() {
             anyhow::bail!("the vault cannot pay zero");
         }
+        self.ensure_gas(key, agent_id).await?;
         let provider = self.signing_provider(key)?;
         let pending = IDeviceVault::new(self.vault, provider)
             .pay(agent_id, recipient, amount)
@@ -359,6 +418,7 @@ impl ChainClient {
         signature_hex: &str,
     ) -> Result<B256> {
         let signature = signature_bytes(signature_hex)?;
+        self.ensure_gas(key, agent_id).await?;
         let provider = self.signing_provider(key)?;
         let pending = IDeviceVault::new(self.vault, provider)
             .unpause(agent_id, deadline, signature.into())
@@ -378,6 +438,7 @@ impl ChainClient {
         signature_hex: &str,
     ) -> Result<B256> {
         let signature = signature_bytes(signature_hex)?;
+        self.ensure_gas(key, agent_id).await?;
         let provider = self.signing_provider(key)?;
         let pending = IDeviceVault::new(self.vault, provider)
             .loosenCaps(agent_id, per_tx_cap, daily_cap, deadline, signature.into())
@@ -396,6 +457,7 @@ impl ChainClient {
         signature_hex: &str,
     ) -> Result<B256> {
         let signature = signature_bytes(signature_hex)?;
+        self.ensure_gas(key, agent_id).await?;
         let provider = self.signing_provider(key)?;
         let pending = IDeviceVault::new(self.vault, provider)
             .allowRecipient(agent_id, recipient, deadline, signature.into())
@@ -462,6 +524,7 @@ impl ChainClient {
             .await
             .map_err(|_| anyhow::Error::msg("failed to hash the action proof"))?;
         let signature = key.sign_hash(&digest)?.as_bytes().to_vec();
+        self.ensure_gas(key, agent_id).await?;
         let provider = self.signing_provider(key)?;
         let pending = IKineticAttestor::new(self.attestor, provider)
             .attest(proof, signature.into())
@@ -480,6 +543,55 @@ impl ChainClient {
                 nonce,
             ),
         })
+    }
+
+    /// Call `topUpGas` when the device holds 1 MON or less.
+    /// The amount stays inside the per-transaction cap and never aims above 5 MON.
+    async fn ensure_gas(&self, key: &SoftwareKey, agent_id: U256) -> Result<()> {
+        let balance = self
+            .provider
+            .get_balance(key.address())
+            .await
+            .map_err(|_| anyhow::Error::msg("failed to read the device gas balance"))?;
+        if !needs_gas_refill(balance) {
+            return Ok(());
+        }
+        let status = self.vault_status(agent_id).await?;
+        let amount = match gas_top_up_amount(
+            balance,
+            status.balance,
+            status.per_tx_cap,
+            status.spent_today,
+            status.daily_cap,
+        ) {
+            Ok(Some(amount)) => amount,
+            Ok(None) => {
+                return Err(anyhow::Error::msg(
+                    "the spending cap is too low to top up device gas",
+                ));
+            }
+            Err(short) => return Err(anyhow::Error::new(short)),
+        };
+        let provider = self.signing_provider(key)?;
+        let pending = IDeviceVault::new(self.vault, provider)
+            .topUpGas(agent_id, amount)
+            .send()
+            .await
+            .map_err(|error| {
+                anyhow::Error::msg(format!(
+                    "the device could not take gas from the vault: {error}"
+                ))
+            })?;
+        transaction_hash(pending).await?;
+        let balance = self
+            .provider
+            .get_balance(key.address())
+            .await
+            .map_err(|_| anyhow::Error::msg("failed to read the device gas balance"))?;
+        if needs_gas_refill(balance) {
+            return Err(anyhow::Error::new(VaultGasShort));
+        }
+        Ok(())
     }
 
     fn signing_provider(&self, key: &SoftwareKey) -> Result<impl Provider + Clone> {
@@ -721,9 +833,9 @@ fn compact_payload(query: &ClaimPageQuery<'_>) -> Option<Vec<u8>> {
 fn published_testnet(query: &ClaimPageQuery<'_>) -> bool {
     // contracts/deployments/10143.json. A custom deployment keeps the long URL.
     query.chain_id == 10_143
-        && same_address(query.registry, "0xBf2E634F8DA4C8C02979C1A2CcAD113eFb259132")
-        && same_address(query.vault, "0xD01eEa46c7E054f98dde0ed58DB5Da73ED4D22fD")
-        && same_address(query.attestor, "0xAb523187C7687743B29daf3468891E339CbF8f82")
+        && same_address(query.registry, "0xa361931269F7e0b1957175a48669F14735E61EDA")
+        && same_address(query.vault, "0x77102fCAC7927bB64507DF82bf1ae659465B4EE5")
+        && same_address(query.attestor, "0x6e46d149b7d3396b42E874765Cf5a1bb26BD5bA5")
 }
 
 fn same_address(left: &str, right: &str) -> bool {
@@ -846,6 +958,51 @@ fn query_component(value: &str) -> String {
 mod tests {
     use super::*;
     use kinetic_config::schema::ChainConfig;
+
+    #[test]
+    fn gas_top_up_stays_inside_the_per_transaction_cap_and_five_mon() {
+        let one = U256::from(MIN_DEVICE_GAS_WEI);
+        let five = U256::from(MAX_DEVICE_GAS_WEI);
+        assert_eq!(
+            gas_top_up_amount(
+                one,
+                five,
+                U256::from(10) * one,
+                U256::ZERO,
+                U256::from(50) * one
+            ),
+            Ok(Some(U256::from(4) * one))
+        );
+        assert_eq!(
+            gas_top_up_amount(one, five, one, U256::ZERO, U256::from(2) * one),
+            Ok(Some(one))
+        );
+        assert_eq!(
+            gas_top_up_amount(U256::ZERO, U256::ZERO, one, U256::ZERO, one),
+            Err(VaultGasShort)
+        );
+        assert_eq!(
+            gas_top_up_amount(
+                U256::from(500_000_000_000_000_000u128),
+                one / U256::from(10),
+                one,
+                U256::ZERO,
+                one
+            ),
+            Err(VaultGasShort)
+        );
+        assert_eq!(
+            gas_top_up_amount(
+                one / U256::from(2),
+                U256::from(10) * one,
+                one / U256::from(10),
+                U256::ZERO,
+                U256::from(10) * one
+            ),
+            Ok(None)
+        );
+        assert!(is_vault_gas_short(&anyhow::Error::new(VaultGasShort)));
+    }
 
     #[test]
     fn agent_id_zero_stays_claimed_when_the_binding_says_so() {

@@ -340,7 +340,7 @@ mod tests {
         assert!(mark.iter().any(|line| line.contains('╚')));
         assert!(
             mark.last()
-                .is_some_and(|line| line.contains("physical device"))
+                .is_some_and(|line| line.contains("Connecting physical AI devices"))
         );
         assert_eq!(MARK_HOLD, std::time::Duration::from_secs(2));
     }

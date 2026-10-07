@@ -3703,6 +3703,8 @@ impl TelegramChannel {
             serde_json::json!({ "command": "resume", "description": telegram_cli_string("channel-telegram-cmd-resume-desc") }),
             serde_json::json!({ "command": "limits", "description": telegram_cli_string("channel-telegram-cmd-limits-desc") }),
             serde_json::json!({ "command": "approve","description": telegram_cli_string("channel-telegram-cmd-approve-desc") }),
+            serde_json::json!({ "command": "deposit","description": telegram_cli_string("channel-telegram-cmd-deposit-desc") }),
+            serde_json::json!({ "command": "withdraw","description": telegram_cli_string("channel-telegram-cmd-withdraw-desc") }),
         ];
 
         // Track registered names to deduplicate across skills and tools.
@@ -22216,6 +22218,8 @@ mod tests {
             ("resume", "channel-telegram-cmd-resume-desc"),
             ("limits", "channel-telegram-cmd-limits-desc"),
             ("approve", "channel-telegram-cmd-approve-desc"),
+            ("deposit", "channel-telegram-cmd-deposit-desc"),
+            ("withdraw", "channel-telegram-cmd-withdraw-desc"),
         ];
         entries
             .into_iter()

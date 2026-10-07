@@ -5,7 +5,7 @@ export const links = {
 } as const;
 
 export function homeHref(host: string): string {
-  if (host.startsWith("claim.")) return "https://kineticvm.xyz";
+  if (host.startsWith("claim.") || host.startsWith("vault-deposit.")) return "https://kineticvm.xyz";
   return "/";
 }
 

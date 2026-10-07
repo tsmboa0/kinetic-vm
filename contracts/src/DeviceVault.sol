@@ -43,6 +43,10 @@ contract DeviceVault is IDeviceVault, EIP712, ReentrancyGuard {
     error TransferFailed();
     error AlreadyAllowed();
     error NotAllowed();
+    error GasCap();
+
+    /// @notice A device-initiated gas top-up never leaves the device holding more than this.
+    uint256 public constant MAX_DEVICE_GAS = 5 ether;
 
     event Initialized(uint256 indexed agentId, uint256 perTxCap, uint256 dailyCap);
     event Rebound(uint256 indexed agentId, uint256 perTxCap, uint256 dailyCap);
@@ -113,11 +117,16 @@ contract DeviceVault is IDeviceVault, EIP712, ReentrancyGuard {
         emit Paid(agentId, recipient, amount);
     }
 
-    /// @notice Owner sends gas to the active device. The device cannot pull funds itself.
-    /// The transfer still counts against the caps and cannot be redirected.
+    /// @notice Send gas to the active device. The owner or that device may call it.
+    /// The transfer still counts against the caps. A device call cannot leave the key above MAX_DEVICE_GAS.
     function topUpGas(uint256 agentId, uint256 amount) external nonReentrant {
-        if (msg.sender != _owner(agentId)) revert NotOwner();
         address device = registry.activeDevice(agentId);
+        bool deviceCaller = msg.sender == device;
+        if (msg.sender != _owner(agentId) && !deviceCaller) revert NotOwner();
+        if (deviceCaller) {
+            uint256 balance = device.balance;
+            if (balance >= MAX_DEVICE_GAS || amount > MAX_DEVICE_GAS - balance) revert GasCap();
+        }
         _spend(agentId, device, amount, false);
         emit GasToppedUp(agentId, device, amount);
     }
