@@ -4,8 +4,8 @@ Status as of Oct 3, 2026. Hackathon: Monad Metropolis, Trust, Identity & AI
 Infrastructure track. Submissions close **Oct 13**.
 
 Sections 1–9 are the October 3 plan and are partly stale (old vault
-addresses, owner-only gas). Section 10 is in. Section 11.1 and 11.2 are
-in. The next implementation is **section 11.3**.
+addresses, owner-only gas). Section 10 is in. Section 11.1 through 11.3
+are in. The next implementation is **section 11.4**.
 
 KineticVM gives physical AI devices a Monad identity (ERC-8004), an
 owner-controlled wallet with spending limits, and signed onchain attestations
@@ -621,9 +621,14 @@ toolbox world. The starter is something to replace, not a vending machine.
 
 ### 11.3 `kinetic build`
 
-Run inside the package directory on the developer machine. Compiles
-`src/lib.rs` to `plugin.wasm` for `wasm32-wasip2` by invoking `cargo`, then
-writes the hash. It does not vendor a compiler into Kinetic.
+In. `kinetic build` in the package directory, or `kinetic build <dir>`,
+runs the `cargo` already on that machine. It compiles for `wasm32-wasip2`,
+copies the component to the manifest's `wasm_path` (the starter uses
+`plugin.wasm`), and writes `wasm_sha256`. Cargo's own messages stay on the
+terminal. A missing Cargo or a missing `wasm32-wasip2` target stops with
+those words and does not start a compile. The package `Cargo.toml` is its
+own workspace, so a parent workspace does not absorb it. The Kinetic binary
+does not contain rustc.
 
 ### 11.4 `kinetic plugin install <dir>`
 

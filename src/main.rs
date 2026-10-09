@@ -1132,6 +1132,13 @@ Examples:
         props_command: DeprecatedPropsCommands,
     },
 
+    /// Compile a plugin package with the Cargo already installed on this machine
+    #[cfg(feature = "plugins-wasm")]
+    Build {
+        /// Package directory. Defaults to the current directory.
+        path: Option<std::path::PathBuf>,
+    },
+
     /// Manage WASM plugins
     #[cfg(feature = "plugins-wasm")]
     Plugin {
@@ -1643,6 +1650,63 @@ enum PluginCommands {
     },
     /// Move plugins from legacy install directories into the configured one
     Migrate,
+}
+
+/// Compile a plugin package. Cargo's own messages stay on the terminal.
+#[cfg(feature = "plugins-wasm")]
+fn build_plugin_package(path: &std::path::Path) -> Result<()> {
+    let built = kinetic::plugins::package_build::build_package(path).map_err(|error| {
+        use kinetic::plugins::package_build::BuildError;
+        match error {
+            BuildError::NotAPackage(path) => anyhow::Error::msg(ta(
+                "cli-plugin-build-not-package",
+                &[("path", &path.display().to_string())],
+                "{$path} is not a plugin package. It needs Cargo.toml and manifest.toml.",
+            )),
+            BuildError::CargoMissing => anyhow::Error::msg(ta(
+                "cli-plugin-build-no-cargo",
+                &[],
+                "Cargo is not installed. Install Rust on this machine, then run kinetic build again. The device does not need a compiler.",
+            )),
+            BuildError::TargetMissing => anyhow::Error::msg(ta(
+                "cli-plugin-build-no-target",
+                &[],
+                "The wasm32-wasip2 target is not installed. Run: rustup target add wasm32-wasip2",
+            )),
+            BuildError::Failed => anyhow::Error::msg(ta(
+                "cli-plugin-build-failed",
+                &[],
+                "The build failed.",
+            )),
+            BuildError::BadWasmPath(path) => anyhow::Error::msg(ta(
+                "cli-plugin-build-bad-wasm-path",
+                &[("path", &path)],
+                "wasm_path {$path} must stay inside the package directory.",
+            )),
+            BuildError::Manifest(error) => anyhow::Error::msg(ta(
+                "cli-plugin-build-manifest",
+                &[("error", &error)],
+                "Could not update manifest.toml: {$error}",
+            )),
+            BuildError::Io(error) => anyhow::Error::msg(ta(
+                "cli-plugin-build-manifest",
+                &[("error", &error.to_string())],
+                "Could not update manifest.toml: {$error}",
+            )),
+        }
+    })?;
+    println!(
+        "{}",
+        ta(
+            "cli-plugin-build-wrote",
+            &[
+                ("wasm", &built.wasm.display().to_string()),
+                ("sha256", &built.sha256),
+            ],
+            "Wrote {$wasm}. SHA-256 {$sha256}.",
+        )
+    );
+    Ok(())
 }
 
 /// Write a starter plugin package. User-facing failures stay on Fluent keys.
@@ -8574,6 +8638,11 @@ Add pricing to the active provider profile or supply a catalog entry."
                 "`kinetic props` has been renamed to `kinetic config`. \
                  Replace `props` with `config` in your command and try again."
             );
+        }
+
+        #[cfg(feature = "plugins-wasm")]
+        Commands::Build { path } => {
+            build_plugin_package(path.as_deref().unwrap_or(std::path::Path::new(".")))
         }
 
         #[cfg(feature = "plugins-wasm")]

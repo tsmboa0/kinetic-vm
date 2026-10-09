@@ -100,6 +100,9 @@ fn fill(template: &str, name: &str) -> String {
 
 const CARGO_TOML: &str = r#"# Replace the tools in src/lib.rs. `kinetic build` compiles this crate to plugin.wasm.
 # The host stores plugin state. There is no state file in this directory.
+# This package is its own workspace, so a parent Cargo workspace does not absorb it.
+
+[workspace]
 
 [package]
 name = "__PACKAGE__"
@@ -157,7 +160,7 @@ compile_error!("build this package for wasm32-wasip2");
 #[cfg(target_family = "wasm")]
 mod component {
     wit_bindgen::generate!({
-        path: "../wit/v0",
+        path: "wit/v0",
         world: "tools-plugin",
         features: ["plugins-wit-v0"],
     });

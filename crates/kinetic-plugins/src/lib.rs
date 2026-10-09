@@ -22,6 +22,7 @@ pub mod error;
 pub mod event;
 pub mod host;
 pub mod instance;
+pub mod package_build;
 pub mod registry;
 #[cfg(feature = "plugins-wasmtime")]
 pub mod runtime;
