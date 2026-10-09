@@ -4,8 +4,7 @@ Status as of Oct 3, 2026. Hackathon: Monad Metropolis, Trust, Identity & AI
 Infrastructure track. Submissions close **Oct 13**.
 
 Sections 1–9 are the October 3 plan and are partly stale (old vault
-addresses, owner-only gas). Section 10 is in. Section 11.1 through 11.3
-are in. The next implementation is **section 11.4**.
+addresses, owner-only gas). Section 10 is in. Section 11 is in.
 
 KineticVM gives physical AI devices a Monad identity (ERC-8004), an
 owner-controlled wallet with spending limits, and signed onchain attestations
@@ -632,8 +631,11 @@ does not contain rustc.
 
 ### 11.4 `kinetic plugin install <dir>`
 
-Install already copies the component into `~/.kinetic/plugins` and checks
-that it loads. Extend it to copy `sop/` into the sops directory and print
-`records.example.toml` so the operator can put it under `[records]`. The
-live schema stays in the device config. The plugin does not become a second
-copy of it.
+In. Install still copies the component into the plugins directory and checks
+that it loads. When the package has `sop/SOP.toml`, that procedure is copied
+to `<sops_dir>/<name>/`, the name coming from the procedure itself. An
+existing procedure of that name is left in place. A symlink, a name that
+leaves the SOP root, or a procedure the engine cannot read is refused and
+the new directory is removed. With SOP turned off, the procedure is not
+copied. `records.example.toml` is printed so the operator can put it under
+`[records]`. The live schema stays in the device config.

@@ -1742,6 +1742,238 @@ fn create_plugin_package(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "plugins-wasm")]
+const RECORDS_EXAMPLE_PRINT_LIMIT: u64 = 64 * 1024;
+
+/// A procedure copied before the plugin publish, so a failed publish can remove it.
+#[cfg(feature = "plugins-wasm")]
+struct StagedProcedure {
+    remove_on_failure: Option<PathBuf>,
+    notice: ProcedureNotice,
+}
+
+#[cfg(feature = "plugins-wasm")]
+enum ProcedureNotice {
+    Absent,
+    Disabled,
+    Installed { name: String, path: String },
+    Kept { name: String, path: String },
+}
+
+#[cfg(feature = "plugins-wasm")]
+impl StagedProcedure {
+    fn absent() -> Self {
+        Self {
+            remove_on_failure: None,
+            notice: ProcedureNotice::Absent,
+        }
+    }
+
+    fn undo(&self) {
+        if let Some(path) = &self.remove_on_failure {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+
+    fn print_notice(&self) {
+        match &self.notice {
+            ProcedureNotice::Absent => {}
+            ProcedureNotice::Disabled => println!(
+                "{}",
+                t(
+                    "cli-plugin-install-sop-disabled",
+                    "This package includes a procedure, and SOP is turned off. The procedure was not installed.",
+                )
+            ),
+            ProcedureNotice::Installed { name, path } => println!(
+                "{}",
+                ta(
+                    "cli-plugin-install-sop-wrote",
+                    &[("name", name), ("path", path)],
+                    "Installed procedure {$name} at {$path}.",
+                )
+            ),
+            ProcedureNotice::Kept { name, path } => println!(
+                "{}",
+                ta(
+                    "cli-plugin-install-sop-kept",
+                    &[("name", name), ("path", path)],
+                    "Procedure {$name} is already at {$path}. Left it in place.",
+                )
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "plugins-wasm")]
+fn procedure_failed(error: &str) -> anyhow::Error {
+    anyhow::Error::msg(ta(
+        "cli-plugin-install-sop-failed",
+        &[("error", error)],
+        "Could not install the procedure: {$error}",
+    ))
+}
+
+/// Copy `sop/` when SOP is on. An existing procedure is kept.
+#[cfg(feature = "plugins-wasm")]
+fn stage_package_procedure(config: &Config, package_dir: &Path) -> Result<StagedProcedure> {
+    if !config.sop.runtime_enabled() {
+        return if procedure_manifest_present(package_dir)? {
+            Ok(StagedProcedure {
+                remove_on_failure: None,
+                notice: ProcedureNotice::Disabled,
+            })
+        } else {
+            Ok(StagedProcedure::absent())
+        };
+    }
+    let sops_dir = kinetic_runtime::sop::resolve_sops_dir(
+        &config.install_root_dir(),
+        config.sop.sops_dir.as_deref(),
+    );
+    match kinetic_runtime::sop::install_package_sop(package_dir, &sops_dir) {
+        Ok(None) => Ok(StagedProcedure::absent()),
+        Ok(Some(installed)) => {
+            let path = installed.directory.display().to_string();
+            if installed.already_present {
+                Ok(StagedProcedure {
+                    remove_on_failure: None,
+                    notice: ProcedureNotice::Kept {
+                        name: installed.name,
+                        path,
+                    },
+                })
+            } else {
+                Ok(StagedProcedure {
+                    remove_on_failure: Some(installed.directory),
+                    notice: ProcedureNotice::Installed {
+                        name: installed.name,
+                        path,
+                    },
+                })
+            }
+        }
+        Err(error) => Err(procedure_failed(&error.to_string())),
+    }
+}
+
+#[cfg(feature = "plugins-wasm")]
+fn procedure_manifest_present(package_dir: &Path) -> Result<bool> {
+    let path = package_dir.join("sop").join("SOP.toml");
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(procedure_failed(&error.to_string())),
+        Ok(meta) if meta.file_type().is_file() => Ok(true),
+        Ok(_) => Err(procedure_failed(
+            "the procedure must be regular files inside the package",
+        )),
+    }
+}
+
+#[cfg(feature = "plugins-wasm")]
+fn print_records_example(package_dir: &Path) -> Result<()> {
+    let path = package_dir.join("records.example.toml");
+    let meta = match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(anyhow::Error::msg(ta(
+                "cli-plugin-install-records-unreadable",
+                &[("error", &error.to_string())],
+                "Could not read records.example.toml: {$error}",
+            )));
+        }
+        Ok(meta) => meta,
+    };
+    if !meta.file_type().is_file() {
+        return Err(anyhow::Error::msg(ta(
+            "cli-plugin-install-records-unreadable",
+            &[("error", "records.example.toml must be a regular file")],
+            "Could not read records.example.toml: {$error}",
+        )));
+    }
+    let shown = path.display().to_string();
+    if meta.len() > RECORDS_EXAMPLE_PRINT_LIMIT {
+        println!(
+            "{}",
+            ta(
+                "cli-plugin-install-records-too-large",
+                &[("path", &shown)],
+                "records.example.toml is too large to print. Read it at {$path}.",
+            )
+        );
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(&path).map_err(|error| {
+        anyhow::Error::msg(ta(
+            "cli-plugin-install-records-unreadable",
+            &[("error", &error.to_string())],
+            "Could not read records.example.toml: {$error}",
+        ))
+    })?;
+    println!(
+        "{}",
+        t(
+            "cli-plugin-install-records",
+            "Copy this into the device config under [records]. Recording stays off until you do. The plugin does not store the schema.",
+        )
+    );
+    println!("{text}");
+    Ok(())
+}
+
+#[cfg(feature = "plugins-wasm")]
+fn rollback_installed_plugin(
+    host: &mut kinetic::plugins::host::PluginHost,
+    name: &str,
+    error: anyhow::Error,
+) -> Result<()> {
+    match host.remove(name) {
+        Ok(()) => Err(error.context(ta(
+            "cli-plugin-install-rolled-back",
+            &[("name", name)],
+            "Removed plugin {$name} because a later install step failed. Fix the package and run the install again.",
+        ))),
+        Err(rollback) => Err(error.context(ta(
+            "cli-plugin-install-rollback-failed",
+            &[("name", name), ("error", &rollback.to_string())],
+            "Plugin {$name} is still installed after a later step failed ({$error}). Remove it with `kinetic plugin remove {$name}` before retrying.",
+        ))),
+    }
+}
+
+/// Load-check, copy the procedure, publish the plugin, then print the records example.
+#[cfg(feature = "plugins-wasm")]
+async fn install_admitted_package(
+    host: &mut kinetic::plugins::host::PluginHost,
+    config: &mut Config,
+    admitted: kinetic::plugins::host::AdmittedSource,
+    limits: kinetic::plugins::component::PluginLimits,
+    no_verify: bool,
+    announce_installed: impl FnOnce(&str),
+) -> Result<()> {
+    verify_plugin_loads_or_bail(&admitted, limits, no_verify).await?;
+    let plugin_name = admitted.manifest().name.clone();
+    let package_dir = admitted.source_dir().to_path_buf();
+    let staged = stage_package_procedure(config, &package_dir)?;
+    if let Err(error) = Box::pin(publish_and_seed_plugin(
+        host,
+        config,
+        admitted,
+        announce_installed,
+    ))
+    .await
+    {
+        staged.undo();
+        return Err(error);
+    }
+    if let Err(error) = print_records_example(&package_dir) {
+        staged.undo();
+        return rollback_installed_plugin(host, &plugin_name, error);
+    }
+    staged.print_notice();
+    Ok(())
+}
+
 /// Run the install-time load-check on an admitted source and decide whether
 /// the install may proceed. A plugin that does not instantiate against this
 /// host's WIT world would install cleanly and then be silently skipped at
@@ -8747,11 +8979,12 @@ Add pricing to the active provider profile or supply a catalog entry."
                 let limits = kinetic_runtime::plugin_runtime::plugin_limits(&config);
                 if plugin_registry::is_local_plugin_source(&source) {
                     let admitted = host.admit_source(&source)?;
-                    verify_plugin_loads_or_bail(&admitted, limits, no_verify).await?;
-                    Box::pin(publish_and_seed_plugin(
+                    install_admitted_package(
                         &mut host,
                         &mut config,
                         admitted,
+                        limits,
+                        no_verify,
                         |_name| {
                             println!(
                                 "{}",
@@ -8762,7 +8995,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                                 )
                             );
                         },
-                    ))
+                    )
                     .await?;
                 } else {
                     let registry_url = plugin_registry::registry_url(registry.as_deref());
@@ -8782,11 +9015,12 @@ Add pricing to the active provider profile or supply a catalog entry."
                     .await?;
                     let plugin_dir = downloaded.plugin_dir().display().to_string();
                     let admitted = host.admit_source(&plugin_dir)?;
-                    verify_plugin_loads_or_bail(&admitted, limits, no_verify).await?;
-                    Box::pin(publish_and_seed_plugin(
+                    install_admitted_package(
                         &mut host,
                         &mut config,
                         admitted,
+                        limits,
+                        no_verify,
                         |_name| {
                             println!(
                                 "{}",
@@ -8800,7 +9034,7 @@ Add pricing to the active provider profile or supply a catalog entry."
                                 )
                             );
                         },
-                    ))
+                    )
                     .await?;
                 }
                 Ok(())

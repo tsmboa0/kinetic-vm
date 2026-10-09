@@ -94,6 +94,13 @@ impl AdmittedSource {
     pub fn component(&self) -> Option<&AdmittedComponent> {
         self.component.as_ref()
     }
+
+    /// Directory the manifest was admitted from. Procedure and example files
+    /// are read from here, not from the installed copy.
+    #[must_use]
+    pub fn source_dir(&self) -> &Path {
+        &self.source_dir
+    }
 }
 
 impl PluginHost {

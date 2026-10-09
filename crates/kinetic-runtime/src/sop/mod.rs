@@ -10,6 +10,7 @@ pub mod engine;
 pub mod executor;
 pub mod graph;
 pub mod metrics;
+pub mod package_install;
 pub mod procedural_memory;
 pub mod route;
 pub mod rundata;
@@ -52,6 +53,7 @@ pub use graph::{
     render_graph_text,
 };
 pub use metrics::SopMetricsCollector;
+pub use package_install::{PackageSopError, PackageSopInstall, install_package_sop};
 pub use scope::StepToolScope;
 pub use step_contract::{StepFailure, StepRouting, SwitchRule};
 pub use store::{
