@@ -1614,6 +1614,11 @@ enum PluginCommands {
         #[arg(long)]
         registry: Option<String>,
     },
+    /// Write a starter plugin package into a new directory
+    Create {
+        /// Directory to create. Its name is the plugin name.
+        path: std::path::PathBuf,
+    },
     /// Install a plugin from a local directory/manifest or registry name
     Install {
         /// Path to plugin directory/manifest, or registry name/version
@@ -1638,6 +1643,39 @@ enum PluginCommands {
     },
     /// Move plugins from legacy install directories into the configured one
     Migrate,
+}
+
+/// Write a starter plugin package. User-facing failures stay on Fluent keys.
+#[cfg(feature = "plugins-wasm")]
+fn create_plugin_package(path: &std::path::Path) -> Result<()> {
+    let created = kinetic::plugins::scaffold::create_package(path).map_err(|error| match error {
+        kinetic::plugins::scaffold::CreateError::BadName(name) => {
+            anyhow::Error::msg(ta(
+                "cli-plugin-create-bad-name",
+                &[("name", &name)],
+                "Plugin name {$name} must be lowercase letters, digits, and underscores, and must not start with a digit.",
+            ))
+        }
+        kinetic::plugins::scaffold::CreateError::Exists(path) => anyhow::Error::msg(ta(
+            "cli-plugin-create-exists",
+            &[("path", &path.display().to_string())],
+            "{$path} already exists.",
+        )),
+        kinetic::plugins::scaffold::CreateError::Io(error) => anyhow::Error::msg(ta(
+            "cli-plugin-create-failed",
+            &[("error", &error.to_string())],
+            "Could not write the plugin package: {$error}",
+        )),
+    })?;
+    println!(
+        "{}",
+        ta(
+            "cli-plugin-create-wrote",
+            &[("path", &created.display().to_string())],
+            "Wrote {$path}. Replace the starter tools, the SOP step, and the record field. The note at the top of each file says what it is for.",
+        )
+    );
+    Ok(())
 }
 
 /// Run the install-time load-check on an admitted source and decide whether
@@ -8540,6 +8578,7 @@ Add pricing to the active provider profile or supply a catalog entry."
 
         #[cfg(feature = "plugins-wasm")]
         Commands::Plugin { plugin_command } => match plugin_command {
+            PluginCommands::Create { path } => create_plugin_package(&path),
             PluginCommands::List { verify } => {
                 let host = plugin_host_with_configured_security(&config)?;
                 let plugins = host.list_plugins();

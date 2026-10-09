@@ -4,8 +4,8 @@ Status as of Oct 3, 2026. Hackathon: Monad Metropolis, Trust, Identity & AI
 Infrastructure track. Submissions close **Oct 13**.
 
 Sections 1–9 are the October 3 plan and are partly stale (old vault
-addresses, owner-only gas). Section 10 is in. The next implementation is
-**section 11**.
+addresses, owner-only gas). Section 10 is in. Section 11.1 and 11.2 are
+in. The next implementation is **section 11.3**.
 
 KineticVM gives physical AI devices a Monad identity (ERC-8004), an
 owner-controlled wallet with spending limits, and signed onchain attestations
@@ -573,12 +573,15 @@ every tool in the package shares that state and the package config.
 
 ```text
 <name>/
+  Cargo.toml
   manifest.toml            permissions, egress hosts, config schema
   src/lib.rs               the tools, plus a few lines that save one state key
+  wit/v0/                  the host WIT this package binds
   sop/SOP.toml
   sop/SOP.md
   skills/<name>/SKILL.md   optional; delete the directory and drop `skill` if unused
   records.example.toml     the `[records]` block, with a comment
+  .gitignore
 ```
 
 `kinetic build` does not make the device heavier. It runs `cargo` that is
@@ -606,11 +609,15 @@ stays. Existing fixtures are unchanged.
 
 ### 11.2 `kinetic plugin create <dir>`
 
-Writes the skeleton above with a short note at the top of each file and a
-tiny generic starter in the body. Two tools, one SOP step, one record
-field, one short skill, and a state read/write in `src/lib.rs`. The
-starter is something to replace, not a vending machine. A vending walkthrough
-stays in the docs.
+In. The directory name is the package name: lowercase letters, digits, and
+underscores, and it must not start with a digit. The command refuses a path
+that already exists.
+
+It writes the skeleton above with a short note at the top of each file and a
+tiny generic starter in the body. Two tools (`ping` and `note`), one SOP
+step, one record field, one short skill, and a state read/write in
+`src/lib.rs`. `wit/v0` is copied from the host so the package binds the
+toolbox world. The starter is something to replace, not a vending machine.
 
 ### 11.3 `kinetic build`
 

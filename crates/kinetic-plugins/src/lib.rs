@@ -25,6 +25,7 @@ pub mod instance;
 pub mod registry;
 #[cfg(feature = "plugins-wasmtime")]
 pub mod runtime;
+pub mod scaffold;
 #[cfg(feature = "plugins-wasmtime")]
 pub mod services;
 pub mod signature;
