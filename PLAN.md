@@ -28,7 +28,7 @@ must stay.
   CARGO_INCREMENTAL=0 cargo +1.96.0 fmt --all -- --check
   CARGO_INCREMENTAL=0 cargo +1.96.0 clippy --workspace --all-targets --features ci-all -- -D warnings
   CARGO_INCREMENTAL=0 cargo +1.96.0 test --workspace --features ci-all --no-fail-fast
-  CARGO_INCREMENTAL=0 cargo +1.96.0 check --no-default-features --features agent-runtime,channel-telegram,hardware,peripheral-rpi
+  CARGO_INCREMENTAL=0 cargo +1.96.0 check --no-default-features --features agent-runtime,channel-telegram,hardware,peripheral-rpi,plugins-wasm-cranelift
   ```
 - A full clippy run takes about 1–3 minutes. The full test build and run takes
   much longer, because the workspace is huge (`schema.rs` alone is ~49k lines).
@@ -189,7 +189,7 @@ manual dispatch:
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`, then
   `cargo test --workspace --locked --no-fail-fast`
 - the lean device check
-  (`agent-runtime,channel-telegram,hardware,peripheral-rpi`)
+  (`agent-runtime,channel-telegram,hardware,peripheral-rpi,plugins-wasm-cranelift`)
 
 The lean job has its own cache key so it does not reuse the default-feature
 build. Push the workflow, then confirm the Actions run is green. It has not
@@ -583,11 +583,12 @@ every tool in the package shares that state and the package config.
   .gitignore
 ```
 
-`kinetic build` does not make the device heavier. It runs `cargo` that is
-already installed on the developer machine, writes `plugin.wasm`, and
-records `wasm_path` and `wasm_sha256` in the manifest. The Pi install does
-not include rustc, cargo, or the `wasm32-wasip2` target. If either is
-missing, the command says so and stops. The compiler message stays visible.
+The published binary includes the plugin engine, so `kinetic plugin create`,
+`kinetic build`, and `kinetic plugin install` are in the file a developer
+installs. `kinetic build` runs the `cargo` already on that machine. It does
+not contain rustc. The Pi install does not include rustc, cargo, or the
+`wasm32-wasip2` target. If either is missing, the command says so and stops.
+The compiler message stays visible.
 
 Do these in order. The scaffold comes after a package can hold more than
 one tool, so the skeleton matches what the host loads.
@@ -637,5 +638,7 @@ to `<sops_dir>/<name>/`, the name coming from the procedure itself. An
 existing procedure of that name is left in place. A symlink, a name that
 leaves the SOP root, or a procedure the engine cannot read is refused and
 the new directory is removed. With SOP turned off, the procedure is not
-copied. `records.example.toml` is printed so the operator can put it under
-`[records]`. The live schema stays in the device config.
+copied. `records.example.toml` is written into the device `config.toml`
+under `[records]`, and the command says so. Installing a plugin again
+replaces that schema. One device runs one business plugin, so the new
+package's fields become the live schema.

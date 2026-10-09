@@ -40,7 +40,7 @@ The binary is `target/release/kinetic`.
 A smaller device build, without the default gateway and channel set:
 
 ```bash
-cargo build --release --no-default-features --features agent-runtime,channel-telegram,hardware,peripheral-rpi
+cargo build --release --no-default-features --features agent-runtime,channel-telegram,hardware,peripheral-rpi,plugins-wasm-cranelift
 ```
 
 ## Quick start

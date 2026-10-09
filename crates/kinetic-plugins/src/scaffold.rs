@@ -263,7 +263,8 @@ description: Replace this skill. Delete this directory and remove skill from the
 Replace this body. A skill is guidance the model can read. The SOP is the procedure that calls the tools.
 "#;
 
-const RECORDS_EXAMPLE: &str = r#"# Copy this block into the device config.toml.
+const RECORDS_EXAMPLE: &str = r#"# kinetic plugin install writes these fields into the device config.
+# Installing a plugin again replaces them.
 # The host checks these fields, signs that JSON, and stores the line.
 # Leave the list empty and recording stays off.
 # Do not add chat ids, wallets, or access codes.

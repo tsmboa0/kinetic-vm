@@ -70,7 +70,7 @@ jobs:
       - name: Check the device feature set
         run: >
           cargo check --locked --no-default-features
-          --features agent-runtime,channel-telegram,hardware,peripheral-rpi
+          --features agent-runtime,channel-telegram,hardware,peripheral-rpi,plugins-wasm-cranelift
 
   install-script:
     name: Install script

@@ -27,17 +27,17 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            features: agent-runtime,channel-telegram,hardware,peripheral-rpi
+            features: agent-runtime,channel-telegram,hardware,peripheral-rpi,plugins-wasm-cranelift
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            features: agent-runtime,channel-telegram,hardware,peripheral-rpi
+            features: agent-runtime,channel-telegram,hardware,peripheral-rpi,plugins-wasm-cranelift
             cross: true
           - os: macos-14
             target: aarch64-apple-darwin
-            features: agent-runtime,channel-telegram,hardware
+            features: agent-runtime,channel-telegram,hardware,plugins-wasm-cranelift
           - os: macos-14
             target: x86_64-apple-darwin
-            features: agent-runtime,channel-telegram,hardware
+            features: agent-runtime,channel-telegram,hardware,plugins-wasm-cranelift
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master

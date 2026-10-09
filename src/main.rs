@@ -1871,53 +1871,57 @@ fn procedure_manifest_present(package_dir: &Path) -> Result<bool> {
 }
 
 #[cfg(feature = "plugins-wasm")]
-fn print_records_example(package_dir: &Path) -> Result<()> {
+fn records_example_failed(error: &str) -> anyhow::Error {
+    anyhow::Error::msg(ta(
+        "cli-plugin-install-records-unreadable",
+        &[("error", error)],
+        "Could not read records.example.toml: {$error}",
+    ))
+}
+
+/// Write the package schema into the device config. A later install replaces it.
+#[cfg(feature = "plugins-wasm")]
+async fn write_package_records(config: &mut Config, package_dir: &Path) -> Result<()> {
     let path = package_dir.join("records.example.toml");
     let meta = match std::fs::symlink_metadata(&path) {
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(anyhow::Error::msg(ta(
-                "cli-plugin-install-records-unreadable",
-                &[("error", &error.to_string())],
-                "Could not read records.example.toml: {$error}",
-            )));
-        }
+        Err(error) => return Err(records_example_failed(&error.to_string())),
         Ok(meta) => meta,
     };
     if !meta.file_type().is_file() {
+        return Err(records_example_failed(
+            "records.example.toml must be a regular file",
+        ));
+    }
+    if meta.len() > RECORDS_EXAMPLE_PRINT_LIMIT {
+        let shown = path.display().to_string();
         return Err(anyhow::Error::msg(ta(
-            "cli-plugin-install-records-unreadable",
-            &[("error", "records.example.toml must be a regular file")],
-            "Could not read records.example.toml: {$error}",
+            "cli-plugin-install-records-too-large",
+            &[("path", &shown)],
+            "records.example.toml is too large to write into the device config. {$path} must be 64 KiB or smaller.",
         )));
     }
-    let shown = path.display().to_string();
-    if meta.len() > RECORDS_EXAMPLE_PRINT_LIMIT {
-        println!(
-            "{}",
-            ta(
-                "cli-plugin-install-records-too-large",
-                &[("path", &shown)],
-                "records.example.toml is too large to print. Read it at {$path}.",
-            )
-        );
-        return Ok(());
-    }
-    let text = std::fs::read_to_string(&path).map_err(|error| {
-        anyhow::Error::msg(ta(
-            "cli-plugin-install-records-unreadable",
-            &[("error", &error.to_string())],
-            "Could not read records.example.toml: {$error}",
-        ))
-    })?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| records_example_failed(&error.to_string()))?;
+    let records =
+        kinetic_config::schema::RecordsConfig::from_package_example(&text).map_err(|error| {
+            anyhow::Error::msg(ta(
+                "cli-plugin-install-records-invalid",
+                &[("error", &error)],
+                "The record schema in records.example.toml cannot be written: {$error}",
+            ))
+        })?;
+    let count = records.fields.len().to_string();
+    Box::pin(config.replace_operation_records(records)).await?;
+    let config_path = config.config_path.display().to_string();
     println!(
         "{}",
-        t(
-            "cli-plugin-install-records",
-            "Copy this into the device config under [records]. Recording stays off until you do. The plugin does not store the schema.",
+        ta(
+            "cli-plugin-install-records-wrote",
+            &[("count", &count), ("path", &config_path)],
+            "Wrote {$count} record fields into {$path}. Installing a plugin again replaces them.",
         )
     );
-    println!("{text}");
     Ok(())
 }
 
@@ -1941,7 +1945,7 @@ fn rollback_installed_plugin(
     }
 }
 
-/// Load-check, copy the procedure, publish the plugin, then print the records example.
+/// Load-check, copy the procedure, publish the plugin, then write the record schema.
 #[cfg(feature = "plugins-wasm")]
 async fn install_admitted_package(
     host: &mut kinetic::plugins::host::PluginHost,
@@ -1966,7 +1970,7 @@ async fn install_admitted_package(
         staged.undo();
         return Err(error);
     }
-    if let Err(error) = print_records_example(&package_dir) {
+    if let Err(error) = Box::pin(write_package_records(config, &package_dir)).await {
         staged.undo();
         return rollback_installed_plugin(host, &plugin_name, error);
     }

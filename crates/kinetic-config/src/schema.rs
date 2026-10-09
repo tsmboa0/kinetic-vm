@@ -3249,6 +3249,27 @@ impl RecordsConfig {
         }
         Ok(())
     }
+
+    /// Parse a package `records.example.toml`. Comments are ignored. An empty
+    /// field list is a schema that leaves recording off.
+    pub fn from_package_example(text: &str) -> Result<Self, String> {
+        let parsed: Config = toml::from_str(text).map_err(|error| error.to_string())?;
+        parsed.records.check()?;
+        Ok(parsed.records)
+    }
+}
+
+impl Config {
+    /// Replace the live record schema and write it. A later call replaces it
+    /// again. Empty fields leave recording off.
+    pub async fn replace_operation_records(&mut self, records: RecordsConfig) -> Result<()> {
+        records
+            .check()
+            .map_err(|reason| anyhow::Error::msg(reason))?;
+        self.records = records;
+        self.mark_dirty("records");
+        Box::pin(self.save_dirty()).await
+    }
 }
 
 fn operation_field_name_ok(name: &str) -> bool {
@@ -25220,6 +25241,56 @@ kinetic-operators = "operator"
         duplicate.fields.push(duplicate.fields[0].clone());
         let reason = duplicate.check().expect_err("duplicate");
         assert!(reason.contains("more than once"));
+    }
+
+    #[test]
+    async fn installing_a_package_replaces_the_record_schema() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        let seed = format!(
+            "schema_version = {}\n\n# keep me\n[chain]\ndevice_name = \"eVend\"\n\n[[records.fields]]\nname = \"old\"\ntype = \"string\"\n",
+            crate::migration::CURRENT_SCHEMA_VERSION
+        );
+        std::fs::write(&config_path, &seed).unwrap();
+
+        let mut config = Config {
+            config_path: config_path.clone(),
+            ..Config::default()
+        };
+        let first = RecordsConfig::from_package_example(
+            "[[records.fields]]\nname = \"subject\"\ntype = \"string\"\n\n[[records.fields]]\nname = \"count\"\ntype = \"number\"\nrequired = false\n",
+        )
+        .expect("example");
+        config
+            .replace_operation_records(first)
+            .await
+            .expect("write");
+
+        let written = std::fs::read_to_string(&config_path).unwrap();
+        assert!(written.contains("# keep me"), "{written}");
+        assert!(written.contains("device_name = \"eVend\""), "{written}");
+        let reloaded: Config = toml::from_str(&written).expect("reload");
+        assert_eq!(reloaded.chain.device_name, "eVend");
+        assert_eq!(reloaded.records.fields.len(), 2, "{written}");
+        assert_eq!(reloaded.records.fields[0].name, "subject");
+        assert!(!reloaded.records.fields[1].required);
+
+        let second = RecordsConfig::from_package_example(
+            "[[records.fields]]\nname = \"result\"\ntype = \"boolean\"\n",
+        )
+        .expect("second example");
+        config
+            .replace_operation_records(second)
+            .await
+            .expect("overwrite");
+        let replaced = std::fs::read_to_string(&config_path).unwrap();
+        let reloaded: Config = toml::from_str(&replaced).expect("reload again");
+        assert_eq!(reloaded.records.fields.len(), 1, "{replaced}");
+        assert_eq!(reloaded.records.fields[0].name, "result");
+        assert_eq!(reloaded.chain.device_name, "eVend");
+        assert!(replaced.contains("# keep me"), "{replaced}");
+        assert!(!replaced.contains("name = \"old\""), "{replaced}");
+        assert!(!replaced.contains("name = \"subject\""), "{replaced}");
     }
 
     #[test]

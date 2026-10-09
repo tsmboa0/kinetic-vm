@@ -56,5 +56,5 @@ cargo test
 The lean device build must keep compiling:
 
 ```bash
-cargo check --no-default-features --features agent-runtime,channel-telegram,hardware,peripheral-rpi
+cargo check --no-default-features --features agent-runtime,channel-telegram,hardware,peripheral-rpi,plugins-wasm-cranelift
 ```
