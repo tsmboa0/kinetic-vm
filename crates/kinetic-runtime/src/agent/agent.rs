@@ -2684,9 +2684,8 @@ impl Agent {
         )
         .await?;
 
-        // SOP loading is gated on `runtime_enabled()`: `sops_dir` is unset (or
-        // empty) by default, so SOP runtime behavior is off until an operator
-        // opts in by setting a directory.
+        // SOP loading is gated on `runtime_enabled()`. The default directory
+        // is `<config>/sops`. An explicit empty value turns it off.
         // If caller provided an engine (daemon path), use it; otherwise
         // build our own (CLI/standalone path) only when the gate is set.
         let (sop_engine, sop_audit) = match (sop_engine, sop_audit) {

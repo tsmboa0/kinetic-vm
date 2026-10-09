@@ -512,6 +512,17 @@ pub struct Config {
     #[group = "Foundation"]
     pub chain: ChainConfig,
 
+    /// Fields kept for each completed operation (`[records]`).
+    ///
+    /// Empty means `monad_attest` signs the caller's parameters and does not
+    /// write a local line. When fields are set, the host checks the caller's
+    /// JSON against this schema, stores one canonical line, and signs those
+    /// same bytes. The host does not add chat ids, wallets, or access codes.
+    #[serde(default, skip_serializing_if = "RecordsConfig::is_default")]
+    #[nested]
+    #[group = "Foundation"]
+    pub records: RecordsConfig,
+
     /// Voice transcription configuration (Whisper API via Groq).
     #[serde(default)]
     #[nested]
@@ -2708,6 +2719,19 @@ impl Config {
             .unwrap_or_else(|| std::path::PathBuf::from("."))
     }
 
+    /// Local business records, one JSONL file per install.
+    ///
+    /// Lives beside `config.toml` (`<config>/records/operations.jsonl`),
+    /// outside the agent workspace, so the model cannot treat the file as a
+    /// note. The host appends a schema-validated line after a successful
+    /// procedure. Codes, chat ids, and wallets stay out of it.
+    #[must_use]
+    pub fn operation_records_path(&self) -> PathBuf {
+        self.install_root_dir()
+            .join("records")
+            .join("operations.jsonl")
+    }
+
     /// Resolve an aliased-agent config by alias. `None` when the alias
     /// isn't configured; callers should treat this as a config error
     /// rather than synthesizing a default.
@@ -3130,6 +3154,110 @@ impl Default for ChainConfig {
             daily_cap: default_chain_daily_cap(),
         }
     }
+}
+
+/// One field of a completed operation. The name is the JSON key.
+#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[prefix = "records.field"]
+pub struct OperationRecordField {
+    /// JSON key. Letters, digits, and underscores. It must not start with a digit.
+    pub name: String,
+    /// `string`, `number`, `boolean`, `object`, or `array`.
+    #[serde(rename = "type", default = "default_operation_field_kind")]
+    pub kind: OperationFieldKind,
+    /// Refuse a record that omits this field. Default: required.
+    #[serde(default = "default_true")]
+    pub required: bool,
+}
+
+/// JSON type of one operation-record field.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, kinetic_macros::ConfigEnum,
+)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum OperationFieldKind {
+    #[default]
+    String,
+    Number,
+    Boolean,
+    Object,
+    Array,
+}
+
+impl OperationFieldKind {
+    /// The config word for this type, also used in tool text.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Number => "number",
+            Self::Boolean => "boolean",
+            Self::Object => "object",
+            Self::Array => "array",
+        }
+    }
+}
+
+fn default_operation_field_kind() -> OperationFieldKind {
+    OperationFieldKind::String
+}
+
+/// Local operation records (`[records]`).
+///
+/// `fields` is the schema a builder wants kept for each completed operation.
+/// An empty list leaves recording off.
+#[derive(Debug, Clone, Serialize, Deserialize, Configurable, Default)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[prefix = "records"]
+pub struct RecordsConfig {
+    /// Fields written into each canonical line. Empty disables the file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<OperationRecordField>,
+}
+
+impl RecordsConfig {
+    /// True when recording is off, which is the default.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.fields.is_empty()
+    }
+
+    /// True when a completed operation should be stored and signed as a line.
+    #[must_use]
+    pub fn recording(&self) -> bool {
+        !self.fields.is_empty()
+    }
+
+    /// Reject a schema that cannot produce a stable line.
+    pub fn check(&self) -> Result<(), String> {
+        let mut seen = std::collections::HashSet::new();
+        for field in &self.fields {
+            if !operation_field_name_ok(&field.name) {
+                return Err(format!(
+                    "record field name {:?} must be letters, digits, and underscores, and must not start with a digit",
+                    field.name
+                ));
+            }
+            if !seen.insert(field.name.as_str()) {
+                return Err(format!(
+                    "record field {} is listed more than once",
+                    field.name
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn operation_field_name_ok(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    name.len() <= 64 && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 impl ChainConfig {
@@ -6395,19 +6523,21 @@ pub struct PluginTlsProfileConfig {
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "plugins"]
 pub struct PluginsConfig {
-    /// Enable the plugin system (default: false)
-    #[serde(default)]
+    /// Enable the plugin system. On unless the operator turns it off.
+    /// An empty plugins directory loads nothing.
+    #[serde(default = "default_plugins_enabled")]
     pub enabled: bool,
     /// Directory where plugins are stored
     #[serde(default = "default_plugins_dir")]
     pub plugins_dir: String,
-    /// Auto-discover and load plugins on startup (default: false)
+    /// Auto-discover and load plugins on startup. On unless the operator
+    /// turns it off. An empty plugins directory still loads nothing.
     ///
     /// This gates the package-bound *tool* and *skill* instances the activation
     /// plan discovers from installed manifests. Explicit
     /// `[channels.plugin.<alias>]` declarations are operator-named, not
     /// discovered, so they activate without it.
-    #[serde(default)]
+    #[serde(default = "default_plugins_auto_discover")]
     pub auto_discover: bool,
     /// Maximum number of logical plugin instances admitted across capabilities.
     ///
@@ -6595,6 +6725,14 @@ impl Default for PluginLimitsConfig {
     }
 }
 
+fn default_plugins_enabled() -> bool {
+    true
+}
+
+fn default_plugins_auto_discover() -> bool {
+    true
+}
+
 fn default_plugins_dir() -> String {
     default_path_under_config_dir("plugins")
 }
@@ -6606,9 +6744,9 @@ fn default_max_active_plugin_instances() -> usize {
 impl Default for PluginsConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_plugins_enabled(),
             plugins_dir: default_plugins_dir(),
-            auto_discover: false,
+            auto_discover: default_plugins_auto_discover(),
             max_active_instances: default_max_active_plugin_instances(),
             security: PluginSecurityConfig::default(),
             limits: PluginLimitsConfig::default(),
@@ -16547,6 +16685,7 @@ impl Default for Config {
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             chain: ChainConfig::default(),
+            records: RecordsConfig::default(),
             query_classification: QueryClassificationConfig::default(),
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
@@ -19178,6 +19317,9 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         validate_memory_rerank_config(&self.memory)?;
         self.cost.rates.validate()?;
+        if let Err(reason) = self.records.check() {
+            validation_bail!(InvalidFormat, "records.fields", "{reason}");
+        }
 
         for (profile_alias, profile) in &self.runtime_profiles {
             if profile.max_execution_tree_iterations == Some(0) {
@@ -22394,11 +22536,9 @@ pub struct SopConfig {
     /// A relative value resolves against the install root (matching the
     /// `skill-bundles` convention), so the documented `shared/sops` loads from
     /// `<install>/shared/sops` — the same directory the web/RPC SOP author writes
-    /// to. An absolute or `~`-prefixed value is used as-is. Unset by default;
-    /// SOP runtime behavior activates only when this is set to a non-empty
-    /// value, so leaving it unset (or an explicit empty value) keeps SOP
-    /// loading disabled (unset/empty still falls back to `<install>/shared/sops`
-    /// for offline CLI inspection).
+    /// to. An absolute or `~`-prefixed value is used as-is. Defaults to
+    /// `<config>/sops`. An explicit empty value keeps SOP loading disabled.
+    /// A missing directory loads nothing.
     #[serde(default = "default_sop_sops_dir")]
     pub sops_dir: Option<String>,
 
@@ -22602,9 +22742,9 @@ impl SopDecisionModelConfig {
 impl SopConfig {
     /// Whether the SOP runtime (engine, tools, maintenance tick, run store) is
     /// active for this config. SOP loading is gated on a concrete definitions
-    /// directory: a non-empty `sops_dir` enables it; an unset or explicit empty
-    /// string keeps it disabled (the default is unset, so SOP runtime is off
-    /// until an operator opts in). This is the single source of truth for
+    /// directory: a non-empty `sops_dir` enables it. The default is
+    /// `<config>/sops`. An explicit empty string keeps it disabled. A missing
+    /// directory loads nothing. This is the single source of truth for
     /// activation, so callers must not re-derive it from `sops_dir.is_some()` —
     /// that treats an empty string as enabled and would break the disable path.
     #[must_use]
@@ -22616,7 +22756,7 @@ impl SopConfig {
 }
 
 fn default_sop_sops_dir() -> Option<String> {
-    None
+    Some(default_path_under_config_dir("sops"))
 }
 
 fn default_sop_execution_mode() -> String {
@@ -25029,18 +25169,57 @@ kinetic-operators = "operator"
     }
 
     #[test]
-    async fn sop_sops_dir_defaults_to_unset_and_disables_runtime() {
-        // A fresh install (no [sop] sops_dir) leaves the field unset, which keeps
-        // the SOP runtime off. Operators opt in by setting a directory; the daemon
-        // and CLI gate on this via `runtime_enabled()`.
+    async fn sop_sops_dir_defaults_on_and_empty_string_stays_off() {
+        // A fresh install (no [sop] sops_dir) points at `<config>/sops` and
+        // the runtime is on. An empty directory loads nothing.
         let config: SopConfig = toml::from_str("").expect("empty SOP config should deserialize");
 
-        assert_eq!(config.sops_dir, None);
-        assert!(!config.runtime_enabled());
+        let expected = default_sop_sops_dir();
+        assert_eq!(config.sops_dir, expected);
+        assert!(config.runtime_enabled());
 
         // SopConfig::default() must agree with the deserialized default.
-        assert_eq!(SopConfig::default().sops_dir, None);
-        assert!(!SopConfig::default().runtime_enabled());
+        assert_eq!(SopConfig::default().sops_dir, expected);
+        assert!(SopConfig::default().runtime_enabled());
+    }
+
+    #[test]
+    async fn operation_records_live_beside_the_config() {
+        let config = Config {
+            config_path: std::path::PathBuf::from("/tmp/kinetic-records-test/config.toml"),
+            ..Config::default()
+        };
+        assert_eq!(
+            config.operation_records_path(),
+            std::path::PathBuf::from("/tmp/kinetic-records-test/records/operations.jsonl")
+        );
+    }
+
+    #[test]
+    async fn record_fields_parse_and_a_duplicate_name_fails_validation() {
+        let config: Config = toml::from_str(
+            r#"
+            [[records.fields]]
+            name = "subject"
+            type = "string"
+
+            [[records.fields]]
+            name = "count"
+            type = "number"
+            required = false
+            "#,
+        )
+        .expect("records config");
+        assert!(config.records.recording());
+        assert_eq!(config.records.fields[0].name, "subject");
+        assert_eq!(config.records.fields[0].kind, OperationFieldKind::String);
+        assert!(!config.records.fields[1].required);
+        assert!(config.records.check().is_ok());
+
+        let mut duplicate = config.records.clone();
+        duplicate.fields.push(duplicate.fields[0].clone());
+        let reason = duplicate.check().expect_err("duplicate");
+        assert!(reason.contains("more than once"));
     }
 
     #[test]
@@ -27526,6 +27705,7 @@ auto_save = true
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             chain: ChainConfig::default(),
+            records: RecordsConfig::default(),
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
             nodes: NodesConfig::default(),
@@ -28657,6 +28837,7 @@ default_temperature = 0.7
             hooks: HooksConfig::default(),
             hardware: HardwareConfig::default(),
             chain: ChainConfig::default(),
+            records: RecordsConfig::default(),
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
             nodes: NodesConfig::default(),
@@ -31827,7 +32008,7 @@ enabled = false
         // to defaults on the resilient path. That drop must land on
         // `ResilientLoad::dropped`; load_or_init copies it onto
         // `degraded_sections` so the CLI surfaces it on stderr instead of
-        // the operator discovering `enabled = false` by accident.
+        // the operator discovering the section vanished.
         let raw = r#"schema_version = 3
 
 [plugins]
@@ -31843,8 +32024,12 @@ name = "weather-tool"
             load.dropped
         );
         assert!(
-            !load.config.plugins.enabled,
-            "the malformed section must have been reset to defaults"
+            load.config.plugins.entries.is_empty(),
+            "the malformed section must have been reset, not parsed as an entry"
+        );
+        assert!(
+            load.config.plugins.enabled,
+            "a dropped [plugins] section resets to the on-by-default"
         );
     }
 

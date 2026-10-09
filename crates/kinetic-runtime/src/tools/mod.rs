@@ -2665,19 +2665,15 @@ permissions = ["http_client"]
         );
     }
 
-    /// The documented default-`false` setup: `plugins.enabled = true` with
-    /// `plugins.auto_discover` left at its schema default of `false`, an
-    /// installed tool plugin and an installed skill plugin present, and a
-    /// ceiling wide enough that admission is never the reason anything is held
-    /// back. Auto-discovered tool and skill instances are gated on
-    /// `auto_discover`, so both production loaders must load *nothing*. Flipping
+    /// Auto-discovered tool and skill instances are gated on `auto_discover`.
+    /// With the gate off, both production loaders must load nothing. Flipping
     /// only `auto_discover` on the identical host and config then loads both,
     /// which proves the emptiness is the discovery gate rather than a broken
     /// fixture. The assertions read the real loader output (the construction
     /// witness and the skill list), not the activation plan vector.
     #[cfg(feature = "plugins-wasm")]
     #[test]
-    fn auto_discover_default_false_admits_no_tools_or_skills() {
+    fn auto_discover_off_admits_no_tools_or_skills() {
         let plugins = TempDir::new().unwrap();
         write_tool_package(plugins.path(), "zeta");
         write_skill_package(plugins.path(), "beta");
@@ -2687,15 +2683,9 @@ permissions = ["http_client"]
 
         let mut config = Config::default();
         config.plugins.enabled = true;
+        config.plugins.auto_discover = false;
         config.plugins.plugins_dir = plugins.path().display().to_string();
         config.plugins.max_active_instances = 50;
-        // Left at the schema default; this is exactly the documented setup an
-        // operator reaches with `plugins.enabled = true` and nothing else.
-        assert!(
-            !config.plugins.auto_discover,
-            "the schema default must be false for this regression to exercise the \
-             documented default-false path"
-        );
 
         assert!(
             tool_packages_reaching_construction(&config, &host, &[]).is_empty(),

@@ -19,7 +19,11 @@ name = "translator"
     assert_eq!(salvage.dropped, vec!["plugins".to_string()]);
     assert!(salvage.dropped_security.is_empty());
     assert!(
-        !salvage.config.plugins.enabled,
+        salvage.config.plugins.entries.is_empty(),
         "section resets to defaults"
+    );
+    assert!(
+        salvage.config.plugins.enabled,
+        "a dropped [plugins] section resets to the on-by-default"
     );
 }

@@ -103,6 +103,15 @@ pub struct ApprovalManager {
     audit_log: Mutex<Vec<ApprovalLogEntry>>,
 }
 
+/// Tools that still raise a card on a customer channel. A vend, a plugin,
+/// a pin write, and an attestation do not.
+fn channel_sale_still_asks(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "shell" | "file_write" | "file_edit" | "vault_pay"
+    )
+}
+
 fn normalized_always_ask(entries: &[String]) -> HashSet<String> {
     entries
         .iter()
@@ -262,6 +271,15 @@ impl ApprovalManager {
 
         // auto_approve skips the prompt.
         if self.auto_approve.contains("*") || self.auto_approve.contains(tool_name) {
+            return ApprovalRequirement::Approved;
+        }
+
+        // A Telegram sale must not raise an approval card. The back-channel
+        // still asks for shell, file mutation, and vault payments.
+        if self.non_interactive
+            && self.non_interactive_shell_requires_approval
+            && !channel_sale_still_asks(tool_name)
+        {
             return ApprovalRequirement::Approved;
         }
 
@@ -949,6 +967,19 @@ mod tests {
         // always_ask tools (shell) still report as needing approval,
         // so the tool-call loop will auto-deny them in non-interactive mode.
         assert!(mgr.needs_approval("shell"));
+    }
+
+    #[test]
+    fn channel_sale_does_not_ask_and_shell_still_does() {
+        let mgr = ApprovalManager::for_non_interactive_backchannel(&supervised_config());
+        assert!(!mgr.needs_approval("gpio_write"));
+        assert!(!mgr.needs_approval("vault_status"));
+        assert!(!mgr.needs_approval("monad_attest"));
+        assert!(!mgr.needs_approval("vend"));
+        assert!(mgr.needs_approval("shell"));
+        assert!(mgr.needs_approval("file_write"));
+        assert!(mgr.needs_approval("file_edit"));
+        assert!(mgr.needs_approval("vault_pay"));
     }
 
     #[test]

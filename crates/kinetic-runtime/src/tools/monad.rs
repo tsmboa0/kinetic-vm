@@ -8,7 +8,7 @@ use kinetic_api::tool::{Tool, ToolOutput, ToolResult, ToolSpec};
 use kinetic_chain::{
     Address, BootReport, DeviceChain, format_mon, parse_mon, unclaimed_claim_text,
 };
-use kinetic_config::schema::{ChainConfig, Config};
+use kinetic_config::schema::{ChainConfig, Config, RecordsConfig};
 
 use crate::owner_commands::OwnerPing;
 use serde_json::json;
@@ -29,6 +29,8 @@ pub fn chain_tools(config: &Config, key_dir: PathBuf) -> Vec<Arc<dyn Tool>> {
             chain.clone(),
             key_dir.clone(),
             ping.clone(),
+            config.records.clone(),
+            config.operation_records_path(),
         )),
         Arc::new(VaultStatusTool::new(chain.clone(), key_dir.clone())),
         Arc::new(VaultPayTool::new(chain, key_dir, ping)),
@@ -331,15 +333,38 @@ impl Tool for VaultPayTool {
 pub struct MonadAttestTool {
     handle: ChainHandle,
     ping: Option<OwnerPing>,
+    records: RecordsConfig,
+    records_path: PathBuf,
+    description: String,
 }
 
 impl MonadAttestTool {
-    pub fn new(chain: ChainConfig, key_dir: PathBuf, ping: Option<OwnerPing>) -> Self {
+    pub fn new(
+        chain: ChainConfig,
+        key_dir: PathBuf,
+        ping: Option<OwnerPing>,
+        records: RecordsConfig,
+        records_path: PathBuf,
+    ) -> Self {
+        let description = attest_description(&records);
         Self {
             handle: ChainHandle::new(chain, key_dir),
             ping,
+            records,
+            records_path,
+            description,
         }
     }
+}
+
+fn attest_description(records: &RecordsConfig) -> String {
+    if !records.recording() {
+        return "Record a device action on Monad. The device key signs the action, the parameters, and the request URI.".to_string();
+    }
+    format!(
+        "Record a completed operation on Monad. params must be one JSON object with these fields: {}. The host stores that canonical JSON as one line and signs those same bytes. The host does not add chat ids, wallets, or access codes.",
+        crate::records::field_summary(records)
+    )
 }
 
 kinetic_api::tool_attribution!(MonadAttestTool, kinetic_api::attribution::ToolKind::Plugin);
@@ -351,15 +376,23 @@ impl Tool for MonadAttestTool {
     }
 
     fn description(&self) -> &str {
-        "Record a device action on Monad. The device key signs the action, the parameters, and the request URI."
+        &self.description
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
+        let params = if self.records.recording() {
+            format!(
+                "JSON object with these fields: {}",
+                crate::records::field_summary(&self.records)
+            )
+        } else {
+            "Parameters the device signs".to_string()
+        };
         json!({
             "type": "object",
             "properties": {
-                "action": {"type": "string", "description": "Short action name, such as vend"},
-                "params": {"type": "string", "description": "Action parameters, such as slot-1"},
+                "action": {"type": "string", "description": "Short name of the completed operation"},
+                "params": {"type": "string", "description": params},
                 "request_uri": {"type": "string", "description": "URI stored inside the signed proof"}
             },
             "required": ["action", "params", "request_uri"]
@@ -382,6 +415,19 @@ impl Tool for MonadAttestTool {
         if request_uri.is_empty() {
             return Ok(missing("request_uri"));
         }
+        let prepared = match crate::records::prepare_operation(&self.records, params) {
+            Ok(prepared) => prepared,
+            Err(reason) => {
+                return Ok(ToolResult::err(text_with(
+                    "cli-chain-record-rejected",
+                    &[("reason", &reason)],
+                )));
+            }
+        };
+        let attested_params = match &prepared {
+            crate::records::PreparedOperation::Off => params,
+            crate::records::PreparedOperation::Line(line) => line.as_str(),
+        };
         let session = match self.handle.open().await {
             Ok(session) => session,
             Err(result) => return Ok(result),
@@ -393,15 +439,39 @@ impl Tool for MonadAttestTool {
         let BootReport::Claimed { agent_id, .. } = report else {
             return Ok(ToolResult::err(text("cli-chain-not-claimed")));
         };
-        match session.attest(agent_id, action, params, request_uri).await {
-            Ok(attestation) => Ok(ToolResult::ok(text_with(
-                "cli-chain-attested",
-                &[
-                    ("action", action),
-                    ("tx", &attestation.transaction_hash.to_string()),
-                    ("request", &attestation.request_hash.to_string()),
-                ],
-            ))),
+        match session
+            .attest(agent_id, action, attested_params, request_uri)
+            .await
+        {
+            Ok(attestation) => {
+                let tx = attestation.transaction_hash.to_string();
+                let request = attestation.request_hash.to_string();
+                if let crate::records::PreparedOperation::Line(line) = &prepared {
+                    if let Err(error) =
+                        crate::records::append_operation_line(&self.records_path, line)
+                    {
+                        ::kinetic_log::record!(
+                            WARN,
+                            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Write)
+                                .with_outcome(::kinetic_log::EventOutcome::Failure)
+                                .with_attrs(json!({"tx": &tx, "line": line})),
+                            "operation record was attested but the local file was not written"
+                        );
+                        return Ok(ToolResult::err(text_with(
+                            "cli-chain-record-unstored",
+                            &[("tx", &tx), ("error", &error), ("line", line)],
+                        )));
+                    }
+                }
+                let key = match &prepared {
+                    crate::records::PreparedOperation::Line(_) => "cli-chain-attested-stored",
+                    crate::records::PreparedOperation::Off => "cli-chain-attested",
+                };
+                Ok(ToolResult::ok(text_with(
+                    key,
+                    &[("action", action), ("tx", &tx), ("request", &request)],
+                )))
+            }
             Err(error) => {
                 note_gas(&self.ping, &error, session.vault_address(), agent_id).await;
                 Ok(ToolResult::err(failed(&error.to_string())))
@@ -604,6 +674,39 @@ mod tests {
             result.error.as_deref(),
             Some(text("cli-chain-bad-amount").as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn a_record_outside_the_schema_never_opens_the_chain() {
+        let dir = tempfile::tempdir().expect("temp");
+        let tool = MonadAttestTool::new(
+            ChainConfig {
+                enabled: true,
+                ..ChainConfig::default()
+            },
+            dir.path().to_path_buf(),
+            None,
+            RecordsConfig {
+                fields: vec![kinetic_config::schema::OperationRecordField {
+                    name: "subject".to_string(),
+                    kind: kinetic_config::schema::OperationFieldKind::String,
+                    required: true,
+                }],
+            },
+            dir.path().join("records").join("operations.jsonl"),
+        );
+        let result = tool
+            .execute(json!({
+                "action": "observe",
+                "params": "{\"chat_id\":\"709\"}",
+                "request_uri": "kinetic://operation/observe"
+            }))
+            .await
+            .expect("tool result");
+        assert!(!result.success);
+        let error = result.error.expect("error");
+        assert!(error.contains("chat_id"), "{error}");
+        assert!(!dir.path().join("records").join("operations.jsonl").exists());
     }
 
     #[tokio::test]

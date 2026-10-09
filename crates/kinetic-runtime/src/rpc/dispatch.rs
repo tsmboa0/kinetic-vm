@@ -22992,25 +22992,22 @@ mod tests {
         assert_eq!(err.code, INTERNAL_ERROR);
     }
 
-    // The `sop list` create-hint tells users to author under `<shared>/sops`;
-    // this locks the CLI scan root (sops_dir_and_mode) to that same path when
-    // sops_dir is unset, so the hint can never drift from where we actually
-    // read.
+    // The `sop list` create-hint tells users to author under `<shared>/sops`
+    // when `sops_dir` is explicitly empty. This locks the CLI scan root
+    // (sops_dir_and_mode) to that fallback, so the hint can never drift from
+    // where we actually read. A fresh config instead points at `<config>/sops`.
     #[test]
     fn sops_list_scan_root_matches_shared_sops_create_hint() {
         use kinetic_config::schema::Config;
         use kinetic_infra::session_queue::SessionActorQueue;
 
         let tmp = tempfile::TempDir::new().unwrap();
-        let config = Config {
+        let mut config = Config {
             data_dir: tmp.path().join("data"),
             config_path: tmp.path().join("config.toml"),
             ..Config::default()
         };
-        assert!(
-            config.sop.sops_dir.is_none(),
-            "default config must leave sops_dir unset so the hint path applies",
-        );
+        config.sop.sops_dir = None;
 
         let queue = Arc::new(SessionActorQueue::new(4, 10, 60));
         let sessions = Arc::new(crate::rpc::session::SessionStore::new(16, queue));

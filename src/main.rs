@@ -5635,9 +5635,8 @@ async fn async_main_inner(command: clap::Command) -> Result<()> {
                     Arc<kinetic_api::webhook::PluginWebhookRegistry>,
                 > = None;
 
-                // SOP loading is gated on `runtime_enabled()`: `sops_dir` is unset
-                // (or empty) by default, so SOP runtime behavior is off until an
-                // operator opts in by setting a directory.
+                // SOP loading is gated on `runtime_enabled()`. The default
+                // directory is `<config>/sops`. An explicit empty value turns it off.
                 let (sop_engine, sop_audit) = if current_config.sop.runtime_enabled() {
                     let mem: Arc<dyn kinetic_memory::Memory> = Arc::from(
                         kinetic_memory::create_memory_from_config(&current_config, None)?,

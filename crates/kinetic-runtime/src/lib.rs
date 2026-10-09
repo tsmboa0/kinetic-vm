@@ -45,6 +45,7 @@ pub(crate) mod plugin_state;
 pub mod process_stats;
 pub mod quickstart;
 pub mod rag;
+pub mod records;
 pub mod relay;
 pub mod restart;
 pub mod routines;
