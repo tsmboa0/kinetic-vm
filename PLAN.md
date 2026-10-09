@@ -4,7 +4,8 @@ Status as of Oct 3, 2026. Hackathon: Monad Metropolis, Trust, Identity & AI
 Infrastructure track. Submissions close **Oct 13**.
 
 Sections 1–9 are the October 3 plan and are partly stale (old vault
-addresses, owner-only gas). The work in progress is **section 10**.
+addresses, owner-only gas). Section 10 is in. The next implementation is
+**section 11**.
 
 KineticVM gives physical AI devices a Monad identity (ERC-8004), an
 owner-controlled wallet with spending limits, and signed onchain attestations
@@ -480,8 +481,9 @@ one.
 
 A third-party device builder does not deploy contracts. They install the
 binary, run quickstart, claim the device, and fund the vault with
-`/deposit`. Their own logic is a WASM tool plugin plus an SOP. The host
-keeps the device key, the serial link, the vault, and attestation.
+`/deposit`. Their own logic is a plugin package plus an SOP. The host
+keeps the device key, the serial link, the vault, and attestation. The
+package shape and the commands that produce it are section 11.
 
 ### 10.1 Defaults that are on
 
@@ -561,3 +563,65 @@ ESP32 analog `soil_read`, the peripheral SOP listener, an in-process Rust
 trait beside the device key, wrapping plugin tools, and rewriting the seed
 persona. Soil stays a cron poll of `gpio_read` until the firmware command
 exists. A keypad emits MQTT; it is not a cron poll.
+
+## 11. Builder package (Oct 9)
+
+One directory is one integration. It holds several tools, one procedure,
+an optional skill, and an example of the operation schema. State is not a
+file in that directory. The tools read and write it through the host, and
+every tool in the package shares that state and the package config.
+
+```text
+<name>/
+  manifest.toml            permissions, egress hosts, config schema
+  src/lib.rs               the tools, plus a few lines that save one state key
+  sop/SOP.toml
+  sop/SOP.md
+  skills/<name>/SKILL.md   optional; delete the directory and drop `skill` if unused
+  records.example.toml     the `[records]` block, with a comment
+```
+
+`kinetic build` does not make the device heavier. It runs `cargo` that is
+already installed on the developer machine, writes `plugin.wasm`, and
+records `wasm_path` and `wasm_sha256` in the manifest. The Pi install does
+not include rustc, cargo, or the `wasm32-wasip2` target. If either is
+missing, the command says so and stops. The compiler message stays visible.
+
+Do these in order. The scaffold comes after a package can hold more than
+one tool, so the skeleton matches what the host loads.
+
+### 11.1 Several tools from one plugin
+
+In. `wit/v0/tool.wit` has a `toolbox` interface and a `tools-plugin` world:
+
+- `list-tools` returns each tool's name, description, and parameter schema.
+- `execute(name, args)` runs one of them.
+
+The host registers each name as its own tool. An empty list, a blank or
+illegal name, or a duplicate name refuses the package. Config and state
+stay scoped to the package, so the tools share them.
+
+A component that still `export tool` loads as it does today. The old world
+stays. Existing fixtures are unchanged.
+
+### 11.2 `kinetic plugin create <dir>`
+
+Writes the skeleton above with a short note at the top of each file and a
+tiny generic starter in the body. Two tools, one SOP step, one record
+field, one short skill, and a state read/write in `src/lib.rs`. The
+starter is something to replace, not a vending machine. A vending walkthrough
+stays in the docs.
+
+### 11.3 `kinetic build`
+
+Run inside the package directory on the developer machine. Compiles
+`src/lib.rs` to `plugin.wasm` for `wasm32-wasip2` by invoking `cargo`, then
+writes the hash. It does not vendor a compiler into Kinetic.
+
+### 11.4 `kinetic plugin install <dir>`
+
+Install already copies the component into `~/.kinetic/plugins` and checks
+that it loads. Extend it to copy `sop/` into the sops directory and print
+`records.example.toml` so the operator can put it under `[records]`. The
+live schema stays in the device config. The plugin does not become a second
+copy of it.

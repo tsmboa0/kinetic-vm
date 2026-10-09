@@ -30,6 +30,8 @@ pub mod services;
 pub mod signature;
 #[cfg(feature = "plugins-wasmtime")]
 pub(crate) mod sockets;
+#[cfg(feature = "plugins-wasmtime")]
+pub mod toolbox;
 pub mod validate;
 #[cfg(feature = "plugins-wasmtime")]
 pub mod wasi_http;

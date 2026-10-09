@@ -20,6 +20,9 @@ pub struct WasmTool {
     scope: PluginInstanceScope,
     services: PluginHostServices,
     limits: PluginLimits,
+    /// `Some` when this adapter is one name from a `toolbox` export. `None`
+    /// is the single `tool` export.
+    named: Option<String>,
     /// Host-owned egress authority for this instance. `None` is
     /// deny-by-default: the store still links `wasi:http` when the scope grants
     /// `HttpClient`, but every outbound request is refused. Held as the shared
@@ -67,6 +70,7 @@ impl WasmTool {
             scope,
             services,
             limits,
+            named: None,
             egress: None,
         })
     }
@@ -95,6 +99,64 @@ impl WasmTool {
     ) -> anyhow::Result<Self> {
         scope.require_capability(PluginCapability::Tool)?;
         services.resolve_config(&scope)?;
+        Self::from_single_export(component, scope, services, limits, egress)
+    }
+
+    /// Register every tool this component exports.
+    ///
+    /// A `toolbox` export becomes one adapter per listed name. Anything else
+    /// stays the single `tool` export. Config is resolved once, before the
+    /// component is compiled, matching [`Self::from_wasm`].
+    pub fn from_component(
+        component: AdmittedComponent,
+        scope: PluginInstanceScope,
+        services: PluginHostServices,
+        limits: PluginLimits,
+        egress: Option<crate::egress::EgressHostService>,
+    ) -> anyhow::Result<Vec<Self>> {
+        scope.require_capability(PluginCapability::Tool)?;
+        services.resolve_config(&scope)?;
+        let compiled = crate::component::load_component(&component)?;
+        if !crate::toolbox::component_exports_toolbox(&compiled) {
+            return Ok(vec![Self::from_single_export(
+                component, scope, services, limits, egress,
+            )?]);
+        }
+        let listed = {
+            let component = component.clone();
+            let scope = scope.clone();
+            let services = services.clone();
+            let egress = egress.clone();
+            block_probe(async move {
+                let mut guest =
+                    crate::toolbox::create_plugin(&component, &scope, &services, limits, egress)
+                        .await?;
+                crate::toolbox::list_tools(&mut guest).await
+            })
+        }?;
+        Ok(listed
+            .into_iter()
+            .map(|meta| Self {
+                name: meta.name.clone(),
+                description: meta.description,
+                parameters_schema: meta.parameters_schema,
+                component: component.clone(),
+                scope: scope.clone(),
+                services: services.clone(),
+                limits,
+                named: Some(meta.name),
+                egress: egress.clone(),
+            })
+            .collect())
+    }
+
+    fn from_single_export(
+        component: AdmittedComponent,
+        scope: PluginInstanceScope,
+        services: PluginHostServices,
+        limits: PluginLimits,
+        egress: Option<crate::egress::EgressHostService>,
+    ) -> anyhow::Result<Self> {
         let probe = {
             let component = component.clone();
             let scope = scope.clone();
@@ -121,6 +183,7 @@ impl WasmTool {
             scope,
             services,
             limits,
+            named: None,
             egress,
         })
     }
@@ -164,6 +227,17 @@ impl Tool for WasmTool {
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
         let args_json = serde_json::to_vec(&args)?;
         self.services.resolve_config(&self.scope)?;
+        if let Some(name) = &self.named {
+            let mut guest = crate::toolbox::create_plugin(
+                &self.component,
+                &self.scope,
+                &self.services,
+                self.limits,
+                self.egress.clone(),
+            )
+            .await?;
+            return crate::toolbox::call_execute(&mut guest, name, &args_json).await;
+        }
         // The authority handle travels to the fresh store; the *decision* is not
         // read here. It is read inside the hooks, per request.
         let mut plugin = runtime::create_plugin_with_egress(

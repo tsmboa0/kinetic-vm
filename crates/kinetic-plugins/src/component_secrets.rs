@@ -24,4 +24,5 @@ macro_rules! impl_secrets_host {
 }
 
 impl_secrets_host!(tool);
+impl_secrets_host!(tools);
 impl_secrets_host!(channel);

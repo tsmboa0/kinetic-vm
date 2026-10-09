@@ -828,6 +828,7 @@ macro_rules! impl_socket_host {
 }
 
 impl_socket_host!(tool);
+impl_socket_host!(tools);
 impl_socket_host!(channel);
 
 #[cfg(test)]

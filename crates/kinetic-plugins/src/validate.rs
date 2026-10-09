@@ -41,7 +41,8 @@ pub async fn verify_component_loads(
     // module or a `wasm32-wasip1` build), a truncated or corrupt artifact, and
     // a non-component wasm — uniformly, including for capabilities that have no
     // dedicated instantiate world below.
-    let _component = crate::component::load_component(component)?;
+    let compiled = crate::component::load_component(component)?;
+    let toolbox = crate::toolbox::component_exports_toolbox(&compiled);
 
     let services = validation_services();
     for capability in &manifest.capabilities {
@@ -52,11 +53,18 @@ pub async fn verify_component_loads(
                     PluginCapability::Tool,
                     manifest.permissions.iter().copied(),
                 )?;
-                // `create_plugin` compiles and instantiates, then returns —
-                // it never calls a guest export, so it is exactly the load-check.
-                crate::runtime::create_plugin(component, &scope, &services, limits)
-                    .await
-                    .map(|_plugin| ())?;
+                // Instantiation is the load-check. It does not call a guest
+                // export. A `toolbox` component is checked against that world;
+                // every other tool component stays on `tool-plugin`.
+                if toolbox {
+                    crate::toolbox::create_plugin(component, &scope, &services, limits, None)
+                        .await
+                        .map(|_guest| ())?;
+                } else {
+                    crate::runtime::create_plugin(component, &scope, &services, limits)
+                        .await
+                        .map(|_plugin| ())?;
+                }
             }
             PluginCapability::Channel => {
                 let scope = PluginInstanceScope::for_package_binding(

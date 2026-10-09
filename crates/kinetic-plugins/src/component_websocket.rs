@@ -912,6 +912,7 @@ macro_rules! into_wit_event {
 }
 
 impl_websocket_host!(tool);
+impl_websocket_host!(tools);
 impl_websocket_host!(channel);
 
 #[cfg(test)]

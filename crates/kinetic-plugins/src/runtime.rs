@@ -195,7 +195,7 @@ fn into_tool_result(result: WitToolResult) -> ToolResult {
 
 /// Merge the plugin's public resolved config under the reserved `__config` key,
 /// stripping any caller-supplied `__config` so the section cannot be spoofed.
-fn inject_config(args_json: &[u8], config: &serde_json::Value) -> Result<String> {
+pub(crate) fn inject_config(args_json: &[u8], config: &serde_json::Value) -> Result<String> {
     let mut args: serde_json::Value =
         serde_json::from_slice(args_json).context("plugin args are not valid JSON")?;
     let obj = args

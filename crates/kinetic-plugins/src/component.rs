@@ -183,6 +183,21 @@ pub mod bindings {
             },
         });
     }
+    pub mod tools {
+        wasmtime::component::bindgen!({
+            world: "tools-plugin",
+            path: "wit/v0",
+            imports: {
+                default: async,
+                "kinetic:plugin/websocket": async | trappable,
+            },
+            exports: { default: async },
+            with: {
+                "kinetic:plugin/sockets.connection": crate::sockets::SocketConnection,
+                "kinetic:plugin/websocket.connection": crate::component_websocket::WebSocketConnection,
+            },
+        });
+    }
     pub mod channel {
         wasmtime::component::bindgen!({
             world: "channel-plugin",

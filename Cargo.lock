@@ -5161,6 +5161,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kinetic-tools-plugin-fixture"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "wit-bindgen 0.51.0",
+]
+
+[[package]]
 name = "konst"
 version = "0.2.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1870,6 +1870,45 @@ fn claim_plugin_tool_name(
     registered_names.insert(plugin_name.to_string())
 }
 
+/// Claim every name from one package, or claim none of them.
+///
+/// A `toolbox` package that collides on any name is refused as a whole so the
+/// agent never sees half of its tools.
+#[cfg(feature = "plugins-wasm")]
+fn admit_listed_tools(
+    plugin: &str,
+    tools: Vec<kinetic_plugins::wasm_tool::WasmTool>,
+    registered_names: &mut std::collections::HashSet<String>,
+    tool_arcs: &mut Vec<Arc<dyn Tool>>,
+) -> usize {
+    if let Some(conflict) = tools
+        .iter()
+        .find(|tool| registered_names.contains(tool.name()))
+    {
+        ::kinetic_log::record!(
+            WARN,
+            ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Load)
+                .with_outcome(::kinetic_log::EventOutcome::Failure)
+                .with_attrs(::serde_json::json!({
+                    "plugin": plugin,
+                    "tool": conflict.name(),
+                    "error_key": "plugin_tool_name_conflict",
+                })),
+            "Plugin tool conflicts with an already registered tool"
+        );
+        return 0;
+    }
+    let mut registered = 0_usize;
+    for tool in tools {
+        if !claim_plugin_tool_name(registered_names, tool.name()) {
+            continue;
+        }
+        tool_arcs.push(Arc::new(tool));
+        registered += 1;
+    }
+    registered
+}
+
 /// Construct and register every tool-plugin instance the activation plan
 /// admitted.
 ///
@@ -1948,31 +1987,17 @@ fn register_plugin_tools(
             continue;
         }
 
-        let tool = kinetic_plugins::wasm_tool::WasmTool::from_wasm(
+        let tools = kinetic_plugins::wasm_tool::WasmTool::from_component(
             component.clone(),
             scope,
             services.clone(),
             plugin_limits,
             egress.clone(),
         );
-        match tool {
-            Ok(tool) => {
-                if !claim_plugin_tool_name(registered_names, tool.name()) {
-                    ::kinetic_log::record!(
-                        WARN,
-                        ::kinetic_log::Event::new(module_path!(), ::kinetic_log::Action::Load)
-                            .with_outcome(::kinetic_log::EventOutcome::Failure)
-                            .with_attrs(::serde_json::json!({
-                                "plugin": manifest.name,
-                                "tool": tool.name(),
-                                "error_key": "plugin_tool_name_conflict",
-                            })),
-                        "Plugin tool conflicts with an already registered tool"
-                    );
-                    continue;
-                }
-                tool_arcs.push(Arc::new(tool));
-                registered_count += 1;
+        match tools {
+            Ok(tools) => {
+                registered_count +=
+                    admit_listed_tools(&manifest.name, tools, registered_names, tool_arcs);
             }
             Err(e) => {
                 ::kinetic_log::record!(

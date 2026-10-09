@@ -312,6 +312,7 @@ macro_rules! impl_host {
 }
 
 impl_host!(tool);
+impl_host!(tools);
 impl_host!(channel);
 impl_host!(memory);
 
